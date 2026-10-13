@@ -1,0 +1,23 @@
+# 自定义 Agent preset 的 plugins 列表中的一个组片段。
+# 先把 dsh-fold-context 包安装到目标 profile，再替换原 compaction 组。
+# 不要与 compaction-basic 或 tool-result-pruner 同时挂载。
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: fold-context
+      name: dsh-fold-context
+      config:
+        compaction:
+          auto: true
+          thresholdRatio: 0.8
+          retainRatio: 0.16
+          headroomTokens: 65536
+        release:
+          protectRecentResults: 2
+          catalogLimit: 32
+    - id: command-compact
+      name: "@deepseek-ai/dsh-command-compact"
