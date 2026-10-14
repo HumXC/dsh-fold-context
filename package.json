@@ -1,28 +1,70 @@
 {
   "name": "dsh-fold-context",
   "version": "0.1.0",
-  "description": "Replayable numbered context release and official DSH summarization, with optional memory adapters",
+  "description": "Predictable context compression and recoverable evidence for DSH",
+  "packageManager": "pnpm@11.15.0",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
-  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" }, "./memory": { "types": "./lib/memory/contracts.d.ts", "default": "./lib/memory/contracts.js" }, "./package.json": "./package.json" },
-  "files": ["lib", "README.md", "docs", "examples"],
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "pnpm run build && node --test test/*.test.mjs" },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./memory": {
+      "types": "./lib/memory/contracts.d.ts",
+      "default": "./lib/memory/contracts.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "docs",
+    "examples",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.yaml\" \"examples/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.yaml\" \"examples/*.yml\"",
+    "prepack": "pnpm run build"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
     "@deepseek-ai/dsh-compaction": "0.2.0-rc.2",
     "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
     "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-query": "0.2.0-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
     "@deepseek-ai/dsh-token-meter": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
   },
-  "dependencies": { "@deepseek-ai/schemastery": "^3.18.2", "zod": "^4.4.3" },
-  "devDependencies": { "@deepseek-ai/dsh-invariants": "0.2.0-rc.2", "@types/node": "^22.18.0", "typescript": "^5.9.3" },
-  "engines": { "node": ">=24.11.0" },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-agent-loop": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment-local": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-fs-local": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-image-offload": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.2",
+    "@types/node": "^22.18.0",
+    "prettier": "3.9.10",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
   "license": "MIT"
 }

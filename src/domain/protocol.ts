@@ -1,37 +1,55 @@
 import type { ContentBlock, Message } from "@deepseek-ai/dsh-llm";
 
-/** Plain transport-independent protocol. Ordinals identify allocations, never event positions. */
+/** Ordinals identify allocations, never event positions. */
 export const RECEIPT_KEY = "dshContextCompression";
 export const RELEASE_TOOL = "context_release";
 export const COMPACT_TOOL = "context_compact";
 export const STATUS_TOOL = "context_status";
-export const CONTROL_TOOLS = new Set([RELEASE_TOOL, COMPACT_TOOL, STATUS_TOOL]);
+export const EXPAND_TOOL = "context_expand";
+export const SEARCH_TOOL = "context_search";
+export const CONTROL_TOOLS = new Set([
+    RELEASE_TOOL,
+    COMPACT_TOOL,
+    STATUS_TOOL,
+    EXPAND_TOOL,
+    SEARCH_TOOL,
+]);
 export type EntryStatus = "available" | "queued" | "released" | "summarized";
+export type EntryRole = "user" | "assistant" | "tool";
+export const ID_PATTERN = /^§[UATIF][1-9]\d*§$/;
 export interface ContextEntry {
     id: string;
+    role: EntryRole | "image" | "file";
+    ownerId?: string | null;
+    blockIndex?: number | null;
     sourceSeq: number;
     currentSeq: number | null;
     messageId: string;
-    callId: string;
-    tool: string;
+    callId: string | null;
+    tool: string | null;
     preview: string;
     status: EntryStatus;
     queuedAt: number | null;
     reason: string | null;
 }
 export interface Intent {
-    version: 2;
+    version: 4;
     kind: "release" | "summary";
     sessionId: string;
     ids: string[];
     reason: string;
 }
-export function entryId(number: number): string {
+export function entryId(role: EntryRole, number: number): string {
     if (!Number.isSafeInteger(number) || number < 1)
         throw new Error("fold-context: invalid allocation ordinal");
-    return `§${number}§`;
+    const type = { user: "U", assistant: "A", tool: "T" }[role];
+    return `§${type}${number}§`;
 }
-export function releaseContent(id: string): ContentBlock[] {
+export function legacyId(id: string): string {
+    return id.replace(/^§[UAT]/, "§");
+}
+/** Recognizes already committed legacy tool-body releases without creating new replacements. */
+export function releaseContent(id: string): { type: "text"; text: string }[] {
     return [
         {
             type: "text",
@@ -46,18 +64,6 @@ export function previewContent(content: readonly ContentBlock[], limit = 100): s
         .join(" ");
     return Array.from(text.replace(/\s+/g, " ").trim()).slice(0, limit).join("");
 }
-/** Retain the protocol shell: dropping a tool message would orphan its assistant tool call. */
-export function discardMarkedBodies(
-    messages: readonly Message[],
-    entries: readonly ContextEntry[],
-): Message[] {
-    const marked = new Map(
-        entries
-            .filter((entry) => entry.status === "queued" || entry.status === "released")
-            .map((entry) => [entry.messageId, entry.id]),
-    );
-    return messages.map((message) => {
-        const id = message.role === "tool" ? marked.get(message.id) : undefined;
-        return id === undefined ? message : { ...message, content: releaseContent(id) };
-    });
+export function hasReleasableBody(message: Message): boolean {
+    return message.role === "tool" || message.content.some((block) => block.type === "text");
 }

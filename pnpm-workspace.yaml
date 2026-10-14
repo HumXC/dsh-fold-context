@@ -1,0 +1,4 @@
+packages:
+  - "."
+allowBuilds:
+  koffi: false # Uses the published platform binary; no dependency build script.

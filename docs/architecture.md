@@ -1,91 +1,132 @@
 # 架构与状态协议
 
-## 目标和第一版边界
+## 目标与层次
 
-本插件负责预分配编号、模型释放意图、工具正文释放和摘要前过滤，摘要算法和持久替换事务继续复用官方 `BasicCompactionEngine`。记忆提炼由另一个可选适配服务负责；第一版尚未调用该服务。
-
-预测性来自明确的身份、意图与结果：模型选择编号，插件验证与排队，实际提交后才改变状态。模型不能把工具返回的 queued 解释为已删除。官方摘要仍按自己的历史前缀策略选区；它会覆盖没有单独标记的历史，工具说明明确披露这一点。
-
-## 分层
+模型选择稳定编号，插件记录释放意图，在临时摘要输入中排除可处理的内容；官方 compaction engine 生成摘要并替换整个原始选区。插件不单独改写用户、助手或工具正文，不引入 DSH 核心补丁。记忆提炼是独立适配契约，尚未自动调用。
 
 ```text
-模型工具 / PTC 子调用
-        │ 结果携带版本化意图回执
-        ▼
-Session 事件日志 ──► sessionProjections 中的纯 ledger 折叠
-                              │
-                    编号目录、保护、待处理意图
-                              ▼
-                     ContextCompressionEngine
-                         ├─ 工具正文释放：prune + surface replace
-                         └─ 官方历史摘要：过滤正文 → super.summarize()
-                              │
-                              ▼
-                  真正提交的官方事件再次驱动 ledger
-                              │
-                              ▼
-                  有界 runtime context / context_status
+模型工具 / PTC trace
+       │ 版本化意图回执
+       ▼
+Session 日志 ──► sessionProjections 纯 ledger
+       │                  │
+       └─ sessionQuery ──► 有界搜索与原文展开
+                          │
+官方选区 + 摘要开始截止位置 + 已排队编号
+                          ▼
+                纯 selectedExclusions（带模式）
+                    ├─ projectSummaryInput 历史数据
+                    │    └─ super.summarize() + 策略标记
+                    └─ 真实 checkpoint 时按持久策略重放回执
+                          ▼
+            checkpoint 真正提交 → 编号状态和有界目录
 
-未来的记忆适配：来源引用 + checkpoint → 独立提炼与保存回执
+可选记忆：来源引用 + checkpoint → 独立提炼与保存回执
 ```
 
-`src/domain` 不依赖 Cordis Service 生命周期。`src/integration` 负责官方服务、模型工具、步骤边界和日志提交。`src/memory` 不引用压缩引擎。
+`domain` 处理编号、纯选择、日志折叠和有界目录。`integration` 注册 Cordis 服务与模型工具，继承官方引擎。`memory` 不引用压缩引擎，也不把摘要成功解释为记忆保存成功。
 
-## 身份与事件折叠
+## 稳定身份与预分配
 
-身份使用独立 ordinal 生成 Magic Context 风格的 `§N§` 标记，从 1 开始，只增不减，不使用 seq 或数组位置取号。`numbering.ts` 记录 role、预留来源 reservationSeq、原始绑定 sourceSeq、当前 surface 位置 currentSeq、messageId、turn/step 和调用来源。seq 仅用于定位日志；重复 callId 必须结合 owning turn/step 与 callSeq 判断。surface 顺序由 Session 的节点数组确定，不能按 seq 数值排序。
+`§U17§`、`§A18§`、`§T19§`、`§I20§`、`§F21§` 共用正整数 ordinal；seq 只定位日志。U/A 控制普通 text，T 控制调用与结果，I/F 控制一条消息内某次附件出现。相同引用重复出现分别编号。surface 顺序由节点数组决定，不能按 seq 大小推断。
 
-主助手采用生成前声明：`allocation.ts` 在 `agent/pre-step` 中先 `await next()`，按返回的实际 accepted messages 计算普通输入的编号与下一助手编号，再末尾追加 source.kind=`fold-context-allocation`、form=`notice` 的 user-role 声明。保留原消息对象和 decision 的所有字段。声明不是 runtime snapshot，不会声称替代其他插件的上下文。空首步骤以及非空输入被其他中间件过滤为空的后续步骤保持空，不因声明制造额外模型调用；工具执行后原本无新输入的合法继续步骤仍可预留。
+[allocation.ts](../src/integration/allocation.ts) 在 `agent/pre-step` 先 `await next()`，按实际 accepted messages 追加一次 user-role notice。它在后续中间件与官方压缩完成后读取 ledger，因此第一条摘要后请求能收到新的提交回执。保留原消息对象和 decision 字段，不把声明当 runtime snapshot。空首步骤与被过滤为空的输入保持空，合法工具继续步骤仍能预留。
 
-计划本身纯粹且不占号。只有核心提交普通输入及声明的 `user/message` 后，投影才绑定输入并预留助手。声明的 assistantId 必须与提交到该位置时的 nextNumber 一致；若其他准入中间件改变它之前的输入序列，显式报错而不绑定错误编号。声明不得被复制、改写或重排到其声明输入之前。
+预览纯粹。只有声明被提交后才绑定输入并预留 A；同 turn/step 的 assistant/message 绑定它，assistant/attempt 不绑定。重试沿用预留，可见中断仍绑定。step/end、turn/end 或 session/end-seed 使未绑定编号 abandoned，永不复用。
 
-持久 `assistant/message` 按同 turn/step 绑定预留；`assistant/attempt` 不绑定，重试复用原预留。可见中断回复仍绑定；`step/end` 没有对应输出时将预留改为 abandoned。`turn/end`、`session/end-seed` 清理剩余孤立预留，号码永不复用。
+助手提交时，从 tool-call 块按模型顺序预留 T。在任何工具执行前已有编号；tool/call 记录 callSeq，tool/result 通过来源引用及 owning assistant/turn/step 绑定。重复 callId 不串号，结果不占第二个编号。PTC 内部分发不另占模型消息编号。控制工具仍有调用绑定，但不进入释放及恢复证据集合。
 
-助手提交时，纯投影从其中所有顶层 tool-call 块按模型顺序一次性预留工具结果编号，因此在任何工具执行前已有稳定分配。`tool/call` 记录 callSeq，`tool/result` 优先匹配其 sourceEventSeqs 的调用引用。官方恢复器为未开始调用生成的结果也能通过助手所属 turn/step 与 callId 绑定。PTC 内部分发没有独立模型结果，不另占编号。普通用户输入与助手也编号；系统、runtime context、摘要 checkpoint 和声明不编号。控制工具结果有预留与绑定，但不可释放。
+普通 slot 保存当前块类型、调用身份、reasoning 字符数和 replayState 标记；attachment slot 保存 ownerId、原始 sourceSeq/blockIndex、完整 ContentBlock，以及当前 seq/blockIndex。原始引用永不因 offload 或摘要变动。日志 image/offload 的 imageIndexes 是图片序号而非 content 下标，单独折叠到当前 summaryShape.offloaded；因此原图仍可恢复。
 
-导入的旧日志没有生成前声明，按持久事件顺序确定性建立历史编号，保留所有原文。这些历史助手条目的 declared=false，不能宣称当时模型已经知道其编号。释放替换保留同一编号并更新 currentSeq；完整摘要覆盖后编号成为 summarized。
+准入 version 3 先接纳实际输入及其附件，再预留 A。旧 version 1/2 重放不分配新 I/F，维持已有 ordinal；首次新声明才启用附件协议并接纳存量出现。助手及工具的新附件在消息提交时绑定，控制工具结果和附件恢复 notice 不重新建立证据编号。单节点同身份替换匹配完整引用、按出现顺序保留已有附件身份；新出现立刻建立条目，移除或 checkpoint 后保持 settled 状态，不能晚到地复活 available。
 
-工具的 `presentationMeta` 将经过验证的 version 2 意图写入真实 `tool/result` 元数据。ledger 只接收本插件版本、合法控制工具名对应的意图；普通工具输出中的类似文本不能触发释放。PTC 通过工具运行时的结构化 trace 传递控制回执；没有成为会话工具结果的子分发本身不会生成可释放编号。`§N§` 中的数字表示预分配序号，不再表示原始事件 seq；version 1 释放意图不会被解释成新版意图。
+释放意图保持 version 4，projection stateVersion 12。调度启用时新摘要请求使用 version 5，标记 retryable；禁用时仍写 version 4。旧声明和 version 2/3/4 意图保持历史解释，旧 version 4 failed 摘要请求不会因升级自动变成待重试。工具 prune 字节仅用于恢复旧日志。新版本不写 prune 或 assistant replacement，不需要核心补丁。
 
-ledger 注册在 `sessionProjections` 中，以 JSON 状态检查点和纯事件折叠恢复。它不把异步 `session/event` 观察者当作修改事务，不修改发给模型的临时 request 副本。
+## 排队、过滤与配对
 
-## 释放提交
+context_release 验证全部编号，去重；unknown 或已知 unsupported 使整批拒绝。回执真正写入日志后，available 成为 queued。工具返回 queued 不代表已经缩短上下文。
 
-1. 工具入口检查编号和理由，去重。未知编号列为 unknown；已知但不是可释放工具结果的编号列为 unsupported；两种情况均整批拒绝。
-2. 日志回执使 available 进入 queued。保护窗口中的编号同样可排队，但回执列为 deferred。
-3. 步骤边界按当前 surface 检查保护和活跃摘要锁。已不在 surface 的节点不能被错误替换。
-4. 生成保留身份和协议外壳的工具消息，只改变 content。若占位文本不能比原文更短，则继续 queued。
-5. 同步追加相邻 `compaction/prune` 与单节点 `tool/result` replacement，附原始节点引用。
-6. ledger 仅在真实 replacement 引用当前节点且正文精确匹配释放标记时，将其改为 released。
+官方引擎选择原始平衡连续范围。`summarize()` 取得该范围及官方可能保留的头部 system 输入，用 `projectSummaryInput(state, input.messages, startSeq, summaryPolicy)` 新建历史数据请求，再交给 `super.summarize()`。保留原有最前面的 system；后续历史各块编码为包含 id、role、blockIndex、type 的 JSON 记录，明确它们是证据而非新指令。
 
-占位文本可见，原始事件留在日志里。此处提供的是保留原文的释放，没有对日志做物理删除，也尚未提供模型恢复工具。
+文本和工具参数作为历史数据；原生 assistant/tool 消息、replayState、签名和 usage 不转发。工具结果保留 callId、isError，空结果或附件全被标记后仍保留 outcome 记录。未知块和含糊身份显式失败。
 
-## 摘要与恢复
+允许排除的条目必须同时满足：queued、queuedAt 严格小于 compaction/start.seq、当前节点属于选区、消息身份及调用配对仍成立。范围外或摘要开始后的标记不进入本次过滤。
 
-官方摘要收到保留消息协议结构的输入：queued/released 工具正文替换为释放标记，其余输入保持不变。摘要预算、工具配对、表面稳定性、缩短验证、模型选择、输出记录和生命周期事件由官方实现处理。
+U/A 只排除普通 text，不控制相邻附件或 tool-call。T 删除对应 owner 的调用记录和整个结果，要求两个节点都在选区且 callId 唯一。I/F 只过滤当前绑定的单次附件；其他相同引用和相邻文字仍在。范围外附件标记继续等待。整 T 排除同时记录其附件为 tool-pair-excluded；如果 I/F 同时标记且满足选区，则作为标记排除回执结算。
 
-`context_compact` 的意图在下一步骤边界使用官方强制选区路径，因此无需达到压力阈值。有足够的合法历史前缀才会提交；暂时没有选区时，请求保持 queued。主动摘要与压力摘要共用引擎。
+`summary.reasoning` 为 `preserve` 或默认 `omit-from-summary`。preserve 将助手 reasoning 按原文字节编码为普通历史记录，omit 仅在新摘要请求中省略并独立记录原始编号、sourceSeq/currentSeq、blockIndex 和 Unicode 码点数。原文和签名仍保留在日志。签名历史不作为原生回复转发，因此 transcript 模式不需要旧 native 模式的 replayState／仅剩 reasoning 保护；旧摘要重放仍使用旧规则。
 
-真正的 checkpoint replacement 才把被覆盖的工具条目改为 summarized，并确认已完成的主动请求。摘要失败以官方 end 事件中的 error 确认，不虚报 applied。
+`summary.images: auto` 解析与官方相同的实际摘要路由：会话 header 或 agent options → 精确 modelPolicies override → summary provider/model 默认值 → 会话路由。仅明确声明 image inputModalities 才传原生 ImageBlock；能力未知、文本模型、references 配置或 logged offload 均保留引用证据。FileBlock 由 DSH 转成确定性文件句柄，不代表模型读取了文件内容。
 
-中断后的 `session/end-seed` 是恢复或分叉边界。ledger 清除旧摘要锁，并将旧锁之前尚未确认的主动请求标记为 failed/interrupted，避免 auto:false 会话的释放队列冻结。独立编号也由完整日志重放恢复；孤立预留作废。投影 schema 当前 stateVersion 4。
+官方继续负责 tools、摘要指令、路由、stream、usage/rawOutput、取消、选区平衡、稳定性及缩短验证。summary 增加事务关联的 `[fold-context-projection:2 …]` 标记，保存 reasoning 与已选定 native/references 图像策略；version 1 历史标记仍沿用旧规则。标记计入缩短验证，不绕过官方提交。
 
-## 模型目录的预算
+## 真实提交与可重放回执
 
-编号绑定目录与可释放工具目录各默认返回最近 32 条，最高各 128 条；工具预览最多 100 个 Unicode 码点。两种目录各自记录省略计数。主动请求只显示最近 8 个；最近摘要覆盖的 IDs 同样服从 limit，包含 total/omitted。底层 ledger 保留完整身份和覆盖关系，`context_status(ids=[...])` 可以定位省略的用户/助手/工具绑定及最近摘要覆盖成员。
+ledger 与临时请求共用 selectedExclusions，模式和 reasoning 策略来自持久标记，不能根据当前配置重新解释历史。
 
-runtime context 的预览按引用数据描述，不应作为指令。自动保护按当前有效工具结果的表面位置判断，已释放条目不占保护窗口。
+1. compaction/start 保存 compactionId 和授权截止 seq。
+2. 匹配的 compaction/summary 验证首块策略标记；当前协议按 transcript 计算 excludedIds 和独立 projection 回执；无标记的历史摘要按旧 native 规则重放。无效标记或事务身份不符不能伪造处理回执。此时仍不结算 released。
+3. 立即相邻的 user/message checkpoint 必须匹配 compactionId，引用该 summary，实际移除的 surface 位置切片必须逐项等于 shadowedSeqs。
+4. 只有这个真实提交才将 pending excludedIds 设为 released，其他覆盖条目设为 summarized；范围外条目保持 queued。
+5. 最后 end 清理 pending 事务。session/end-seed 清理中断锁，旧主动摘要请求成为 failed/interrupted。
 
-## 记忆适配契约
+单独 summary 记录、checkpoint source 标记或某个引用不足以证明过滤已应用。失败／取消发生在 replacement 之前不改变原 surface 与标记；replacement 已提交后，即使 end 或 flush 随后失败，也不能倒置已发生的提交。
 
-`ContextMemoryAdapter` 是独立 Cordis Service，键为 `contextMemoryAdapter`，公开 `extract(batch, signal?)`。来源 batch 包含版本、sessionId、sourceSeqs、checkpoint 和 idempotencyKey；回执为 stored、duplicate、skipped 或 failed，包含 memoryIds/reason。
+released 表示该编号被排除于此次摘要输入，不保证别处没有相同内容。lastSummary.ids 是完整覆盖，excludedIds 是标记排除，projection.omittedReasoning 是独立 reasoning 策略，projection.attachments 是附件投影动作：native-image、reference-only、file-handle、marked-excluded、tool-pair-excluded。列表分别有界、有 omitted 计数，可按 ID 定位，完整回执由日志重建。
 
-未来接入需要在压缩提交之后建立独立任务：摘要成功不等于记忆写入成功，记忆失败也不能回滚或重新解释已提交的压缩。适配器必须遵守目标记忆插件的公开 API、权限和回执，不能直接编辑生成的记忆文件。第一版只定义这条边界。
+附件动作描述插件构造的摘要输入；native-image 表示转交原生图片投影，file-handle 表示转交句柄，均不是供应商已理解内容的证明。下游图片缩放与预算继续由 DSH adapter 管理。
 
-## 接入与验证范围
+## 代码调度、失败与安全路径
 
-Compaction Service 每个 Cordis scope 只能有一个实现。实际 preset 的隔离组需要替换官方 provider，并移除无编号决策的工具截断器；保留官方手动命令。插件拒绝同 scope 的 toolResultPruner。
+[调度器](../src/domain/scheduler.ts) 是纯选区建议和经济门槛；[引擎](../src/integration/engine.ts) 提供真实计量、路由、工具配对边界，并交由官方事务执行。候选选区按 surface 位置保持官方尾部保留语义，保留最前面的 system；缺少合法工具配对边界则不选。真正替换仍需通过官方选区、稳定性及缩短验证。
 
-事件提交并不等于磁盘落盘。官方 `session-checkpoint-policy` 在模型分发与顶层工具执行前 flush，只有它实际组成且 flush 成功时，才保证编号的持久来源先落盘。编号插件不在同步提示回调或事件观察者里追加日志；事件观察者内 append 重入本身被核心禁止。
+低压力下 `context_compact` 的显式模型请求与 queued-release backlog 共用门槛，context_release 仅提交排队意图。默认 `enabled: true`、`proactive: true`；backlog 需在候选范围内有实际可过滤的标记，显式请求不要求标记。默认需距最近摘要至少 8 个已提交助手步骤，净节省至少 2048 tokens、占当前总请求至少 0.2，预计在 8 个回合内回本。间隔从已提交 assistant slot 的 sourceSeq 推导，不是进程内调用次数。选区范围包含未标记历史，收益不能只算被标记条目。
 
-隔离测试挂载真实插件、官方 TokenMeter、SessionProjectionRegistry、ToolRuntime、SystemPrompt 和 compaction invariants。SessionStore 仅在内存中，LLM 是模拟流。新增测试直接经过公开准入 waterfall，并使用官方 interruptedTurnClosers 验证 started/unstarted 工具恢复。测试覆盖编号、日志与状态协议；真实模型摘要质量、缓存命中率、磁盘 checkpoint 故障、运行 profile 生命周期及 dsh-context Web 展示尚未通过此测试验证。
+所有成本标记 **HEURISTIC**，以归一化未缓存 token 为单位。`expectedSummaryRatio` 默认 0.2；`cacheReadRatio` 默认 0.1；`summaryInputRatio`、`summaryOutputRatio` 默认 1。令 S 为整个选区 token，I 为过滤后辅助摘要请求估算，P 为预计摘要 token，T 为保留尾部 token，H 为请求开销，r 为有效缓存读取比例，则主要估算为：
+
+```text
+P = ceil(I × expectedSummaryRatio)
+netSavingTokens = max(0, S − P)
+savingsRatio = netSavingTokens / currentTotalTokens
+rebuiltSuffixTokens = P + T + H
+initialRebuildPenalty = cachedPrefixAssumed ? rebuiltSuffixTokens × (1 − r) : 0
+summaryCost = I × summaryInputRatio + P × summaryOutputRatio
+perTurnSaving = netSavingTokens × r
+breakEvenTurns = ceil((initialRebuildPenalty + summaryCost) / perTurnSaving)
+```
+
+I 使用实际摘要投影的估算，包含保留 system、过滤后的历史、请求开销及 256 tokens 固定 framing 余量；P、成本和回本均是预测。每回合无正收益或无法表示有限回本时，breakEvenTurns 返回 null；当前请求 token 为 0 时 savingsRatio 为 0。最近 usage 未提供 cacheReadTokens 时保守假定前缀已缓存，使用配置 r；明确未缓存时 r 默认 1、无首次重建惩罚。路由签名只记录估算来源，既不证明后续供应商命中，也不推断 TTL 或真实费用。
+
+官方压力在经济/冷却检查前执行，实际 `context-overflow` 直接交回基础引擎；两条安全路径绕过经济门槛。用户 `/compact` 直接使用继承的 `compactNow`。内部基础引擎以 `auto: true` 保留官方溢出监听器，插件另记用户 `compaction.auto`：false 关闭普通压力与 backlog，仍允许实际溢出和显式模型请求。`proactive: false` 只关闭低压力 backlog；`enabled: false` 关闭经济调度，显式请求沿旧的强制摘要路径。
+
+失败的 version 5 摘要请求保留 retryable。最近一次摘要后的 `compaction/end` 错误与错误后已提交的助手 slot 推导冷却步数 `max(1, min(8, minIntervalSteps))`；新的 queued 释放或摘要意图可令剩余等待为 0。失败不创建额外重试事件或运行期重试计数器；恢复和 fork 继续依据各自日志。历史 version 4 failed 请求不参与自动重试。官方提交后，之前 queued 及 failed/retryable 请求才成为 applied。
+
+`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure 和 plan；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 active_compaction、no_route、invalid_capacity、invalid_retention、state_changed、failed_cooldown 等等待原因。查询只预览，不消耗稳定编号，不追加日志或修改 surface。摘要输入估算会创建临时消息 UUID，但没有声明提交就不分配编号。
+
+## 准入 ledger、目录与恢复
+
+不再注册自动完整 ledger 的 systemPrompt runtime 快照；静态策略仍提供工具用法。普通消息正文和前缀不变。有界 ledger 变化追加到已有 allocation version 3 notice：最多 `min(8, catalogLimit)` 条，优先交付已知行的语义变化，再交付其他发生变化的非 available 行和新的 available 行。变化依据来源、当前绑定、排队事件及最近摘要覆盖；指纹淘汰不构成新变化。指纹仅为状态与 pendingReason；已准入的 U/I/F 和新预留 A 已由同 notice 声明，不重复列为 ledger 行。lastSummary 水位变化单独报告有界覆盖与排除 ID，省略行显示 omitted 并留在 context_status 的按需目录，不在后续准入中反复广播。
+
+source 的 `ledgerView` version 1 只持久化最近交付的有界 `{id, fingerprint}` 和 `summaryWatermark`，不保存完整目录、正文预览或 token 计数。前视图只扫描当前 surface 末尾最多 64 个节点；最新 notice 缺少有效元数据、属于旧协议或未找到时发 bootstrap，不从更旧 notice 冒认最新视图。元数据与 notice 一同由核心提交，预览或准备失败不改变已交付水位。插件不单独删除旧 notice；官方 checkpoint 可以覆盖选区内的 notice，下一次准入按当前 surface 重新建立交付依据。
+
+ledger 的状态始终由会话日志投影重建；resume/fork 不依赖进程内通知缓存。完整目录在 `context_status` 按需查询，返回列表仍有界，省略项可按 ID 定位。编号和正文目录各默认 32、最高 128 条，预览最多 100 个 Unicode 码点。pendingReason 区分 awaiting_covering_summary、summary_in_progress、outside_selection、summary_failed 与 protocol_protection。目录包含当前 summaryPolicy；历史摘要 projection 保留当时的策略及独立省略统计。
+
+U/A/T 的 context_expand 经 sessionQuery.readEvent 读取 sourceSeq，单 text 原样返回，其他内容以可逆 JSON 返回；码点分页默认 4000、最高 16000。I/F 的 offset 必须是 0，逐项验证调用 agent 会话、sourceSeq、原角色、owner messageId、原始 blockIndex 与完整引用，调用方不能指定 ref、路径或 sessionId。
+
+I 要求当前会话路由明确支持 image，readImage 验证存储，纯 render 返回元数据和新的原生 ImageBlock，去除旧 offloaded 状态。F 完整流式消费 readFileStream、等待末尾完整性检查、验证字节数，fs 把 host path 映射到工具命名空间；无映射只报告已验证引用，不冒充可读宿主句柄。不得收集文件全量正文进内存。
+
+attachments 与 fs 是可选服务；缺失、未知图片能力或不可映射路径有明确状态，存储损坏和缺失成为工具错误。PTC image-rich 子调用由核心 auto-defer，文件子调用使用自有 notice defer 已验证结果；notice 不再编号。不能宣称完整 PTC runtime 已实测，当前测试覆盖公开 nested ToolRuntime 边界。
+
+context_search 用 observeSession immutable lease，只检索当前会话原始证据，字面匹配保留空白并排除控制参数与输出。默认 8、最多 20 个命中；每个命中最多列出 8 个 I/F。cursor 绑定会话、条件及首轮 throughSeq。租约由 finally 释放。无文本线索的附件按 owner 目录定位，不提供图片语义搜索或二进制全文搜索。
+
+查询不会把旧原文插回历史，恢复输出作为新工具结果进入上下文。原文保留依赖 DSH 日志和编号可重建；插件不另存数据库。
+
+## 可选记忆与接入
+
+ContextMemoryAdapter 服务的 extract(batch, signal?) 接收版本、sessionId、sourceSeqs、checkpoint、idempotencyKey；回执为 stored/duplicate/skipped/failed。未来调用必须独立安排提炼和保存，遵守目标记忆插件的 API 与授权，不能编辑生成的记忆文件或回滚已提交压缩。
+
+每个 Cordis scope 只有一个 compaction provider。替换实际 preset 隔离组中的官方 provider，移除盲截断 tool-result-pruner，保留 command-compact；恢复需要可见 sessionQuery。运行 profile 没有修改。
+
+Session 提交不等于磁盘成功。官方 session-checkpoint-policy 实际启用且 flush 成功时，才保证模型分发／工具执行前的来源先落盘。插件不在同步提示回调或事件观察者里追加日志。
+
+验证使用公开 RAM 服务、官方 AgentLoop、本地 mock adapter、真实 LocalAttachmentStore 和临时 JSONL。独立进程验证冷恢复与 fork，包括原始 I/F、二进制校验和子会话私有附件隔离；公共 imageOffloadProjection 验证实际 derived 图像与 live/cold 回执一致。路径检查后清理，避免当前实例。调度与准入 ledger 验证仍在进行，不在此声明最终通过数量。完整 PTC runtime、真实模型视觉理解、供应商缓存与实际节费、异常断电、运行 profile 与 dsh-context Web 尚未验证。

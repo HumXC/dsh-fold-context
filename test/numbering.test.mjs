@@ -165,15 +165,15 @@ test("a legitimate input-free continuation after tools still reserves the next a
     f.toolRound("read", "Tool evidence");
     const decision = await propose(f, [], 2);
     assert.equal(decision.messages.length, 1);
-    assert.equal(decision.messages[0].source.allocation.assistantId, "§4§");
+    assert.equal(decision.messages[0].source.allocation.assistantId, "§A4§");
     assert.deepEqual(decision.messages[0].source.allocation.inputs, []);
     assert.equal(f.engine.state(f.session).numbering.nextNumber, 4);
     commit(f, decision, 2);
-    assert.equal(slots(f).at(-1).id, "§4§");
+    assert.equal(slots(f).at(-1).id, "§A4§");
     assert.equal(slots(f).at(-1).status, "reserved");
 });
 
-test("accepted batch declares §N§ before generation without mutating input or history", async (t) => {
+test("accepted batch declares typed IDs before generation without mutating input or history", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const input = user("Original user body");
@@ -186,16 +186,16 @@ test("accepted batch declares §N§ before generation without mutating input or 
     assert.equal(first.messages[0], input);
     const declaration = first.messages.at(-1);
     assert.equal(declaration.source.kind, ALLOCATION_SOURCE);
-    assert.deepEqual(declaration.source.allocation.inputs, [{ messageId: input.id, id: "§1§" }]);
-    assert.equal(declaration.source.allocation.assistantId, "§2§");
-    assert.match(declaration.content[0].text, /next assistant message is reserved as §2§/);
-    assert.equal(preview.messages.at(-1).source.allocation.assistantId, "§2§");
+    assert.deepEqual(declaration.source.allocation.inputs, [{ messageId: input.id, id: "§U1§" }]);
+    assert.equal(declaration.source.allocation.assistantId, "§A2§");
+    assert.match(declaration.content[0].text, /next assistant message is reserved as §A2§/);
+    assert.equal(preview.messages.at(-1).source.allocation.assistantId, "§A2§");
     commit(f, first);
     assert.deepEqual(
         slots(f).map((slot) => [slot.id, slot.role, slot.status]),
         [
-            ["§1§", "user", "bound"],
-            ["§2§", "assistant", "reserved"],
+            ["§U1§", "user", "bound"],
+            ["§A2§", "assistant", "reserved"],
         ],
     );
     const result = appendAssistant(f, [{ type: "text", text: "Unmodified generated reply" }]);
@@ -230,7 +230,7 @@ test("rejected and empty initial steps consume no numbers and append no declarat
     assert.equal(f.engine.state(f.session).numbering.nextNumber, 1);
 });
 
-test("only ordinary admitted inputs consume §N§ before the assistant reservation", async (t) => {
+test("only ordinary admitted inputs consume typed IDs before the assistant reservation", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const snapshot = createUserMessage({
@@ -245,11 +245,11 @@ test("only ordinary admitted inputs consume §N§ before the assistant reservati
     const decision = await propose(f, messages);
     assert.deepEqual(decision.messages.slice(0, 3), messages);
     assert.equal(decision.messages[1], snapshot);
-    assert.equal(decision.messages.at(-1).source.allocation.assistantId, "§3§");
+    assert.equal(decision.messages.at(-1).source.allocation.assistantId, "§A3§");
     commit(f, decision);
     assert.deepEqual(
         slots(f).map((slot) => slot.id),
-        ["§1§", "§2§", "§3§"],
+        ["§U1§", "§U2§", "§A3§"],
     );
     assert.equal(
         slots(f).some((slot) => slot.messageId === snapshot.id),
@@ -257,7 +257,7 @@ test("only ordinary admitted inputs consume §N§ before the assistant reservati
     );
 });
 
-test("failed attempts retain the reservation and retry binds the same §N§ exactly once", async (t) => {
+test("failed attempts retain the reservation and retry binds the same typed ID exactly once", async (t) => {
     const f = await fixture();
     t.after(f.close);
     commit(f, await propose(f, [user("Retry test")]));
@@ -267,7 +267,7 @@ test("failed attempts retain the reservation and retry binds the same §N§ exac
     assert.equal(f.engine.state(f.session).numbering.nextNumber, 3);
     appendAssistant(f, [{ type: "text", text: "Succeeded after retries" }]);
     f.session.append("step/end", { turn: 1, step: 1 });
-    assert.equal(slots(f)[1].id, "§2§");
+    assert.equal(slots(f)[1].id, "§A2§");
     assert.equal(slots(f)[1].status, "bound");
     assert.equal(
         f.session
@@ -288,7 +288,7 @@ test("empty cancellation abandons the ID permanently; interrupted visible output
     f.session.append("step/end", { turn: 1, step: 1 });
     assert.equal(slots(f)[1].status, "abandoned");
     const next = await propose(f, [], 2);
-    assert.equal(next.messages.at(-1).source.allocation.assistantId, "§3§");
+    assert.equal(next.messages.at(-1).source.allocation.assistantId, "§A3§");
     commit(f, next, 2);
     appendAssistant(f, [{ type: "text", text: "Partial visible reply" }], 2, true);
     f.session.append("step/end", { turn: 1, step: 2 });
@@ -309,8 +309,8 @@ test("tool results are allocated in assistant call order before execution and bi
             .slice(2)
             .map((slot) => [slot.id, slot.callId, slot.status, slot.reservationSeq]),
         [
-            ["§3§", "alpha", "reserved", owner.seq],
-            ["§4§", "beta", "reserved", owner.seq],
+            ["§T3§", "alpha", "reserved", owner.seq],
+            ["§T4§", "beta", "reserved", owner.seq],
         ],
     );
     const alpha = f.session.append("tool/call", {
@@ -329,8 +329,8 @@ test("tool results are allocated in assistant call order before execution and bi
     });
     const b = appendResult(f, "beta", beta);
     const a = appendResult(f, "alpha", alpha);
-    assert.equal(f.idFor(a), "§3§");
-    assert.equal(f.idFor(b), "§4§");
+    assert.equal(f.idFor(a), "§T3§");
+    assert.equal(f.idFor(b), "§T4§");
     assert.deepEqual(
         slots(f)
             .slice(2)
@@ -339,17 +339,38 @@ test("tool results are allocated in assistant call order before execution and bi
     );
     assert.equal(f.engine.state(f.session).numbering.nextNumber, 5);
     f.session.append("step/end", { turn: 1, step: 1 });
-    await f.invoke("context_release", { ids: ["§3§"], reason: "Consumed" });
-    f.engine.flushReleases(f.agent);
+    await f.invoke("context_release", { ids: ["§T3§"], reason: "Consumed" });
+    assert.ok(await f.engine.compactNow(f.agent, signal()));
     assert.equal(
-        f.engine.state(f.session).entries.find((entry) => entry.id === "§3§").status,
+        f.engine.state(f.session).entries.find((entry) => entry.id === "§T3§").status,
         "released",
     );
     assert.equal(
-        slots(f).find((slot) => slot.id === "§3§").currentSeq,
-        f.engine.state(f.session).entries.find((entry) => entry.id === "§3§").currentSeq,
+        slots(f).find((slot) => slot.id === "§T3§").currentSeq,
+        f.engine.state(f.session).entries.find((entry) => entry.id === "§T3§").currentSeq,
     );
     assert.equal(f.session.eventAt(a.seq).data.message.content[0].text, "Result ".repeat(1000));
+    const records = f.calls[0].messages.flatMap((message) =>
+        message.content
+            .filter((block) => block.type === "text" && block.text.startsWith("{"))
+            .map((block) => JSON.parse(block.text)),
+    );
+    assert.equal(
+        records.some((record) => record.id === "§T3§"),
+        false,
+    );
+    assert.equal(
+        records.some((record) => record.id === "§T4§" && record.role === "tool"),
+        true,
+    );
+    assert.deepEqual(
+        records.filter((record) => record.type === "tool-call").map((record) => record.callId),
+        ["beta"],
+    );
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === "§T4§").status,
+        "summarized",
+    );
 });
 
 test("actual recovery closers bind both started and unstarted tool reservations without lifecycle hooks", async (t) => {
@@ -376,15 +397,17 @@ test("actual recovery closers bind both started and unstarted tool reservations 
     assert.deepEqual(
         restored.numbering.slots.slice(2).map((slot) => [slot.id, slot.callId, slot.status]),
         [
-            ["§3§", "started", "bound"],
-            ["§4§", "unstarted", "bound"],
+            ["§T3§", "started", "bound"],
+            ["§T4§", "unstarted", "bound"],
         ],
     );
     assert.deepEqual(
-        restored.entries.map((entry) => [entry.id, entry.tool]),
+        restored.entries
+            .filter((entry) => entry.role === "tool")
+            .map((entry) => [entry.id, entry.tool]),
         [
-            ["§3§", "read"],
-            ["§4§", "grep"],
+            ["§T3§", "read"],
+            ["§T4§", "grep"],
         ],
     );
     assert.deepEqual(
@@ -407,7 +430,7 @@ test("resume and fork abandon orphan assistant reservations without recycling or
     ]) {
         const recovered = Session.create(header.id, log, header, header.isSeeded ? log.length : 0);
         const numbering = f.engine.state(recovered).numbering;
-        assert.equal(numbering.slots[1].id, "§2§");
+        assert.equal(numbering.slots[1].id, "§A2§");
         assert.equal(numbering.slots[1].status, "abandoned");
         assert.equal(numbering.nextNumber, 3);
         assert.equal(
@@ -418,32 +441,49 @@ test("resume and fork abandon orphan assistant reservations without recycling or
                         event.data.source.kind === ALLOCATION_SOURCE,
                 ).seq,
             ).data.source.allocation.assistantId,
-            "§2§",
+            "§A2§",
         );
     }
     assert.equal(slots(f)[1].status, "reserved");
 });
 
-test("user/assistant/control IDs cannot release content and do not partially apply a mixed plan", async (t) => {
+test("user text is releasable while non-text assistant IDs reject the entire mixed plan", async (t) => {
     const f = await fixture();
     t.after(f.close);
-    const first = f.appendUser("Keep user input");
+    const first = f.appendUser("Consumed user input ".repeat(1000));
     const result = f.toolRound("read", "Evidence ".repeat(1000));
     const userId = f.idFor(first);
     const toolId = f.idFor(result);
-    const response = await f.invoke("context_release", {
-        ids: [userId, toolId],
-        reason: "Test unsupported target",
+    const protocolId = slots(f).find((slot) => slot.role === "assistant").id;
+    const rejected = await f.invoke("context_release", {
+        ids: [protocolId, toolId],
+        reason: "Unsupported protocol-only body",
     });
-    assert.equal(response.isError, false);
-    assert.equal(response.value.accepted, false);
-    assert.deepEqual(response.value.unsupported, [userId]);
-    assert.equal(f.engine.state(f.session).entries[0].status, "available");
+    assert.equal(rejected.isError, false);
+    assert.equal(rejected.value.accepted, false);
+    assert.deepEqual(rejected.value.unsupported, [protocolId]);
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === toolId).status,
+        "available",
+    );
     const status = await f.invoke("context_status", { ids: [userId] });
     assert.equal(status.value.numbers[0].role, "user");
-    assert.equal(status.value.numbers[0].releasable, false);
-    assert.equal(status.value.entries.length, 0);
-    for (const id of ["c42", "42", "§0§", "§01§", "§-1§", "§42"]) {
+    assert.equal(status.value.numbers[0].releasable, true);
+    assert.equal(status.value.entries.length, 1);
+    const accepted = await f.invoke("context_release", {
+        ids: [userId, toolId],
+        reason: "Consumed bodies",
+    });
+    assert.equal(accepted.value.accepted, true);
+    assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
+    assert.ok(await f.engine.compactNow(f.agent, signal()));
+    for (const id of [userId, toolId]) {
+        assert.equal(
+            f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+            "released",
+        );
+    }
+    for (const id of ["c42", "42", "§0§", "§01§", "§-1§", "§42", "§42§", "§T0§", "§A01§", "§X1§"]) {
         const invalid = await f.invoke("context_release", { ids: [id], reason: "Invalid marker" });
         assert.equal(invalid.isError, true);
     }

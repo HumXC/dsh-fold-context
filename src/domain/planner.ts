@@ -1,112 +1,174 @@
-import type { ContextEntry } from "./protocol.js";
 import type { LedgerState } from "./ledger.js";
+import { selectedExclusions } from "./exclusion.js";
+import { resolveSummaryPolicy, type SummaryPolicy } from "./summary-policy.js";
 
 export interface ReleasePolicy {
-    protectRecentResults: number;
     catalogLimit: number;
 }
-export const DEFAULT_RELEASE_POLICY: Readonly<ReleasePolicy> = Object.freeze({
-    protectRecentResults: 2,
-    catalogLimit: 32,
-});
+export const DEFAULT_RELEASE_POLICY: Readonly<ReleasePolicy> = Object.freeze({ catalogLimit: 32 });
 export function resolveReleasePolicy(config: Partial<ReleasePolicy> = {}): Readonly<ReleasePolicy> {
     const value = { ...DEFAULT_RELEASE_POLICY, ...config };
-    for (const [key, number] of Object.entries(value)) {
-        if (
-            !Number.isSafeInteger(number) ||
-            number < 0 ||
-            (key === "catalogLimit" && (number < 1 || number > 128))
-        ) {
-            throw new Error(`fold-context: invalid ${key}`);
-        }
-    }
+    if (
+        !Number.isSafeInteger(value.catalogLimit) ||
+        value.catalogLimit < 1 ||
+        value.catalogLimit > 128
+    )
+        throw new Error("fold-context: invalid catalogLimit");
     return Object.freeze(value);
 }
-export function protectedIds(state: LedgerState, count: number): Set<string> {
-    const bySeq = new Map(
-        state.entries
-            .filter((entry) => entry.currentSeq !== null && entry.status !== "released")
-            .map((entry) => [entry.currentSeq, entry.id]),
-    );
-    const active = state.surface.flatMap((seq) => {
-        const id = bySeq.get(seq);
-        return id === undefined ? [] : [id];
-    });
-    return new Set(count === 0 ? [] : active.slice(-count));
-}
-export function planRelease(state: LedgerState, ids: readonly string[], count: number) {
+export function planRelease(state: LedgerState, ids: readonly string[]) {
     const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
-    const protectedSet = protectedIds(state, count);
     const unique = [...new Set(ids)];
-    const known = new Set(state.numbering.slots.map((slot) => slot.id));
+    const known = new Set([
+        ...state.numbering.slots.map((slot) => slot.id),
+        ...state.numbering.attachments.map((slot) => slot.id),
+    ]);
     const unknown = unique.filter((id) => !known.has(id));
     const unsupported = unique.filter((id) => known.has(id) && !entries.has(id));
-    // Every target must be a releasable tool result; never apply a valid subset silently.
     if (unknown.length > 0 || unsupported.length > 0)
-        return {
-            accepted: false as const,
-            unknown,
-            unsupported,
-            queued: [],
-            deferred: [],
-            settled: [],
-        };
+        return { accepted: false as const, unknown, unsupported, queued: [], settled: [] };
     return {
         accepted: true as const,
         unknown,
         unsupported,
-        queued: unique.filter(
-            (id) => entries.get(id)?.status === "available" || entries.get(id)?.status === "queued",
-        ),
-        deferred: unique.filter(
-            (id) => protectedSet.has(id) && entries.get(id)?.status !== "released",
-        ),
+        queued: unique.filter((id) => ["available", "queued"].includes(entries.get(id)!.status)),
         settled: unique.filter((id) =>
             ["released", "summarized"].includes(entries.get(id)!.status),
         ),
     };
-}
-export function pendingRelease(state: LedgerState, count: number): ContextEntry[] {
-    const protectedSet = protectedIds(state, count);
-    return state.entries.filter(
-        (entry) =>
-            entry.status === "queued" && entry.currentSeq !== null && !protectedSet.has(entry.id),
-    );
 }
 export function catalog(
     state: LedgerState,
     policy: ReleasePolicy,
     limit = policy.catalogLimit,
     ids?: readonly string[],
+    summaryPolicy: SummaryPolicy = resolveSummaryPolicy(),
 ) {
     const targets =
         ids === undefined ? state.entries : state.entries.filter((entry) => ids.includes(entry.id));
-    const protectedSet = protectedIds(state, policy.protectRecentResults);
-    const entries = targets
-        .slice(-limit)
-        .map((entry) => ({ ...entry, protected: protectedSet.has(entry.id) }));
-    const summaryIds =
-        state.lastSummary?.ids
-            .filter((id) => ids === undefined || ids.includes(id))
-            .slice(-limit) ?? [];
+    const selectable = new Set(
+        selectedExclusions(
+            state,
+            new Set(state.surface),
+            Number.MAX_SAFE_INTEGER,
+            "transcript",
+        ).map((entry) => entry.id),
+    );
+    const entries = targets.slice(-limit).map((entry) => ({
+        ...entry,
+        pendingReason:
+            entry.status !== "queued"
+                ? null
+                : !selectable.has(entry.id)
+                  ? "protocol_protection"
+                  : state.activeStart !== null
+                    ? "summary_in_progress"
+                    : state.lastSummary !== null &&
+                        entry.queuedAt !== null &&
+                        entry.queuedAt < state.lastSummary.seq
+                      ? "outside_selection"
+                      : state.summaryRequests.at(-1)?.status === "failed"
+                        ? "summary_failed"
+                        : "awaiting_covering_summary",
+    }));
+    const matching = (values: readonly string[]) =>
+        values.filter((id) => ids === undefined || ids.includes(id));
+    const summaryIds = matching(state.lastSummary?.ids ?? []).slice(-limit);
+    const excludedIds = matching(state.lastSummary?.excludedIds ?? []).slice(-limit);
     const lastSummary =
         state.lastSummary === null
             ? null
             : {
-                  ...state.lastSummary,
+                  seq: state.lastSummary.seq,
                   ids: summaryIds,
                   total: state.lastSummary.ids.length,
                   omitted: state.lastSummary.ids.length - summaryIds.length,
+                  excludedIds,
+                  excludedTotal: state.lastSummary.excludedIds.length,
+                  excludedOmitted: state.lastSummary.excludedIds.length - excludedIds.length,
+                  projection:
+                      state.lastSummary.projection == null
+                          ? null
+                          : {
+                                version: state.lastSummary.projection.version,
+                                reasoning: state.lastSummary.projection.reasoning,
+                                images: state.lastSummary.projection.images ?? null,
+                                attachments: (state.lastSummary.projection.attachments ?? [])
+                                    .filter(
+                                        (item) =>
+                                            ids === undefined ||
+                                            ids.includes(item.id) ||
+                                            ids.includes(item.ownerId),
+                                    )
+                                    .slice(-limit),
+                                attachmentsTotal:
+                                    state.lastSummary.projection.attachments?.length ?? 0,
+                                attachmentsOmitted:
+                                    (state.lastSummary.projection.attachments?.length ?? 0) -
+                                    (state.lastSummary.projection.attachments
+                                        ?.filter(
+                                            (item) =>
+                                                ids === undefined ||
+                                                ids.includes(item.id) ||
+                                                ids.includes(item.ownerId),
+                                        )
+                                        .slice(-limit).length ?? 0),
+                                omittedReasoning: state.lastSummary.projection.omittedReasoning
+                                    .filter((item) => ids === undefined || ids.includes(item.id))
+                                    .slice(-limit),
+                                omittedReasoningTotal:
+                                    state.lastSummary.projection.omittedReasoning.length,
+                                omittedReasoningOmitted:
+                                    state.lastSummary.projection.omittedReasoning.length -
+                                    state.lastSummary.projection.omittedReasoning
+                                        .filter(
+                                            (item) => ids === undefined || ids.includes(item.id),
+                                        )
+                                        .slice(-limit).length,
+                                omittedReasoningCharacters:
+                                    state.lastSummary.projection.omittedReasoning.reduce(
+                                        (sum, item) => sum + item.characters,
+                                        0,
+                                    ),
+                            },
               };
     const numbered =
         ids === undefined
             ? state.numbering.slots
             : state.numbering.slots.filter((slot) => ids.includes(slot.id));
-    const numbers = numbered.slice(-limit).map((slot) => ({
+    const releasable = new Set(state.entries.map((entry) => entry.id));
+    const numbers = numbered.slice(-limit).map(({ summaryShape: _shape, ...slot }) => ({
         ...slot,
-        releasable: state.entries.some((entry) => entry.id === slot.id),
+        releasable: releasable.has(slot.id),
     }));
     return {
+        summaryPolicy,
+        attachments: state.numbering.attachments
+            .filter(
+                (item) => ids === undefined || ids.includes(item.id) || ids.includes(item.ownerId),
+            )
+            .slice(-limit)
+            .map(({ block, ...item }) => ({
+                ...item,
+                attachment: {
+                    attachmentId: block.attachment.attachmentId,
+                    name:
+                        block.attachment.name === undefined
+                            ? null
+                            : Array.from(block.attachment.name).slice(0, 128).join(""),
+                    bytes: block.attachment.bytes,
+                    mediaType: block.type === "image" ? block.attachment.mediaType : null,
+                    width: block.type === "image" ? block.attachment.width : null,
+                    height: block.type === "image" ? block.attachment.height : null,
+                },
+                releaseStatus: state.entries.find((entry) => entry.id === item.id)?.status ?? null,
+            })),
+        attachmentsOmitted: Math.max(
+            0,
+            state.numbering.attachments.filter(
+                (item) => ids === undefined || ids.includes(item.id) || ids.includes(item.ownerId),
+            ).length - limit,
+        ),
         numbers,
         numbersOmitted: Math.max(0, numbered.length - numbers.length),
         nextNumber: state.numbering.nextNumber,

@@ -12,12 +12,14 @@ import {
     createUserMessage,
 } from "@deepseek-ai/dsh-llm";
 import { apply as mountCompression } from "../lib/index.js";
+import { LocalSessionQuery } from "./query-fixture.mjs";
 
 /** Fresh Cordis world, RAM sessions and mock stream only: no network, storage backend, profile or Web. */
 export async function fixture(options = {}) {
     const ctx = new Context();
     const sessions = new SessionStore(ctx);
     new SessionProjectionRegistry(ctx);
+    const query = new LocalSessionQuery(ctx);
     const meter = new TokenMeter(ctx);
     const calls = [];
     const llm = {
@@ -27,6 +29,9 @@ export async function fixture(options = {}) {
         },
         resolveModelInfo: async () => ({
             context: { contextWindow: 131072 },
+            ...(options.inputModalities === null
+                ? {}
+                : { inputModalities: options.inputModalities ?? ["text", "image"] }),
             defaultMaxTokens: 1024,
         }),
         async *stream(input) {
@@ -54,8 +59,13 @@ export async function fixture(options = {}) {
     new SystemPrompt(ctx, {});
     new ToolRuntime(ctx);
     mountCompression(ctx, {
-        compaction: { auto: false, headroomTokens: 0, maxTokens: 1024 },
-        release: { protectRecentResults: options.protect ?? 0 },
+        compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
+        release: { catalogLimit: 32 },
+        scheduling: options.scheduling ?? { enabled: false },
+        summary: {
+            reasoning: options.reasoning ?? "omit-from-summary",
+            images: options.images ?? "auto",
+        },
     });
     const engine = ctx.compaction;
     const session = sessions.create();
@@ -172,6 +182,7 @@ export async function fixture(options = {}) {
         session,
         agent,
         meter,
+        query,
         calls,
         llm,
         appendUser,

@@ -8,6 +8,9 @@ import {
     RELEASE_TOOL,
     previewContent,
     releaseContent,
+    hasReleasableBody,
+    legacyId,
+    ID_PATTERN,
 } from "./protocol.js";
 import {
     foldNumbering,
@@ -15,30 +18,81 @@ import {
     numberingSchema,
     replaceNumberedSurface,
 } from "./numbering.js";
+import { selectedExclusions } from "./exclusion.js";
+import { projectionReceipt } from "./summary-projection.js";
+import { readProjectionStamp } from "./summary-policy.js";
+
+const receiptSchema = z.object({
+    version: z.union([z.literal(1), z.literal(2)]),
+    reasoning: z.enum(["preserve", "omit-from-summary"]),
+    images: z.enum(["native", "references"]).optional(),
+    attachments: z
+        .array(
+            z.object({
+                id: z.string(),
+                ownerId: z.string(),
+                sourceSeq: z.number().int().nonnegative(),
+                currentSeq: z.number().int().nonnegative(),
+                blockIndex: z.number().int().nonnegative(),
+                kind: z.enum(["image", "file"]),
+                bytes: z.number().int().nonnegative(),
+                action: z.enum([
+                    "native-image",
+                    "file-handle",
+                    "reference-only",
+                    "marked-excluded",
+                    "tool-pair-excluded",
+                ]),
+            }),
+        )
+        .optional(),
+    omittedReasoning: z.array(
+        z.object({
+            id: z.string(),
+            sourceSeq: z.number().int().nonnegative(),
+            currentSeq: z.number().int().nonnegative(),
+            blockIndex: z.number().int().nonnegative(),
+            characters: z.number().int().nonnegative(),
+        }),
+    ),
+});
 
 const entrySchema = z.object({
-    id: z.string(),
+    id: z.string().regex(ID_PATTERN),
+    role: z.enum(["user", "assistant", "tool", "image", "file"]),
+    ownerId: z.string().nullable().default(null),
+    blockIndex: z.number().int().nonnegative().nullable().default(null),
     sourceSeq: z.number().int().nonnegative(),
     currentSeq: z.number().int().nonnegative().nullable(),
     messageId: z.string(),
-    callId: z.string(),
-    tool: z.string(),
+    callId: z.string().nullable(),
+    tool: z.string().nullable(),
     preview: z.string(),
     status: z.enum(["available", "queued", "released", "summarized"]),
     queuedAt: z.number().int().nonnegative().nullable(),
     reason: z.string().nullable(),
 });
 export const intentSchema = z.object({
-    version: z.literal(2),
+    version: z.literal(4),
     kind: z.enum(["release", "summary"]),
     sessionId: z.string(),
-    ids: z.array(z.string().regex(/^§[1-9]\d*§$/)).max(128),
+    ids: z.array(z.string().regex(ID_PATTERN)).max(128),
     reason: z.string().max(1000),
 });
+const storedIntentSchema = z.union([
+    intentSchema,
+    intentSchema.extend({ version: z.literal(5) }),
+    intentSchema.extend({ version: z.literal(3) }),
+    intentSchema.extend({
+        version: z.literal(2),
+        ids: z.array(z.string().regex(/^§[1-9]\d*§$/)).max(128),
+    }),
+]);
 const summaryRequestSchema = z.object({
     seq: z.number().int().nonnegative(),
     status: z.enum(["queued", "applied", "failed"]),
     error: z.string().nullable(),
+    retryable: z.boolean().default(false),
 });
 export const ledgerSchema = z.object({
     entries: z.array(entrySchema),
@@ -46,18 +100,36 @@ export const ledgerSchema = z.object({
     surface: z.array(z.number().int().nonnegative()),
     summaryRequests: z.array(summaryRequestSchema),
     activeStart: z.number().int().nonnegative().nullable(),
+    activeCompactionId: z.string().nullable(),
+    pendingSummary: z
+        .object({
+            seq: z.number().int().nonnegative(),
+            compactionId: z.string(),
+            shadowedSeqs: z.array(z.number().int().nonnegative()),
+            excludedIds: z.array(z.string()),
+            projection: receiptSchema.nullable(),
+        })
+        .nullable(),
     lastSummary: z
-        .object({ seq: z.number().int().nonnegative(), ids: z.array(z.string()) })
+        .object({
+            seq: z.number().int().nonnegative(),
+            ids: z.array(z.string()),
+            excludedIds: z.array(z.string()),
+            projection: receiptSchema.nullable(),
+        })
         .nullable(),
 });
 export type LedgerState = z.infer<typeof ledgerSchema>;
+export function isOutstandingSummaryRequest(
+    request: LedgerState["summaryRequests"][number],
+): boolean {
+    return request.status === "queued" || (request.status === "failed" && request.retryable);
+}
 declare module "@deepseek-ai/dsh-session-projection/types" {
     interface SessionProjectionStateMap {
         contextCompression: LedgerState;
     }
 }
-
-/** Receipt data comes only from a successful control tool event, never arbitrary conversation text. */
 function readIntent(event: SessionEvent, name: string) {
     if (name !== RELEASE_TOOL && name !== COMPACT_TOOL) return null;
     if (event.type !== "tool/result" && event.type !== "tool/ptc-dispatch") return null;
@@ -66,23 +138,53 @@ function readIntent(event: SessionEvent, name: string) {
     if (value === undefined) {
         const blocks =
             event.type === "tool/result" ? event.data.message.content : event.data.content;
-        const text = blocks
-            .filter((block) => block.type === "text")
-            .map((block) => block.text)
-            .join("");
         try {
-            value = JSON.parse(text);
+            value = JSON.parse(
+                blocks
+                    .filter((block) => block.type === "text")
+                    .map((block) => block.text)
+                    .join(""),
+            );
         } catch {
             return null;
         }
     }
     if (value === null || typeof value !== "object" || !(RECEIPT_KEY in value)) return null;
-    const parsed = intentSchema.safeParse(value[RECEIPT_KEY]);
+    const parsed = storedIntentSchema.safeParse(value[RECEIPT_KEY]);
     return parsed.success ? parsed.data : null;
+}
+function withAttachmentEntries(state: LedgerState): LedgerState {
+    const known = new Set(state.entries.map((entry) => entry.id));
+    const owners = new Map(state.numbering.slots.map((slot) => [slot.id, slot]));
+    const attachments = state.numbering.attachments
+        .filter((item) => !known.has(item.id))
+        .map((item) => {
+            const owner = owners.get(item.ownerId);
+            if (owner?.messageId == null)
+                throw new Error("fold-context: attachment owner is missing");
+            return {
+                id: item.id,
+                role: item.kind,
+                ownerId: item.ownerId,
+                blockIndex: item.blockIndex,
+                sourceSeq: item.sourceSeq,
+                currentSeq: item.currentSeq,
+                messageId: owner.messageId,
+                callId: owner.callId,
+                tool: owner.tool,
+                preview: `${item.block.attachment.name ?? item.kind} (${item.block.attachment.bytes} bytes)`,
+                status: item.currentSeq === null ? ("summarized" as const) : ("available" as const),
+                queuedAt: null,
+                reason: null,
+            };
+        });
+    return attachments.length === 0
+        ? state
+        : { ...state, entries: [...state.entries, ...attachments] };
 }
 export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     key: "contextCompression",
-    stateVersion: 4,
+    stateVersion: 12,
     stateSchema: ledgerSchema,
     init: () => ({
         entries: [],
@@ -90,16 +192,20 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
         surface: [],
         summaryRequests: [],
         activeStart: null,
+        activeCompactionId: null,
+        pendingSummary: null,
         lastSummary: null,
     }),
     apply(state, event) {
         const numbering = foldNumbering(state.numbering, event);
-        if (numbering !== state.numbering) state = { ...state, numbering };
+        if (numbering !== state.numbering) state = withAttachmentEntries({ ...state, numbering });
         if (event.type === "session/end-seed" && state.activeStart !== null) {
             const abandonedStart = state.activeStart;
             return {
                 ...state,
                 activeStart: null,
+                activeCompactionId: null,
+                pendingSummary: null,
                 summaryRequests: state.summaryRequests.map((request) =>
                     request.status === "queued" && request.seq < abandonedStart
                         ? {
@@ -111,12 +217,51 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 ),
             };
         }
-        if (event.type === "compaction/start") return { ...state, activeStart: event.seq };
+        if (event.type === "compaction/start")
+            return {
+                ...state,
+                activeStart: event.seq,
+                activeCompactionId: event.data.compactionId,
+                pendingSummary: null,
+            };
+        if (event.type === "compaction/summary") {
+            if (state.activeStart === null || state.activeCompactionId !== event.data.compactionId)
+                return state;
+            const selected = new Set(event.data.shadowedSeqs);
+            const first = event.data.summary[0];
+            const policy = readProjectionStamp(
+                first?.type === "text" ? first.text : undefined,
+                event.data.compactionId,
+            );
+            const excludedIds =
+                policy === null
+                    ? []
+                    : selectedExclusions(
+                          state,
+                          selected,
+                          state.activeStart,
+                          policy === undefined ? "native" : "transcript",
+                      ).map((entry) => entry.id);
+            const projection = policy == null ? null : projectionReceipt(state, selected, policy);
+            return {
+                ...state,
+                pendingSummary: {
+                    seq: event.seq,
+                    compactionId: event.data.compactionId,
+                    shadowedSeqs: [...event.data.shadowedSeqs],
+                    excludedIds,
+                    projection,
+                },
+            };
+        }
         if (event.type === "compaction/end") {
+            if (event.data.compactionId !== state.activeCompactionId) return state;
             const start = state.activeStart;
             return {
                 ...state,
                 activeStart: null,
+                activeCompactionId: null,
+                pendingSummary: null,
                 summaryRequests:
                     event.data.error === undefined || start === null
                         ? state.summaryRequests
@@ -141,8 +286,8 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
         let surface: number[];
         if (op === "append") surface = [...state.surface, event.seq];
         else {
-            const start = state.surface.indexOf(op.startSeq);
-            const end = state.surface.indexOf(op.endSeq);
+            const start = state.surface.indexOf(op.startSeq),
+                end = state.surface.indexOf(op.endSeq);
             if (start < 0 || end < start)
                 throw new Error("fold-context: replacement span missing during replay");
             removed = state.surface.slice(start, end + 1);
@@ -152,67 +297,124 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 ...state.surface.slice(end + 1),
             ];
         }
+        const updatedNumbering = replaceNumberedSurface(state.numbering, event, removed);
         const removedSet = new Set(removed);
         const affected = state.entries.filter(
             (entry) => entry.currentSeq !== null && removedSet.has(entry.currentSeq),
         );
+        const checkpoint =
+            op !== "append" &&
+            event.type === "user/message" &&
+            event.data.source.kind === "compact-checkpoint";
+        const pending = state.pendingSummary;
+        const confirmed =
+            checkpoint &&
+            state.activeStart !== null &&
+            pending !== null &&
+            event.type === "user/message" &&
+            event.data.source.kind === "compact-checkpoint" &&
+            event.data.source.compactionId === state.activeCompactionId &&
+            pending.compactionId === state.activeCompactionId &&
+            event.seq === pending.seq + 1 &&
+            event.sourceEventSeqs?.some((seq) => seq === pending.seq) &&
+            removed.length === pending.shadowedSeqs.length &&
+            removed.every((seq, index) => seq === pending.shadowedSeqs[index]);
+        const committedExclusions = confirmed ? new Set(pending.excludedIds) : new Set<string>();
+        const message =
+            event.type === "user/message"
+                ? event.data
+                : event.type === "assistant/message" || event.type === "tool/result"
+                  ? event.data.message
+                  : null;
         let entries = state.entries.map((entry) => {
             if (entry.currentSeq === null || !removedSet.has(entry.currentSeq)) return entry;
-            if (event.type === "tool/result" && affected.length === 1) {
-                const content = event.data.message.content;
-                const marker = releaseContent(entry.id)[0];
+            if (!checkpoint && (entry.role === "image" || entry.role === "file")) {
+                const attachment = updatedNumbering.attachments.find(
+                    (item) => item.id === entry.id,
+                );
+                if (attachment?.currentSeq != null)
+                    return { ...entry, currentSeq: attachment.currentSeq };
+            }
+            if (
+                !checkpoint &&
+                affected.filter((item) => item.role !== "image" && item.role !== "file").length ===
+                    1 &&
+                message?.role === entry.role &&
+                message.id === entry.messageId
+            ) {
                 const released =
                     entry.status === "queued" &&
-                    content.length === 1 &&
-                    content[0]?.type === "text" &&
-                    marker?.type === "text" &&
-                    content[0].text === marker.text &&
-                    event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) === true;
+                    event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) &&
+                    [entry.id, legacyId(entry.id)].some((id) =>
+                        message.content.some(
+                            (block) =>
+                                block.type === "text" && block.text === releaseContent(id)[0]?.text,
+                        ),
+                    );
                 return {
                     ...entry,
                     currentSeq: event.seq,
-                    messageId: event.data.message.id,
                     status: released ? ("released" as const) : entry.status,
-                    preview: released ? "" : previewContent(event.data.message.content),
+                    preview: released ? "" : previewContent(message.content),
                 };
             }
-            return { ...entry, currentSeq: null, status: "summarized" as const, preview: "" };
+            return {
+                ...entry,
+                currentSeq: null,
+                status: committedExclusions.has(entry.id)
+                    ? ("released" as const)
+                    : ("summarized" as const),
+                preview: "",
+            };
         });
-        const checkpoint =
-            event.type === "user/message" && event.data.source.kind === "compact-checkpoint";
         let next: LedgerState = {
             ...state,
             surface,
-            numbering: replaceNumberedSurface(state.numbering, event, removed),
+            numbering: updatedNumbering,
             entries,
-            lastSummary: checkpoint
-                ? { seq: event.seq, ids: affected.map((entry) => entry.id) }
+            lastSummary: confirmed
+                ? {
+                      seq: event.seq,
+                      ids: affected.map((entry) => entry.id),
+                      projection: pending.projection,
+                      excludedIds: affected
+                          .filter((entry) => committedExclusions.has(entry.id))
+                          .map((entry) => entry.id),
+                  }
                 : state.lastSummary,
             summaryRequests:
-                checkpoint && state.activeStart !== null
+                confirmed && state.activeStart !== null
                     ? state.summaryRequests.map((request) =>
-                          request.status === "queued" && request.seq < state.activeStart!
+                          (request.status === "queued" ||
+                              (request.status === "failed" && request.retryable)) &&
+                          request.seq < state.activeStart!
                               ? { ...request, status: "applied" as const, error: null }
                               : request,
                       )
                     : state.summaryRequests,
         };
-        if (event.type === "tool/result" && op === "append") {
-            const callId = event.data.message.source.callId;
+        next = withAttachmentEntries(next);
+        entries = next.entries;
+        if (message !== null && op === "append") {
             const binding = state.numbering.slots.find((slot) => slot.sourceSeq === event.seq);
-            if (binding === undefined) throw new Error("fold-context: result binding missing");
-            const name = binding.tool ?? "unknown";
-            if (!CONTROL_TOOLS.has(name)) {
+            if (
+                binding !== undefined &&
+                !CONTROL_TOOLS.has(binding.tool ?? "") &&
+                hasReleasableBody(message)
+            ) {
                 entries = [
                     ...entries,
                     {
                         id: binding.id,
+                        ownerId: null,
+                        blockIndex: null,
+                        role: binding.role,
                         sourceSeq: event.seq,
                         currentSeq: event.seq,
-                        messageId: event.data.message.id,
-                        callId,
-                        tool: name,
-                        preview: previewContent(event.data.message.content),
+                        messageId: message.id,
+                        callId: binding.callId,
+                        tool: binding.tool,
+                        preview: previewContent(message.content),
                         status: "available",
                         queuedAt: null,
                         reason: null,
@@ -220,23 +422,41 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 ];
                 next = { ...next, entries };
             }
-            const intent = readIntent(event, name);
-            if (intent !== null) next = applyIntent(next, intent, event.seq);
+            if (event.type === "tool/result") {
+                const intent = readIntent(event, binding?.tool ?? "unknown");
+                if (intent !== null) next = applyIntent(next, intent, event.seq);
+            }
         }
         return next;
     },
 };
 function applyIntent(
     state: LedgerState,
-    intent: z.infer<typeof intentSchema>,
+    intent: z.infer<typeof storedIntentSchema>,
     seq: number,
 ): LedgerState {
     if (intent.kind === "summary")
         return {
             ...state,
-            summaryRequests: [...state.summaryRequests, { seq, status: "queued", error: null }],
+            summaryRequests: [
+                ...state.summaryRequests,
+                {
+                    seq,
+                    status: "queued",
+                    error: null,
+                    retryable: intent.version === 5,
+                },
+            ],
         };
-    const marked = new Set(intent.ids);
+    const marked = new Set(
+        intent.version !== 2
+            ? intent.ids
+            : intent.ids.flatMap((id) =>
+                  state.numbering.slots
+                      .filter((slot) => legacyId(slot.id) === id && slot.role === "tool")
+                      .map((slot) => slot.id),
+              ),
+    );
     return {
         ...state,
         entries: state.entries.map((entry) =>

@@ -1,55 +1,131 @@
 # dsh-fold-context
 
-压缩优先的 DSH 插件。模型通过稳定编号标记已经用完的工具结果；插件在步骤边界执行释放，并在摘要前移除已标记的工具正文，然后直接调用 DSH 官方摘要和提交实现。
+让 DSH 的长任务上下文压缩更可预测：模型标记已经用完的信息，插件选择合适时机生成摘要，并明确报告哪些内容被排除、哪些内容被摘要覆盖。需要时，可以重新找回原始文字、工具结果、图片和文件。
 
-目前为第一版 `0.1.0`，锁定 DSH `0.2.0-rc.2` 的公开契约。工程已创建在工作区，尚未安装到运行 profile。
+适合需要持续阅读文件、调用工具、反复调查和跨多轮推进的任务。压缩以 DSH 官方摘要事务为基础，记忆提炼采用独立适配接口。
 
-## 模型可以做什么
+> 当前版本为 `0.1.0`，支持 DSH `0.2.0-rc.2`。压缩、编号、恢复和调度已有隔离测试；真实模型的摘要质量、缓存命中和节费效果仍需实际评估。记忆适配接口已经提供，自动提炼与 Mnemon 集成尚未实现。
 
-| 工具 | 行为 |
+## 能做什么
+
+- **明确的内容身份**：用户文字、助手文字、工具调用与结果、图片、文件分别有稳定编号。模型不用在正文中手工打印编号。
+- **有回执的压缩**：标记成功表示已排队；只有摘要真正提交后，才报告实际排除和覆盖结果。
+- **代码决定时机**：低压力下按间隔、预计缩短量和回本门槛批量处理，压力或溢出时优先保证任务能继续。
+- **可恢复的原始证据**：按编号展开原文，或先搜索历史再恢复。图片会校验后重新传入，文件会校验后提供读取句柄。
+- **轻量的状态通知**：日常只追加有界变化，完整目录通过工具按需查询。
+
+## 安装与启用
+
+### 1. 构建插件
+
+需要 Node.js **24.11.0 或更高版本**、pnpm **11.15.0**，以及 DSH **0.2.0-rc.2**。在仓库根目录执行：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+```
+
+如需分发安装包，可在构建后执行 `pnpm pack`；打包时也会自动构建。源码仓库保留锁文件，依赖目录和构建产物不进入 Git，安装包包含运行所需的 `lib/`。
+
+### 2. 安装到目标 DSH profile
+
+通过 DSH 的插件管理功能安装构建后的本地目录，或让 DSH 助手调用 `plugin_manager`，以插件目录的绝对路径作为 `install_bundle` 的 `target`。
+
+安装包后，还需要配置实际使用的 Agent preset。单独在根层挂载插件，不能覆盖 preset 内已经隔离的压缩服务。
+
+### 3. 替换 preset 的压缩组
+
+将 preset 原来的 compaction 组替换为下面的组片段。保留其余 preset 配置。
+
+```yaml
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: fold-context
+      name: dsh-fold-context
+      config:
+        compaction:
+          auto: true
+        scheduling:
+          enabled: true
+          proactive: true
+    - id: command-compact
+      name: "@deepseek-ai/dsh-command-compact"
+```
+
+这是插件列表中的组片段，不是完整 preset。不要在同一压缩 scope 同时启用 `compaction-basic` 或 `tool-result-pruner`。完整选项见[配置示例](./examples/compaction-group.fragment.yml)。
+
+原文恢复需要 `sessionQuery` 服务；图片和文件恢复还需要可见的附件存储，文件句柄需要文件系统路径映射。持久恢复依赖 DSH 会话日志正常保留，以及官方 `session-checkpoint-policy` 成功落盘。
+
+## 日常使用
+
+启用后，模型会收到使用规则和编号声明。通常无需人工管理编号；你可以要求模型在阶段结束后标记已用完的证据，查看待处理内容，或恢复之前的结果。
+
+| 工具 | 用途 |
 | --- | --- |
-| `context_release` | 传入当前会话的 `§N§` 工具结果编号和理由，标记工具正文可以释放。返回 queued、deferred、settled、unknown 和 unsupported；未知或不可释放编号会使整批拒绝。 |
-| `context_compact` | 请求下一步骤边界执行官方历史摘要，不必等到压力阈值。请求排队，实际结果由 ledger 确认。 |
-| `context_status` | 查看预留编号及 reserved/bound/abandoned/summarized 绑定状态，以及工具结果的短预览、保护、释放状态、摘要请求与最近摘要覆盖。可按编号查询省略项。 |
+| `context_release` | 标记未来摘要时可排除的内容；返回排队或已结算状态。 |
+| `context_compact` | 请求在后续步骤边界生成摘要；低压力下可能等待调度条件。 |
+| `context_status` | 查看编号、状态、摘要回执，以及当前计划或等待原因。 |
+| `context_search` | 按原文片段、角色或工具名查找当前会话历史。 |
+| `context_expand` | 根据编号分页恢复原文，或恢复已校验的图片、文件句柄。 |
 
-编号使用 Magic Context 风格的 `§1§、§2§…` 标记，其中数字是独立、会话内递增的分配序号，与事件 seq 无关。步骤准入时，在原输入末尾追加声明：例如普通输入绑定 `§1§`，下一条助手回复预留 `§2§`。声明实际提交到日志后才占号；预览、拒绝或准备请求前失败不会消耗编号。助手提交后绑定 `§2§`，同一生成步骤的重试沿用该编号。取消而没有可见输出时编号成为 abandoned，永不回收。
+例如，模型可以调用：
 
-助手提交的 tool-call 列表按模型顺序预留后续工具结果编号，再按调用来源绑定实际结果。这覆盖并发、跳过和崩溃恢复，不依赖工具执行钩子。普通用户输入和助手回复也有编号，但第一版只允许释放工具结果；系统、runtime context、摘要 checkpoint 与编号声明不参与编号。控制工具结果有绑定记录，但不进入可释放目录。
+```json
+{"ids": ["§T19§", "§I20§"], "reason": "调查已完成，结论已经保留"}
+```
 
-编号声明通过公开 `agent/pre-step` 输入通道提交；编号与绑定由纯事件投影重放。历史正文不插入前缀、不重新编号，释放替换保持原编号。声明会增加少量输入，本插件没有实现缓存断点或调度，也没有验证实际缓存命中率。释放意图协议为 version 2。
+这是 `context_release` 的参数。编号必须来自当前会话，不能照搬示例编号。要找回证据，可以先用 `context_search` 搜索关键片段，再调用：
 
-事件提交与磁盘落盘有区别：组合中的官方 `session-checkpoint-policy` 在模型分发和顶层工具执行前等待 flush。只有该策略实际启用且 flush 成功，才能保证对应预留依据先落盘；本插件不会通过模型上下文预览偷偷写入日志。
+```json
+{"id": "§T19§"}
+```
 
-状态为 `available → queued → released`；某个结果被正式摘要覆盖后成为 `summarized`。工具调用成功并返回 queued，只代表意图已进入日志，不能当作释放成功。
+这是 `context_expand` 的参数。恢复结果进入新的上下文，不撤销之前的压缩。文本结果较长时，根据返回的 `nextOffset` 继续读取。
 
-最近的工具结果默认保护 2 条，按当前 surface 顺序判断。模型仍可以标记它们，等窗口向前移动再释放。足够短、无法通过占位标记缩短的结果继续保持 queued，避免增加上下文。摘要是独立的历史替换操作，**会覆盖未标记的历史**，并保留官方选区算法决定的最新完整尾部；最近结果保护不是摘要的排除规则。
+如果你希望立即整理历史，可以使用官方 `/compact`。模型调用 `context_compact` 则会进入代码调度，不保证下一步就执行。
 
-## 摘要如何复用官方实现
+### 编号与状态
 
-`ContextCompressionEngine` 继承 `BasicCompactionEngine`，只在 `summarize()` 中过滤已标记工具正文，并调用 `super.summarize()`。工具消息的角色、ID、callId 和协议外壳保留，防止孤立工具调用。
+| 编号 | 对应内容 |
+| --- | --- |
+| `§U17§` | 一条用户消息的普通文字 |
+| `§A18§` | 一条助手消息的普通文字 |
+| `§T19§` | 一次工具调用及其完整结果 |
+| `§I20§` | 一次图片出现 |
+| `§F21§` | 一次文件出现 |
 
-官方实现继续负责摘要提示词、模型选择、流式调用、usage/rawOutput、摘要必须缩短的验证、配对合法选区、并发稳定性检查，以及 `compaction/start → compaction/summary → surface replace → compaction/end` 的日志协议。压力和上下文溢出仍使用官方入口；主动摘要将排队意图交给官方入口选择历史前缀。`/compact` 使用相同的 compaction Service。
+所有类型共享递增序号。同一图片或文件重复出现，也有各自的编号。U/A 标记只过滤普通文字；I/F 标记只过滤对应附件；T 标记过滤完整调用与结果。
 
-单条工具释放写入相邻的 `compaction/prune` 和 `tool/result` surface replacement，保留原事件数据，仅替换正文。原文仍在事件日志中。这使用 dsh-context 识别的官方协议；本次测试没有连接正在运行的 dsh-context Web 界面。
+条目的状态按以下含义解释：
 
-## 工程边界
+- `available`：尚未标记，且未被摘要覆盖。
+- `queued`：标记已接收，正在等待能够覆盖它的摘要。
+- `released`：已在成功提交的摘要输入中排除。
+- `summarized`：原始内容已被摘要覆盖，没有作为单独标记排除。
 
-- [domain](./src/domain/numbering.ts)：纯预分配、消息绑定、事件折叠与选择规则；不调用模型或存储记忆。
-- [integration](./src/integration/engine.ts)：Cordis 服务、官方摘要继承、释放提交与模型工具注册。
-- [memory](./src/memory/contracts.ts)：独立的可选适配契约，包含来源引用、幂等键与明确的记忆保存回执。
-- [压缩测试](./test/compression.test.mjs)与[编号测试](./test/numbering.test.mjs)：每项使用独立 Cordis Context、内存 SessionStore、官方服务与模拟模型；编号测试直接经过公开准入 waterfall 和官方恢复事件生成器。
+摘要失败或取消且未提交时，原历史和排队标记保留。查看 `context_status`，可以区分等待、协议保护、范围外标记和失败冷却。
 
-第一版仅发布记忆适配契约，尚未自动执行提炼或写入 Mnemon。压缩不依赖记忆服务。后续记忆适配器需要独立处理提炼策略、写入授权、幂等和失败，不能把压缩成功当作记忆保存成功。
+## 什么时候压缩，压缩哪些内容
 
-详细设计见 [architecture](./docs/architecture.md)；已研究的 Magic Context 功能和后续边界见 [magic-context-research](./docs/magic-context-research.md)。
+有四条触发路径：
 
-## 配置与接入
+1. **常规压力**：达到官方有效压力阈值时执行。
+2. **实际溢出**：模型供应商报告上下文超限时走官方恢复。
+3. **提前整理**：有排队标记或模型主动请求，并且满足代码的经济门槛时执行。
+4. **用户 `/compact`**：绕过经济门槛，执行一次安全的手动摘要。
 
-必须在实际 Agent preset 的 compaction 隔离组中，使用本插件替换 `compaction-basic`，保留 `command-compact`，移除同组的 `tool-result-pruner`。插件发现同 scope 已有 `toolResultPruner` 时会拒绝挂载，以免另一个策略自动截断模型尚未标记的内容。在 Host 根部安装一个同名服务不能覆盖隔离的 preset 服务。
+普通压力和提前整理都保留近期原文尾部，摘要覆盖较旧的**连续前缀**。开头的 system 消息保留，切点不会拆开工具调用与结果。溢出和 `/compact` 使用更激进的保留策略，但仍保留最新的安全尾部。
 
-[compaction-group.fragment.yml](./examples/compaction-group.fragment.yml) 是用于自定义 preset 的组片段，不是自动安装脚本，也不是完整 Agent preset。运行 profile 未改动；接入前须把包加入目标 profile，再在对应 preset 的插件列表中替换该组。
+**标记决定选区中哪些内容不再送给摘要模型，不直接决定整个摘要范围。** 选区内未标记的内容仍会被摘要；范围外的标记继续排队。成功提交后，整个选区被摘要替换。
 
-插件配置：
+## 配置
+
+通常可以先使用默认值，只在实际观察后调整。下面列出主要选项及其默认值：
 
 ```yaml
 compaction:
@@ -57,22 +133,72 @@ compaction:
   thresholdRatio: 0.8
   retainRatio: 0.16
   headroomTokens: 65536
+scheduling:
+  enabled: true
+  proactive: true
+  minIntervalSteps: 8
+  minSavingsTokens: 2048
+  minSavingsRatio: 0.2
+  expectedSummaryRatio: 0.2
+  paybackTurns: 8
+  cacheReadRatio: 0.1
+  summaryInputRatio: 1
+  summaryOutputRatio: 1
+summary:
+  reasoning: omit-from-summary
+  images: auto
 release:
-  protectRecentResults: 2
   catalogLimit: 32
 ```
 
-`compaction` 原样使用官方配置 schema。`auto: false` 关闭按压力自动摘要，显式编号释放和主动摘要请求仍在步骤边界执行。`catalogLimit` 的范围为 1–128；目录有省略计数，按 IDs 查询不会依赖目录的位置。
+关键选项：
 
-## 本地验证
+| 选项 | 含义 |
+| --- | --- |
+| `compaction.auto` | 关闭后停止普通压力和 backlog 自动处理；实际溢出恢复、模型显式请求和用户 `/compact` 仍可执行。 |
+| `thresholdRatio` | 压力比例上限；输出预留与 headroom 可能让触发早于该比例。 |
+| `retainRatio` | 保留近期原文尾部的预算比例，不是压缩后的目标大小。 |
+| `scheduling.enabled` | 开启经济调度；关闭后，模型显式请求沿用旧的强制摘要行为。 |
+| `scheduling.proactive` | 允许排队标记自动触发低压力摘要；关闭后仍可通过模型显式请求触发。 |
+| `minIntervalSteps` | 距离上次摘要至少经过多少个已提交的 assistant 步骤。 |
+| `minSavingsTokens` / `minSavingsRatio` | 最低预计净缩短量，以及相对当前总输入的最低比例。 |
+| `paybackTurns` | 允许的估算回本周期。 |
+| `summary.reasoning` | 默认只从摘要输入省略 reasoning；`preserve` 将其作为历史文字保留。 |
+| `summary.images` | `auto` 仅向明确支持图片的摘要模型传原图；`references` 固定只传引用。 |
+| `release.catalogLimit` | 按需目录大小，范围 1–128；日常通知最多附带 8 条变化。 |
 
-在仓库根目录执行：
+压力阈值为 `floor(min(C × thresholdRatio, C − R − headroomTokens))`，其中 C 是当前模型容量，R 是输出预留。模型专属参数可以通过官方 `compaction.modelPolicies` 配置。
+
+成本字段是 **HEURISTIC 估算权重**，不是供应商价格。未知缓存按已缓存前缀保守估算。真正提交摘要仍会改变历史前缀，因此不能保证缓存命中或实际节费。
+
+## 图片、文件与恢复边界
+
+- 图片恢复会校验原始存储内容；当前对话模型明确支持图片时，才返回原生图片。
+- 文件恢复会读取并校验完整内容，然后返回可读取的文件句柄；这不表示模型已经读过文件正文。
+- 摘要模型不支持图片或能力未知时，保留图片引用和相邻文字，不自动生成 OCR 或视觉描述。
+- 缺少服务、存储丢失或损坏、模型能力不足、路径无法映射时，会返回明确状态或错误。
+- 历史搜索是字面子串搜索，不提供语义图像检索或附件二进制全文检索。
+
+## 记忆插件适配
+
+压缩本身不依赖记忆插件。包导出 `dsh-fold-context/memory`，提供 `ContextMemoryAdapter` 契约，用于将来源引用和摘要交给独立的提炼、存储实现。
+
+当前尚未连接自动提炼流程，也没有内置 Mnemon 写入。安装本插件不会自动创建长期记忆。
+
+## 开发与验证
+
+在本仓库内执行：
 
 ```bash
-pnpm --filter dsh-fold-context typecheck
-pnpm --filter dsh-fold-context test
+pnpm typecheck
+pnpm test
+pnpm format:check
 ```
 
-测试不启动 Web、不打开已有会话、不使用磁盘会话后端、不调用真实模型或外部记忆服务、不改运行 profile。依赖安装与 TypeScript 构建仅发生在工作区。
+测试使用 mock 模型、内存服务和新的临时会话目录，不调用真实模型，也不修改运行中的 profile。覆盖编号、摘要提交、失败与取消、原文与附件恢复、冷启动、fork、代码调度和增量通知。
 
-第一版未实现：原文恢复工具、P1–P4 多层摘要、自动去重、缓存批次调度、图片/推理专门回收，以及实际 Mnemon 写入适配器。原文保留在日志中不等于已经提供模型可调用的恢复接口。
+工程细节见[架构说明](./docs/architecture.md)；参考设计见[Magic Context 对照](./docs/magic-context-research.md)。
+
+## 许可证
+
+[MIT](./LICENSE)。

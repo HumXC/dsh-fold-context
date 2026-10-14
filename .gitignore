@@ -1,0 +1,37 @@
+# Dependencies and package-manager caches
+node_modules/
+.pnpm-store/
+.npm-cache/
+
+# Generated builds and test reports
+/lib/
+/dist/
+/coverage/
+*.tsbuildinfo
+*.tgz
+*.log
+
+# Local environment and private credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+.direnv/
+
+# Local DSH, agent, index and scratch data
+.dsh/
+.mnemon/
+.gitnexus/
+.pi/
+.work/
+/tmp/
+result
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

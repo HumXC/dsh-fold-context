@@ -3,12 +3,15 @@ import { defineTool, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { z } from "zod";
 import type { ContextCompressionEngine } from "./engine.js";
 import { catalog, planRelease } from "../domain/planner.js";
-import { COMPACT_TOOL, RECEIPT_KEY, RELEASE_TOOL, STATUS_TOOL } from "../domain/protocol.js";
+import {
+    COMPACT_TOOL,
+    RECEIPT_KEY,
+    RELEASE_TOOL,
+    STATUS_TOOL,
+    ID_PATTERN,
+} from "../domain/protocol.js";
 
-const idsSchema = z
-    .array(z.string().regex(/^§[1-9]\d*§$/))
-    .min(1)
-    .max(128);
+const idsSchema = z.array(z.string().regex(ID_PATTERN)).min(1).max(128);
 function actor(exec: ToolRunContext) {
     if (exec.agent === undefined) throw new Error("fold-context tools require an owning agent");
     exec.signal.throwIfAborted();
@@ -19,19 +22,19 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: RELEASE_TOOL,
             description:
-                "Mark consumed tool-result bodies for release at the next step boundary. Returns queued/deferred/settled IDs; queued does not mean released. Originals remain in the session log.",
+                "Mark user/assistant text (§U/§A), a tool pair (§T), or an individual image/file (§I/§F) to omit from a future covering summary. Normal requests stay unchanged until official checkpoint commit; returns queued/settled IDs with recoverable originals.",
             parameters: {
                 ids: {
                     type: "array",
                     items: { type: "string" },
                     required: true,
                     description:
-                        "1–128 tool-result IDs such as §7§ from the current session ledger; user/assistant IDs cannot be released.",
+                        "1–128 exact releasable session IDs, such as §U7§, §A8§, §T9§, §I10§ or §F11§. One shared ordinal; attachment IDs omit only that occurrence.",
                 },
                 reason: {
                     type: "string",
                     required: true,
-                    description: "Why these results are no longer needed; 1–1000 characters.",
+                    description: "Why this content is no longer needed; 1–1000 characters.",
                 },
             },
             output: {
@@ -43,17 +46,13 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 const agent = actor(exec);
                 const ids = idsSchema.parse(args.ids);
                 const reason = z.string().trim().min(1).max(1000).parse(args.reason);
-                const plan = planRelease(
-                    engine.state(agent.session),
-                    ids,
-                    engine.releasePolicy.protectRecentResults,
-                );
+                const plan = planRelease(engine.state(agent.session), ids);
                 return {
                     ...plan,
                     [RECEIPT_KEY]:
                         plan.accepted && plan.queued.length > 0
                             ? {
-                                  version: 2,
+                                  version: 4,
                                   kind: "release",
                                   sessionId: agent.session.id,
                                   ids: plan.queued,
@@ -68,7 +67,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: COMPACT_TOOL,
             description:
-                "Queue official summarization for the next step boundary, even below the pressure threshold. Marked tool-result bodies are omitted first. Summarizes a balanced historical prefix, including unmarked history; retains the latest balanced tail. Returns queued, then inspect the ledger for applied/failed.",
+                "Queue a checkpoint request for a step boundary. Scheduling may wait for interval, savings and estimated payback; context_status reports the gate. A covering summary omits eligible marks, replaces the full historical prefix and retains the latest balanced tail.",
             parameters: {
                 reason: {
                     type: "string",
@@ -84,16 +83,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             execute: async (args, exec) => {
                 const agent = actor(exec);
                 const reason = z.string().trim().min(1).max(1000).parse(args.reason);
-                const pending = engine
-                    .state(agent.session)
-                    .summaryRequests.some((request) => request.status === "queued");
+                const pending = engine.hasSummaryRequest(agent.session);
                 return {
                     status: pending ? "already_queued" : "queued",
                     scope: "official balanced historical prefix; includes unmarked history; latest balanced tail retained",
                     [RECEIPT_KEY]: pending
                         ? null
                         : {
-                              version: 2,
+                              version: engine.schedulingPolicy.enabled ? 5 : 4,
                               kind: "summary",
                               sessionId: agent.session.id,
                               ids: [],
@@ -107,7 +104,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: STATUS_TOOL,
             description:
-                "Inspect preallocated §N§ IDs and their reserved/bound/abandoned/summarized bindings, tool-result previews and release states, and the latest summary coverage. Use exact IDs to query omitted entries.",
+                "Inspect numbered content, release states, summary coverage and receipts. Also reports the current read-only scheduling plan, estimated savings, preserved head, rebuild suffix, and wait/failure reason; query exact IDs or an owner ID for attachments.",
             parameters: {
                 ids: {
                     type: "array",
@@ -132,8 +129,18 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                     args.limit === undefined
                         ? engine.releasePolicy.catalogLimit
                         : z.number().int().min(1).max(128).parse(args.limit);
-                const view = catalog(engine.state(agent.session), engine.releasePolicy, limit, ids);
+                const view = catalog(
+                    engine.state(agent.session),
+                    engine.releasePolicy,
+                    limit,
+                    ids,
+                    engine.summaryPolicy,
+                );
                 return {
+                    scheduling: await engine.schedulingStatus(agent, exec.signal, limit),
+                    summaryPolicy: view.summaryPolicy,
+                    attachments: view.attachments,
+                    attachmentsOmitted: view.attachmentsOmitted,
                     numbers: view.numbers.map((slot) => ({ ...slot })),
                     numbersOmitted: view.numbersOmitted,
                     nextNumber: view.nextNumber,
