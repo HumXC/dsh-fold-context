@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
             compact: "请求压缩上下文",
             status: "查看上下文状态",
             completed: "已释放上下文",
+            tokenReduction: "预计减少 {count} tokens",
+            tokenIncrease: "预计增加 {count} tokens",
             preparing: "准备中",
             running: "处理中",
             failed: "执行失败",
@@ -117,6 +119,8 @@ window.__ModuleLoader__.load({
             compact: "Request context compaction",
             status: "Inspect context status",
             completed: "Context released",
+            tokenReduction: "Estimated reduction: {count} tokens",
+            tokenIncrease: "Estimated increase: {count} tokens",
             preparing: "Preparing",
             running: "Processing",
             failed: "Failed",
@@ -927,6 +931,22 @@ window.__ModuleLoader__.load({
                     const disclosure = props.useDisclosure();
                     const id = React.useId();
                     const r = props.node.data;
+                    const estimate = r.tokenEstimate;
+                    const validEstimate =
+                        Number.isSafeInteger(estimate?.beforeTokens) &&
+                        estimate.beforeTokens >= 0 &&
+                        Number.isSafeInteger(estimate?.afterTokens) &&
+                        estimate.afterTokens >= 0;
+                    const saved = validEstimate
+                        ? estimate.beforeTokens - estimate.afterTokens
+                        : null;
+                    const savings =
+                        saved === null
+                            ? ""
+                            : t(saved >= 0 ? "tokenReduction" : "tokenIncrease").replace(
+                                  "{count}",
+                                  Math.abs(saved).toLocaleString(),
+                              );
                     return h(
                         Row,
                         {
@@ -936,7 +956,13 @@ window.__ModuleLoader__.load({
                             id,
                             expanded: disclosure.expanded,
                             toggle: disclosure.toggle,
-                            summary: `${r.released.length} ${t("items")}${r.pending.length ? ` · ${r.pending.length} ${t("pending")}` : ""}`,
+                            summary: [
+                                savings,
+                                `${r.released.length} ${t("items")}`,
+                                r.pending.length ? `${r.pending.length} ${t("pending")}` : "",
+                            ]
+                                .filter(Boolean)
+                                .join(" · "),
                         },
                         h(Items, { t, title: "released", items: r.released }),
                         h(Items, { t, title: "pending", items: r.pending }),

@@ -222,7 +222,22 @@ export function commitInlineReleases(
     if (plans.length === 0) return 0;
     const earliestIndex = Math.min(...plans.map(({ event }) => state.surface.indexOf(event.seq)));
     const releasedIds = new Set(plans.flatMap((plan) => plan.releasedIds));
-    const report = releaseReport(state, releasedIds, `${session.id}:${session.seq}`);
+    const report = {
+        ...releaseReport(state, releasedIds, `${session.id}:${session.seq}`),
+        // Price each rewritten native message once, including its replacement placeholders.
+        tokenEstimate: plans.reduce(
+            (total, { event, content }) => {
+                const original = event.type === "tool/result" ? event.data.message : event.data;
+                return {
+                    beforeTokens: total.beforeTokens + ctx.tokenMeter.estimateMessage(original),
+                    afterTokens:
+                        total.afterTokens +
+                        ctx.tokenMeter.estimateMessage(freezeMessage({ ...original, content })),
+                };
+            },
+            { beforeTokens: 0, afterTokens: 0 },
+        ),
+    };
     for (const [index, { event, content }] of plans.entries()) {
         const final = index === plans.length - 1;
         const seq = event.seq;

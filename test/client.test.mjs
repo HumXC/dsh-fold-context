@@ -278,6 +278,49 @@ test("search/status use structured lists and unknown old results remain inspecta
     );
 });
 
+test("release savings stay visible when collapsed, localize, and preserve increases", () => {
+    const c = client();
+    const render = (tokenEstimate) =>
+        c.visibleText(
+            c.render({
+                type: c.views.get("fold-context-release"),
+                props: {
+                    node: {
+                        data: {
+                            released: [{ id: "§T2§", displayId: "§T2R§" }],
+                            pending: [],
+                            tokenEstimate,
+                        },
+                    },
+                    useDisclosure: () => ({ expanded: false, toggle() {} }),
+                },
+            }),
+        );
+    const saving = { beforeTokens: 2000, afterTokens: 766 };
+    assert.match(render(saving), /预计减少 1,234 tokens/);
+    assert.doesNotMatch(render(saving), /估算/);
+    assert.match(render(saving), /1 项/);
+    assert.match(render({ beforeTokens: 10, afterTokens: 10 }), /预计减少 0 tokens/);
+    assert.match(render({ beforeTokens: 10, afterTokens: 15 }), /预计增加 5 tokens/);
+    c.setLanguage("en");
+    assert.match(render(saving), /Estimated reduction: 1,234 tokens/);
+    assert.match(render({ beforeTokens: 10, afterTokens: 15 }), /Estimated increase: 5 tokens/);
+    for (const value of [
+        undefined,
+        null,
+        {},
+        { beforeTokens: "2000", afterTokens: 766 },
+        { beforeTokens: NaN, afterTokens: 0 },
+        { beforeTokens: Infinity, afterTokens: 0 },
+        { beforeTokens: -1, afterTokens: 0 },
+        { beforeTokens: 10.5, afterTokens: 0 },
+    ]) {
+        const text = render(value);
+        assert.match(text, /Context released/);
+        assert.doesNotMatch(text, /tokens|NaN|Infinity/);
+    }
+});
+
 test("only paired, completed replacements produce replayable standalone release nodes", () => {
     const c = client();
     const receipt = {

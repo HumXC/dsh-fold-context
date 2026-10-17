@@ -206,6 +206,20 @@ test("a released tool body and its child image remain archived after a covering 
                 const state = current.engine.state(current.sessions.list()[0]);
                 assert.equal(current.summaries.length, 0);
                 assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
+                const session = current.sessions.list()[0];
+                const report = session
+                    .snapshotEvents()
+                    .find(
+                        (event) =>
+                            event.type === "compaction/prune" && event.data.foldContextRelease,
+                    ).data.foldContextRelease;
+                assert.equal(report.released.length, 2);
+                assert.deepEqual(report.tokenEstimate, {
+                    beforeTokens: world.ctx.tokenMeter.estimateMessage(originalResult.data.message),
+                    afterTokens: world.ctx.tokenMeter.estimateMessage(
+                        session.eventAt(report.completionSeq).data.message,
+                    ),
+                });
                 assert.equal(
                     state.entries.find((entry) => entry.id === child.id).status,
                     "released",

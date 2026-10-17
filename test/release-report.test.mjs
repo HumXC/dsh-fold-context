@@ -33,6 +33,19 @@ test("a completed batch records one durable presentation receipt without alterin
     assert.ok(report.released.every((item) => item.reason === "Evidence consumed"));
     assert.ok(report.released.every((item) => Array.from(item.preview).length <= 120));
     assert.equal(report.pending.length, 0);
+    const afterTokens = ids.reduce((sum, id) => {
+        const entry = f.engine.state(f.session).entries.find((entry) => entry.id === id);
+        return sum + f.meter.estimateMessage(f.session.eventAt(entry.currentSeq).data.message);
+    }, 0);
+    assert.deepEqual(report.tokenEstimate, {
+        beforeTokens: [first, second].reduce(
+            (sum, event) => sum + f.meter.estimateMessage(event.data.message),
+            0,
+        ),
+        afterTokens,
+    });
+    assert.ok(report.tokenEstimate.beforeTokens > report.tokenEstimate.afterTokens);
+    assert.ok(report.tokenEstimate.afterTokens > 0, "replacement placeholders are not free");
     assert.equal(JSON.stringify([first, second]), originals);
     for (const seq of f.session.surface.nodes) {
         const event = f.session.eventAt(seq);
@@ -101,6 +114,16 @@ test("attachment completion reports only newly changed occurrences across succes
         [ids[1]],
     );
     assert.notEqual(allReports[0].batchId, allReports[1].batchId);
+});
+
+test("small releases retain an estimated increase instead of inventing savings", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const original = f.toolRound("read", "");
+    await f.invoke("context_release", { ids: [f.idFor(original)], reason: "Consumed" });
+    await boundary(f);
+    const report = reportOf(reports(f.session)[0]);
+    assert.ok(report.tokenEstimate.afterTokens > report.tokenEstimate.beforeTokens);
 });
 
 test("the profile UI mount has no engine side effects", () => {
