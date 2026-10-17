@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-context",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Predictable context compression and recoverable evidence for DSH",
   "packageManager": "pnpm@11.15.0",
   "type": "module",
@@ -46,6 +46,7 @@
     "test": "node scripts/verify-isolated.mjs",
     "format": "prettier --write \"src/**/*.{ts,js}\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\" \".github/workflows/*.{yaml,yml}\"",
     "format:check": "prettier --check \"src/**/*.{ts,js}\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\" \".github/workflows/*.{yaml,yml}\"",
+    "prepare": "pnpm run build",
     "prepack": "pnpm run build"
   },
   "peerDependencies": {

@@ -6,7 +6,7 @@
 
 适合需要持续阅读文件、调用工具、反复调查和跨多轮推进的任务。压缩以 DSH 官方摘要事务为基础，记忆提炼采用独立适配接口。
 
-> 当前版本为 `0.2.1`，支持 DSH `0.2.0-rc.2`。独立释放、编号别名、提醒、摘要、恢复、原生回放选区与压力效果跟踪通过隔离测试验证；真实模型摘要质量、供应商缓存与节费效果仍需实际评估。记忆适配接口已经提供，自动提炼与 Mnemon 集成尚未实现。
+> 当前版本为 `0.2.2`，支持 DSH `0.2.0-rc.2`。独立释放、编号别名、提醒、摘要、恢复、原生回放选区与压力效果跟踪通过隔离测试验证；真实模型摘要质量、供应商缓存与节费效果仍需实际评估。记忆适配接口已经提供，自动提炼与 Mnemon 集成尚未实现。
 
 ## 能做什么
 
@@ -21,30 +21,43 @@
 
 ## 安装与启用
 
-### 1. 构建插件
+需要 Node.js **24.11.0 或更高版本**，以及 DSH **0.2.0-rc.2**。安装插件和启用压缩引擎是两个步骤：安装只加载 Web 展示，压缩引擎需要接入你实际使用的 Agent preset。
 
-需要 Node.js **24.11.0 或更高版本**、pnpm **11.15.0**，以及 DSH **0.2.0-rc.2**。在仓库根目录执行：
+### 1. 安装到目标 profile
+
+从 GitHub 安装到 `web` profile：
+
+```bash
+dsh plugin --profile web add github:HumXC/dsh-fold-context
+```
+
+使用其他 profile 时，将 `web` 换成对应名称。GitHub 安装通过 `prepare` 从源码构建；如果 pnpm 提示阻止了该 Git 依赖的构建，按提示批准本仓库对应的准确依赖键，再重新执行安装命令。
+
+也可以从 [GitHub Releases](https://github.com/HumXC/dsh-fold-context/releases) 下载已构建的安装包，通过 DSH 插件管理功能安装。
+
+本地开发使用 `packageManager` 锁定的 pnpm **11.15.0**，在仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm build
 ```
 
-如需分发安装包，可在构建后执行 `pnpm pack`；打包时也会自动构建。源码仓库保留锁文件，依赖目录和构建产物不进入 Git，安装包包含运行所需的 `lib/`、bundle manifest 指向的 `cordis.patch.yml` 以及文档和示例。
+然后通过插件管理功能安装构建后的本地目录。让 DSH 助手调用 `plugin_manager` 时，使用 `install_bundle`，`target` 写成 `dsh-fold-context@file:/绝对路径/dsh-fold-context`。执行 `pnpm pack` 可生成安装包；打包时也会自动构建。
 
-### 2. 安装到目标 DSH profile
+### 2. 在自己的 preset 中替换压缩引擎
 
-通过 DSH 的插件管理功能安装构建后的本地目录，或让 DSH 助手调用 `plugin_manager`，以插件目录的绝对路径作为 `install_bundle` 的 `target`。
+安装会通过随包发布的 [cordis.patch.yml](./cordis.patch.yml) 在 profile 根层挂载 `fold-context-ui`（`uiOnly: true`），用于加载工具卡片和释放过程展示。要启用 `context_*` 工具、释放、提醒和摘要功能，需要在会话所用 preset 的 compaction 组内挂载压缩引擎。
 
-安装 bundle 后，随包发布的 `cordis.patch.yml` 按 Loader row id 覆盖 `preset-standard`、`preset-ptc` 和 `preset-cordis` 的完整配置。它基于 DSH `0.2.0-rc.2` 公开 shipped preset 模板，保留所有其他默认字段和 `!!js` 表达式，仅调整各 preset 的 compaction 组：用 `dsh-fold-context` 替换 `compaction-basic`，保留 `command-compact` 和 `tool-result-pruner`，组保持启用，`compaction` 与 `toolResultPruner` 的 isolation realm 不变。pruner 保留官方参数 `thresholdChars: 8192`、`headChars: 4096`、`tailChars: 1024`；其运行包由 DSH 提供。
+先确认会话使用哪个 preset，再修改该 preset 的完整声明中的 `config.plugins`。找到 `id: compaction` 组，在组内做下面的替换，保留其余插件和配置：
 
-profile 内优先级更高的自定义 preset 快照仍会覆盖 bundle；需要自行在对应快照的 compaction 组采用相同替换。公共 bundle 不包含用户专属 profile 配置。既有会话保留启动时的 preset revision，请在新会话中验证。
+```diff
+-      - id: compaction-basic
+-        name: "@deepseek-ai/dsh-compaction-basic"
++      - id: fold-context
++        name: dsh-fold-context
+```
 
-bundle 同时在 profile 根层插入 `fold-context-ui`，配置 `uiOnly: true`，用于加载 Client 展示；该挂载不创建压缩引擎。Client 随 `lib/client.js` 发布，无额外图标库或独立 Web 服务。安装返回 `restart-required` 时，需先重启 DSH，再刷新页面；live profile 自动应用后可直接刷新。工具调用历史可直接使用新展示；释放过程卡需要新版本记录的批次元数据，旧日志不会补造过程记录。
-
-### 3. 自定义 preset 的压缩组
-
-自定义 preset 可采用下面的组片段，保留其余 preset 配置。单独在根层挂载插件，不能覆盖 preset 内已经隔离的压缩服务。
+将该组的 `disabled` 设为 `false`，保留 `compaction: true` 和 `toolResultPruner: true` 的隔离设置。下面是完整的 compaction 组片段，放在 **preset 的 `config.plugins` 列表内**，用于替换其中的 compaction 组：
 
 ```yaml
 - id: compaction
@@ -52,34 +65,54 @@ bundle 同时在 profile 根层插入 `fold-context-ui`，配置 `uiOnly: true`�
   group: true
   disabled: false
   isolate:
-      compaction: true
-      toolResultPruner: true
+    compaction: true
+    toolResultPruner: true
   config:
-      - id: fold-context
-        name: dsh-fold-context
-        config:
-            compaction:
-                auto: true
-            scheduling:
-                enabled: true
-                proactive: true
-      - id: command-compact
-        name: "@deepseek-ai/dsh-command-compact"
-      - id: tool-result-pruner
-        name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
-        config:
-            thresholdChars: 8192
-            headChars: 4096
-            tailChars: 1024
+    - id: fold-context
+      name: dsh-fold-context
+      config:
+        compaction:
+          auto: true
+        scheduling:
+          enabled: true
+          proactive: true
+    - id: command-compact
+      name: "@deepseek-ai/dsh-command-compact"
+    - id: tool-result-pruner
+      name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
 ```
 
-这是插件列表中的组片段，不是完整 preset。每个 compaction scope 只挂载一个 provider，不要同时启用 `compaction-basic`。`tool-result-pruner` 可以共存；bundle 默认保留它，自定义 preset 可按需省略其 row。完整选项见[配置示例](./examples/compaction-group.fragment.yml)。
+这里，组的 `config` 是子插件列表；`fold-context` 行下的 `config` 才是本插件选项。`compaction.auto` 控制普通压力与 backlog 摘要，`scheduling.enabled` 控制经济调度，`scheduling.proactive` 控制低压力下的释放 backlog 摘要。完整可调参数及注释见[配置示例](./examples/compaction-group.fragment.yml)。
+
+每个 compaction scope 只保留一个压缩引擎，不能同时挂载 `compaction-basic` 和 `dsh-fold-context`。`command-compact` 提供手动 `/compact`，`tool-result-pruner` 可选共存，后两者的运行包由 DSH 提供。仅在 profile 根层增加引擎行，无法替换 preset 内的隔离服务。
+
+#### 使用内置 preset、还没有自己的声明时
+
+先导出当前 profile 的配置，作为本地核对依据：
+
+```bash
+dsh --profile web --dump-config > web.config.yml
+```
+
+在导出结果中找到实际使用的声明，例如 `id: preset-standard`，将**这一整条声明**复制到你自己的 profile 覆盖层，再只替换其中的 compaction 组。默认覆盖文件为 `~/.dsh/profiles/web/cordis.patch.yml`；设置了 `DSH_HOME` 时，使用该目录下的 `profiles/web/cordis.patch.yml`。已有同 id 的覆盖时，直接修改已有条目；其他 profile 补丁条目继续保留。也可以在自己维护的 preset bundle 中完成同样修改。
+
+**不要把上面的组片段直接粘到 profile 补丁顶层，也不要用它替换整份 preset。** 当前 Loader 不会进入 `config.plugins` 查找组 id，对 preset 的 `config` 也不做深度合并。覆盖内置 preset 时必须保留该声明完整的 `id`、`order`、全部 `plugins`、其他原有字段及 `!!js` 表达式；否则可能丢失其他工具。只复制目标 preset，保留你已有的自定义内容，不要把整个导出结果覆盖回 profile 文件。
+
+### 3. 生效与检查
+
+安装返回 `restart-required` 时，先重启 DSH，再刷新页面；live profile 应用成功后可刷新页面。修改 preset 后创建一个选择了该 preset 的**新会话**进行验证，已有会话不会自动切换正在使用的 preset revision。
+
+在新会话中让助手调用 `context_status`：能调用该工具，才说明压缩引擎已接入。仅看到专用卡片样式不能证明引擎已经启用。若没有 `context_*` 工具，检查是否修改了当前会话选择的 preset、compaction 组是否启用，以及是否仍只挂载了根层的 `uiOnly` 展示入口。
 
 pruner 在符合压缩触发条件时可以先按字符预算截短工具结果，再决定是否生成摘要。`context_release` 则记录语义意图，在下一安全步骤边界独立替换已选正文；两者都不必调用模型，原始结果保存在会话日志中。仅出现普通 pruner 截短不构成语义释放回执。
 
 原文恢复需要 `sessionQuery` 服务；图片和文件恢复还需要可见的附件存储，文件句柄需要文件系统路径映射。持久恢复依赖 DSH 会话日志正常保留，以及官方 `session-checkpoint-policy` 成功落盘。
 
-释放过程元数据记录在本批最后一个 `compaction/prune` 的 `data.foldContextRelease` 中。Client 只有观察到紧随其后、引用相同目标的替换事件，才展示完成卡片；排队、普通 pruner 截短以及未完成的 prune 都不会显示为已释放。元数据不进入消息正文，不修改工具结果的其他字段，也不增加模型输入。摘要覆盖仍由 DSH 的摘要过程卡展示。
+释放过程元数据记录在本批最后一个 `compaction/prune` 的 `data.foldContextRelease` 中。Client 只有观察到紧随其后、引用相同目标的替换事件，才展示完成卡片；排队、普通 pruner 截短以及未完成的 prune 都不会显示为已释放。
 
 ## 日常使用
 
@@ -128,7 +161,7 @@ pruner 在符合压缩触发条件时可以先按字符预算截短工具结果�
 - `released`：正文已实际释放；原位释放的当前占位显示为 `§T19R§`、`§I20R§` 等。原编号和 `R` 别名均可用于工具查询及恢复。
 - `summarized`：当前正文或释放占位已被摘要覆盖，选区内不再保留逐条占位。
 
-`R` 只是可见状态，不生成新身份，也不会恢复原正文。旧版已经记录的 summary-only 标记保持原来的重放解释；旧版摘要排除不会凭空生成 `R` 占位。查看 `context_status` 可区分步骤边界等待、协议保护、摘要范围外和摘要失败冷却。
+`R` 只是可见状态，不生成新身份，也不会恢复原正文。查看 `context_status` 可区分步骤边界等待、协议保护、摘要范围外和摘要失败冷却。
 
 ## 什么时候提醒释放
 
@@ -240,7 +273,7 @@ pnpm format:check
 
 测试使用 mock 模型、内存服务和新的临时会话目录，不调用真实模型，也不修改运行中的 profile。覆盖编号、摘要提交、失败与取消、原文与附件恢复、冷启动、fork、代码调度和增量通知。
 
-普通压力压缩若只选中旧 checkpoint、编号/释放管理通知、重新注入的指令 baseline 或 MCP snapshot，不再重复调用摘要模型；真实业务内容和非 baseline 的指令变化仍可触发。手动 `/compact`、显式 checkpoint 请求与真实溢出恢复保留兜底。摘要输入省略管理通知以及 U/A/T 来源编号，I/F 归档引用和任务本身涉及的编号字符串继续保留。
+普通压力压缩的选区若仅包含已有 checkpoint、编号/释放管理通知、重新注入的指令 baseline 或 MCP snapshot，会跳过摘要调用；真实业务内容和非 baseline 的指令变化仍可触发摘要。手动 `/compact`、显式 checkpoint 请求与真实溢出恢复保留兜底。摘要输入省略管理通知以及 U/A/T 来源编号，I/F 归档引用和任务本身涉及的编号字符串继续保留。
 
 工程细节见[架构说明](./docs/architecture.md)；参考设计见[Magic Context 对照](./docs/magic-context-research.md)。
 
@@ -252,11 +285,11 @@ GitHub Actions 使用 Node.js 24，并读取 `packageManager` 中锁定的 pnpm 
 - 每次成功构建保留 14 天的 Actions artifact，包含 `dsh-fold-context.tgz` 和 `SHA256SUMS`。
 - 推送 `v*` 标签时，先校验标签与 `package.json` 的版本一致，再执行相同检查。通过后自动创建 GitHub Release，上传安装包和校验文件；带 `-` 的版本标记为 prerelease。
 
-发布前先提交版本与代码，再推送对应标签。例如当前包版本为 `0.2.1` 时：
+发布前先提交版本与代码，再推送对应标签。例如当前包版本为 `0.2.2` 时：
 
 ```bash
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外配置发布凭据。发布后的安装包可从 [GitHub Releases](https://github.com/HumXC/dsh-fold-context/releases) 下载；将安装包和 `SHA256SUMS` 放在同一目录后，执行 `sha256sum --check SHA256SUMS` 校验，再通过 DSH 插件管理安装。

@@ -1,5 +1,6 @@
-# 自定义 Agent preset 的 plugins 列表中的一个组片段。
-# bundle 已覆盖公开 shipped standard/ptc/cordis；自定义 preset 可采用此片段。
+# 放在所选 Agent preset 的 config.plugins 列表内，替换原 compaction 组。
+# 安装 bundle 只加载 uiOnly 展示；压缩引擎由用户自行接入 preset。
+# 这是组片段，不是顶层 profile 补丁，也不是完整 preset 声明。
 # 同一 scope 不要挂载第二个 compaction provider（如 compaction-basic）。
 # tool-result-pruner 可选共存，DSH 提供运行包；不需要时可省略末尾 pruner row。
 # 原位 release 在步骤边界独立生效；pruner 不代表语义释放，两者均不必生成摘要。

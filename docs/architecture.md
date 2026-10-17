@@ -134,10 +134,11 @@ context_search 用 observeSession immutable lease，只检索当前会话原始�
 
 ContextMemoryAdapter 服务的 extract(batch, signal?) 接收版本、sessionId、sourceSeqs、checkpoint、idempotencyKey；回执为 stored/duplicate/skipped/failed。未来调用必须独立安排提炼和保存，遵守目标记忆插件的 API 与授权，不能编辑生成的记忆文件或回滚已提交压缩。
 
-每个 Cordis scope 只有一个 compaction provider。公共 bundle 的 `cordis.patch.yml` 按 Loader row id 对 `preset-standard`、`preset-ptc`、`preset-cordis` 做完整 config 覆盖，因为 Loader 不深合并 config。配置来自 DSH `0.2.0-rc.2` 的公开 shipped 模板，保留全部默认字段和 `!!js` 表达式，只在启用的 compaction 组中用 fold-context 替换 compaction-basic，保留 command-compact 和 tool-result-pruner。各组保持原有 `compaction: true`、`toolResultPruner: true` isolation realm；pruner 配置为 `thresholdChars: 8192`、`headChars: 4096`、`tailChars: 1024`。DSH 提供官方运行包，pruner 仅作为本包的开发依赖支持隔离共存回归。恢复需要可见 sessionQuery。
-自定义 preset 可省略 tool-result-pruner，但不能同时挂载第二个 compaction provider。普通 pruner 在官方条件满足时可以先截短正文，再决定是否摘要；本插件原位释放则在步骤边界独立运行，使用独立语义意图及实际占位结算。两者均保存原始事件；普通 pruner 截短本身不构成语义 released。
+每个 Cordis scope 只有一个 compaction provider。公共 bundle 的 `cordis.patch.yml` 只在 profile 根层注册配置为 `uiOnly: true` 的 fold-context-ui，加载 Client 展示，不创建引擎，也不覆盖任何 preset。压缩引擎由用户在所选 preset 的 `config.plugins` 中接入：在启用的 compaction 组内用 fold-context 替换 compaction-basic，保留该组原有的 `compaction: true`、`toolResultPruner: true` isolation realm 及其他插件配置。根层引擎无法替换 preset 内的隔离服务。
 
-profile 中优先级更高的自定义 preset 快照仍可能覆盖公共 bundle，需要在其 compaction 组单独同步；公共包不复制用户专属 profile 内容。既有会话保留启动时的 preset revision，应在新会话验证。本次打包不修改运行 profile。
+Loader 补丁仅递归遍历 `group: true` 且 `config` 为数组的分组，不会进入 preset 的 `config.plugins`，也不深合并 `config`。因此 bundle 不再携带内置 preset 的完整快照；用户需要覆盖内置 preset 时，从当前版本导出完整声明，在自己的 profile 覆盖层保留全部字段、其他插件及 `!!js` 表达式，仅修改 compaction 组。具体安装、导出和配置步骤见 [README](../README.md#安装与启用)。既有会话保留启动时的 preset revision，应在新会话验证。
+
+command-compact 可保留用于手动 `/compact`，tool-result-pruner 可选共存，但不能同时挂载第二个 compaction provider。DSH 提供官方运行包，pruner 仅作为本包的开发依赖支持隔离共存回归；示例参数为 `thresholdChars: 8192`、`headChars: 4096`、`tailChars: 1024`。普通 pruner 在官方条件满足时可以先截短正文，再决定是否摘要；本插件原位释放则在步骤边界独立运行，使用独立语义意图及实际占位结算。两者均保存原始事件；普通 pruner 截短本身不构成语义 released。恢复需要可见 sessionQuery。
 
 Session 提交不等于磁盘成功。官方 session-checkpoint-policy 实际启用且 flush 成功时，才保证模型分发／工具执行前的来源先落盘。插件不在同步提示回调或事件观察者里追加日志。
 
