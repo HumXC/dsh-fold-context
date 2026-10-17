@@ -31,7 +31,10 @@ async function files(directory) {
 }
 
 if (mode === "write") {
+    let inlineEntry;
     const f = await loopFixture(root, {
+        auto: false,
+        scheduling: { enabled: false },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
@@ -44,7 +47,23 @@ if (mode === "write") {
                     ],
                     reason: "Consumed before restart",
                 }),
-            call("context_compact", { reason: "Durable checkpoint before restart" }),
+            (request, world) => {
+                const session = world.sessions.list()[0];
+                const state = world.engine.state(session);
+                inlineEntry = structuredClone(state.entries.find((entry) => entry.role === "tool"));
+                assert.equal(inlineEntry.status, "released");
+                assert.equal(state.lastSummary, null);
+                assert.equal(world.summaries.length, 0);
+                assert.ok(session.surface.nodes.includes(inlineEntry.currentSeq));
+                assert.equal(session.surface.nodes.includes(inlineEntry.sourceSeq), false);
+                assert.ok(
+                    JSON.stringify(request.messages).includes(inlineEntry.id.replace(/§$/, "R§")),
+                );
+                assert.equal(JSON.stringify(request.messages).includes(original), false);
+                return call("context_compact", {
+                    reason: "Durable covering checkpoint before restart",
+                });
+            },
         ],
     });
     try {
@@ -53,8 +72,29 @@ if (mode === "write") {
         await f.flush(handle);
         const state = f.engine.state(handle.agent.session);
         const entry = state.entries.find((entry) => entry.role === "tool");
-        assert.equal(entry.status, "released");
+        assert.equal(entry.status, "summarized");
         assert.equal(f.summaries.length, 1);
+        assert.ok(state.lastSummary.ids.includes(entry.id));
+        assert.equal(state.lastSummary.excludedIds.includes(entry.id), false);
+        assert.equal(
+            handle.agent.session
+                .deriveMessages()
+                .some((message) =>
+                    message.content.some(
+                        (block) =>
+                            block.type === "text" &&
+                            block.text.startsWith(
+                                `[${entry.id.replace(/§$/, "R§")} body released;`,
+                            ),
+                    ),
+                ),
+            false,
+        );
+        assert.equal(
+            handle.agent.session.snapshotEvents().find((event) => event.seq === entry.sourceSeq)
+                .data.message.content[0].text,
+            original,
+        );
         const expected = {
             sessionId: handle.agent.session.id,
             events: handle.agent.session.snapshotEvents(),
@@ -62,6 +102,8 @@ if (mode === "write") {
             numbering: state.numbering,
             originalId: entry.id,
             originalSeq: entry.sourceSeq,
+            inlineEntry,
+            lastSummary: state.lastSummary,
             original,
         };
         await writeFile(expectedPath, JSON.stringify(expected), "utf8");
@@ -73,7 +115,7 @@ if (mode === "write") {
         assert.ok(bytes.some((contents) => contents.toString("utf8").includes("RESTART_ORIGINAL")));
         assert.ok(logs.every((path) => !relative(root, path).startsWith("..")));
         process.stdout.write(
-            `${JSON.stringify({ mode, pid: process.pid, sessionId: expected.sessionId, eventCount: expected.events.length, nextNumber: state.numbering.nextNumber, jsonlBytes: bytes.reduce((total, value) => total + value.length, 0) })}\n`,
+            `${JSON.stringify({ mode, pid: process.pid, sessionId: expected.sessionId, eventCount: expected.events.length, nextNumber: state.numbering.nextNumber, inlineReleased: inlineEntry.status === "released", summaryCovered: state.lastSummary.ids.includes(entry.id), jsonlBytes: bytes.reduce((total, value) => total + value.length, 0) })}\n`,
         );
     } finally {
         await f.close();
@@ -91,12 +133,29 @@ if (mode === "write") {
         assert.deepEqual(session.surface.nodes, expected.surface);
         assert.deepEqual(f.engine.state(session).numbering, expected.numbering);
         assert.equal(f.requests.length, 0, "cold resume does not manufacture a model request");
+        assert.deepEqual(f.engine.state(session).lastSummary, expected.lastSummary);
+        assert.equal(
+            f.engine.state(session).entries.find((entry) => entry.id === expected.originalId)
+                .status,
+            "summarized",
+        );
+        const inlineReplacement = session
+            .snapshotEvents()
+            .find((event) => event.seq === expected.inlineEntry.currentSeq);
+        assert.ok(
+            JSON.stringify(inlineReplacement.data.message.content).includes(
+                expected.originalId.replace(/§$/, "R§"),
+            ),
+        );
         const recovered = await invoke(f, parent, "context_expand", {
-            id: expected.originalId,
+            id: expected.originalId.replace(/§$/, "R§"),
             limit: 16000,
         });
         assert.equal(recovered.text, expected.original);
         assert.equal(recovered.sourceSeq, expected.originalSeq);
+        assert.equal(recovered.releaseStatus, "summarized");
+        assert.equal(recovered.restoresSurface, false);
+        assert.deepEqual(session.surface.nodes, expected.surface);
         const found = await invoke(f, parent, "context_search", {
             query: "RESTART_ORIGINAL",
             roles: ["tool"],
@@ -114,8 +173,12 @@ if (mode === "write") {
             meta: { cwd: root, parentSession: session.id, isSeeded: true },
         });
         assert.equal(
-            (await invoke(f, child, "context_expand", { id: expected.originalId, limit: 16000 }))
-                .text,
+            (
+                await invoke(f, child, "context_expand", {
+                    id: expected.originalId.replace(/§$/, "R§"),
+                    limit: 16000,
+                })
+            ).text,
             expected.original,
         );
         await f.followup(child, "FORK_CHILD_PRIVATE evidence.");
@@ -164,8 +227,12 @@ if (mode === "write") {
             "FORK_CHILD_PRIVATE evidence.",
         );
         assert.equal(
-            (await invoke(f, handle, "context_expand", { id: expected.originalId, limit: 16000 }))
-                .text,
+            (
+                await invoke(f, handle, "context_expand", {
+                    id: expected.originalId.replace(/§$/, "R§"),
+                    limit: 16000,
+                })
+            ).text,
             expected.original,
         );
         process.stdout.write(

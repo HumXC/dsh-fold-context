@@ -58,10 +58,15 @@ export async function fixture(options = {}) {
     await installCompactionInvariants(ctx);
     new SystemPrompt(ctx, {});
     new ToolRuntime(ctx);
+    if (options.pruner !== undefined) {
+        const { ToolResultPruner } = await import("@deepseek-ai/dsh-compaction-tool-result-pruner");
+        new ToolResultPruner(ctx, options.pruner);
+    }
     mountCompression(ctx, {
         compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
         release: { catalogLimit: 32 },
         scheduling: options.scheduling ?? { enabled: false },
+        reminders: options.reminders ?? {},
         summary: {
             reasoning: options.reasoning ?? "omit-from-summary",
             images: options.images ?? "auto",

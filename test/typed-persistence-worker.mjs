@@ -44,20 +44,23 @@ try {
                     assert.deepEqual(targetIds, ["§U1§", "§A2§"]);
                     return call("context_release", {
                         ids: targetIds,
-                        reason: "both original bodies are consumed",
+                        reason: "request release of earlier conversation bodies",
                     });
                 },
                 (_request, current) => {
                     const state = current.engine.state(handle.agent.session);
+                    const release = result(handle.agent.session, "context_release");
+                    assert.equal(release.accepted, false);
+                    assert.equal(release.dshContextCompression, null);
                     for (const id of targetIds) {
                         assert.equal(
                             state.entries.find((entry) => entry.id === id).status,
-                            "queued",
+                            "available",
                         );
                     }
                     assert.equal(current.summaries.length, 0);
                     return call("context_compact", {
-                        reason: "Cover the consumed user and assistant originals",
+                        reason: "Summarize the earlier user and assistant normally",
                     });
                 },
                 (_request, current) => {
@@ -67,18 +70,18 @@ try {
                             current.engine
                                 .state(agent.session)
                                 .entries.find((entry) => entry.id === id).status,
-                            "released",
+                            "summarized",
                         );
                     return call("context_expand", { id: "§A2§", limit: 16000 });
                 },
-                { blocks: [{ type: "text", text: "Finished isolated releases." }] },
+                { blocks: [{ type: "text", text: "Finished isolated summary and recovery." }] },
             ],
         });
         handle = await world.create();
         await world.followup(handle, userText);
         await world.followup(
             handle,
-            "Release the consumed first user and assistant bodies after this checkpoint objective. ".repeat(
+            "Request release of earlier conversation bodies, then checkpoint the earlier evidence. ".repeat(
                 200,
             ),
         );
@@ -88,10 +91,14 @@ try {
             { type: "text", text: assistantText },
         ]);
         const state = world.engine.state(session);
-        assert.equal(state.entries.find((entry) => entry.id === "§U1§").status, "released");
-        assert.equal(state.entries.find((entry) => entry.id === "§A2§").status, "released");
+        assert.equal(result(session, "context_release").accepted, false);
+        assert.equal(state.entries.find((entry) => entry.id === "§U1§").status, "summarized");
+        assert.equal(state.entries.find((entry) => entry.id === "§A2§").status, "summarized");
         assert.equal(world.summaries.length, 1);
-        assert.deepEqual(state.lastSummary.excludedIds, targetIds);
+        assert.deepEqual(state.lastSummary.excludedIds, []);
+        const summaryInput = JSON.stringify(world.summaries[0].messages);
+        assert.ok(summaryInput.includes("USER_COLD_ORIGINAL"));
+        assert.ok(summaryInput.includes("ASSISTANT_COLD_ORIGINAL"));
         assert.equal(state.lastSummary.projection.reasoning, "omit-from-summary");
         assert.equal(state.lastSummary.projection.omittedReasoning[0].id, "§A2§");
         const usage = world.ctx.sessionProjections.stateOf(session, "tokenUsage");
@@ -138,7 +145,9 @@ try {
             expected.usage,
         );
         for (const id of ["§U1§", "§A2§"])
-            assert.equal(state.entries.find((entry) => entry.id === id).status, "released");
+            assert.equal(state.entries.find((entry) => entry.id === id).status, "summarized");
+        assert.equal(result(session, "context_release").accepted, false);
+        assert.deepEqual(state.lastSummary.excludedIds, []);
         await world.followup(handle, "Discover and recover both earlier originals.");
         assert.ok(result(session, "context_search").hits.some((hit) => hit.id === "§A2§"));
         const expanded = namedResults(session, "context_expand");

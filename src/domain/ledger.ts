@@ -7,7 +7,8 @@ import {
     RECEIPT_KEY,
     RELEASE_TOOL,
     previewContent,
-    releaseContent,
+    isReleasedContent,
+    normalizeId,
     hasReleasableBody,
     legacyId,
     ID_PATTERN,
@@ -21,7 +22,17 @@ import {
 import { selectedExclusions } from "./exclusion.js";
 import { projectionReceipt } from "./summary-projection.js";
 import { readProjectionStamp } from "./summary-policy.js";
+import { ALLOCATION_SOURCE } from "./numbering.js";
+import { initialReminderState } from "./reminder.js";
 
+const reminderStateSchema = z.object({
+    backlogSinceStep: z.number().int().nonnegative().nullable(),
+    lastReminderStep: z.number().int().nonnegative().nullable(),
+    lastFingerprint: z.string().max(64).nullable(),
+    ignoredCount: z.number().int().nonnegative(),
+    tokensAtLastReminder: z.number().int().nonnegative(),
+    lastProgressSeq: z.number().int().nonnegative(),
+});
 const receiptSchema = z.object({
     version: z.union([z.literal(1), z.literal(2)]),
     reasoning: z.enum(["preserve", "omit-from-summary"]),
@@ -71,6 +82,8 @@ const entrySchema = z.object({
     status: z.enum(["available", "queued", "released", "summarized"]),
     queuedAt: z.number().int().nonnegative().nullable(),
     reason: z.string().nullable(),
+    releaseMode: z.enum(["inline", "summary"]).default("summary"),
+    admittedAtBusinessStep: z.number().int().nonnegative().default(0),
 });
 export const intentSchema = z.object({
     version: z.literal(4),
@@ -81,6 +94,7 @@ export const intentSchema = z.object({
 });
 const storedIntentSchema = z.union([
     intentSchema,
+    intentSchema.extend({ version: z.literal(6) }),
     intentSchema.extend({ version: z.literal(5) }),
     intentSchema.extend({ version: z.literal(3) }),
     intentSchema.extend({
@@ -96,6 +110,10 @@ const summaryRequestSchema = z.object({
 });
 export const ledgerSchema = z.object({
     entries: z.array(entrySchema),
+    businessSteps: z.number().int().nonnegative().default(0),
+    pendingBusinessStep: z.boolean().default(false),
+    lastReleaseProgressSeq: z.number().int().nonnegative().default(0),
+    reminderState: reminderStateSchema.default(initialReminderState),
     numbering: numberingSchema,
     surface: z.array(z.number().int().nonnegative()),
     summaryRequests: z.array(summaryRequestSchema),
@@ -175,6 +193,8 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
                 preview: `${item.block.attachment.name ?? item.kind} (${item.block.attachment.bytes} bytes)`,
                 status: item.currentSeq === null ? ("summarized" as const) : ("available" as const),
                 queuedAt: null,
+                releaseMode: "summary" as const,
+                admittedAtBusinessStep: state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
                 reason: null,
             };
         });
@@ -184,10 +204,14 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
 }
 export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     key: "contextCompression",
-    stateVersion: 12,
+    stateVersion: 13,
     stateSchema: ledgerSchema,
     init: () => ({
         entries: [],
+        businessSteps: 0,
+        pendingBusinessStep: false,
+        lastReleaseProgressSeq: 0,
+        reminderState: initialReminderState(),
         numbering: initialNumbering(),
         surface: [],
         summaryRequests: [],
@@ -197,6 +221,33 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
         lastSummary: null,
     }),
     apply(state, event) {
+        // Only completed business steps advance reminder age/cooldown. Pure context
+        // management calls (including explanatory text) cannot age their own backlog.
+        if (event.type === "step/start") state = { ...state, pendingBusinessStep: false };
+        if (event.type === "assistant/message" && event.surfaceOp === "append") {
+            const calls = event.data.message.content.filter((block) => block.type === "tool-call");
+            const business =
+                calls.length > 0
+                    ? calls.some((call) => !CONTROL_TOOLS.has(call.name))
+                    : event.data.message.content.some(
+                          (block) => block.type === "text" && block.text.trim().length > 0,
+                      );
+            state = { ...state, pendingBusinessStep: state.pendingBusinessStep || business };
+        }
+        if (event.type === "step/end")
+            state = {
+                ...state,
+                businessSteps: state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
+                pendingBusinessStep: false,
+            };
+        if (
+            event.type === "user/message" &&
+            event.surfaceOp === "append" &&
+            event.data.source.kind === ALLOCATION_SOURCE
+        ) {
+            const parsed = reminderStateSchema.safeParse(event.data.source.releaseReminderState);
+            if (parsed.success) state = { ...state, reminderState: parsed.data };
+        }
         const numbering = foldNumbering(state.numbering, event);
         if (numbering !== state.numbering) state = withAttachmentEntries({ ...state, numbering });
         if (event.type === "session/end-seed" && state.activeStart !== null) {
@@ -326,8 +377,32 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 : event.type === "assistant/message" || event.type === "tool/result"
                   ? event.data.message
                   : null;
+        const inlineReleased = new Set(
+            affected
+                .filter(
+                    (entry) =>
+                        !checkpoint &&
+                        (entry.status === "queued" || entry.status === "released") &&
+                        entry.releaseMode === "inline" &&
+                        event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) &&
+                        message !== null &&
+                        isReleasedContent(message.content, entry.id),
+                )
+                .map((entry) => entry.id),
+        );
         let entries = state.entries.map((entry) => {
             if (entry.currentSeq === null || !removedSet.has(entry.currentSeq)) return entry;
+            if (
+                inlineReleased.has(entry.id) ||
+                (entry.ownerId !== null && inlineReleased.has(entry.ownerId))
+            ) {
+                return {
+                    ...entry,
+                    status: "released" as const,
+                    preview: "",
+                    currentSeq: inlineReleased.has(entry.id) ? event.seq : null,
+                };
+            }
             if (!checkpoint && (entry.role === "image" || entry.role === "file")) {
                 const attachment = updatedNumbering.attachments.find(
                     (item) => item.id === entry.id,
@@ -346,10 +421,7 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                     entry.status === "queued" &&
                     event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) &&
                     [entry.id, legacyId(entry.id)].some((id) =>
-                        message.content.some(
-                            (block) =>
-                                block.type === "text" && block.text === releaseContent(id)[0]?.text,
-                        ),
+                        isReleasedContent(message.content, id),
                     );
                 return {
                     ...entry,
@@ -416,6 +488,9 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                         tool: binding.tool,
                         preview: previewContent(message.content),
                         status: "available",
+                        releaseMode: "summary",
+                        admittedAtBusinessStep:
+                            state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
                         queuedAt: null,
                         reason: null,
                     },
@@ -450,7 +525,7 @@ function applyIntent(
         };
     const marked = new Set(
         intent.version !== 2
-            ? intent.ids
+            ? intent.ids.map(normalizeId)
             : intent.ids.flatMap((id) =>
                   state.numbering.slots
                       .filter((slot) => legacyId(slot.id) === id && slot.role === "tool")
@@ -459,9 +534,20 @@ function applyIntent(
     );
     return {
         ...state,
+        lastReleaseProgressSeq:
+            intent.version === 6 &&
+            state.entries.some((entry) => marked.has(entry.id) && entry.status === "available")
+                ? seq
+                : state.lastReleaseProgressSeq,
         entries: state.entries.map((entry) =>
             marked.has(entry.id) && entry.status === "available"
-                ? { ...entry, status: "queued", queuedAt: seq, reason: intent.reason }
+                ? {
+                      ...entry,
+                      status: "queued",
+                      queuedAt: seq,
+                      reason: intent.reason,
+                      releaseMode: intent.version === 6 ? "inline" : "summary",
+                  }
                 : entry,
         ),
     };

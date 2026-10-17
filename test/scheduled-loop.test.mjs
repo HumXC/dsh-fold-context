@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { Session } from "@deepseek-ai/dsh-session";
 import { createAssistantMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { assertTestRoot, call, loopFixture } from "./loop-fixture.mjs";
 
 const signal = () => new AbortController().signal;
@@ -34,12 +35,7 @@ async function candidate(
     f.session.append("turn/start", { turn: 1 });
     const original = f.appendUser("Historical evidence that can be released. ".repeat(600));
     const id = f.idFor(original);
-    if (mark)
-        assert.equal(
-            (await f.invoke("context_release", { ids: [id], reason: "Evidence extracted" }))
-                .isError,
-            false,
-        );
+    if (mark) recordLegacyRelease(f, [id], "Evidence extracted");
     if (request)
         assert.equal(
             (await f.invoke("context_compact", { reason: "Checkpoint when economically ready" }))
@@ -77,7 +73,7 @@ function assistant(f, text = "A committed work step.") {
     f.session.append("step/end", { turn: 1, step });
 }
 
-test("enabled model requests below pressure wait for interval and preserve intent", async (t) => {
+test("legacy release model requests below pressure wait for interval and preserve intent", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
     const status = await f.engine.schedulingStatus(f.agent);
     assert.equal(status.reason, "min_interval");
@@ -91,7 +87,7 @@ test("enabled model requests below pressure wait for interval and preserve inten
     );
 });
 
-test("enabled model requests below pressure pass through the savings gate", async (t) => {
+test("legacy release model requests below pressure pass through the savings gate", async (t) => {
     const f = await candidate(t, { scheduling: { minSavingsTokens: 1000000 } });
     assert.equal((await f.engine.schedulingStatus(f.agent)).reason, "min_savings");
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
@@ -135,7 +131,7 @@ test("eligible requests summarize the full unmarked span through official transa
     );
 });
 
-test("backlog alone proactively summarizes only when auto and proactive are enabled", async (t) => {
+test("legacy release backlog proactively summarizes only when auto and proactive are enabled", async (t) => {
     const on = await candidate(t, { request: false, compaction: { auto: true } });
     assert.equal((await on.engine.schedulingStatus(on.agent)).reason, "eligible");
     assert.ok(await on.engine.compactIfNeeded(on.agent, "pressure", signal()));
@@ -156,7 +152,7 @@ test("backlog alone proactively summarizes only when auto and proactive are enab
     );
 });
 
-test("official pressure and overflow bypass interval and savings gates", async (t) => {
+test("legacy release pressure and overflow bypass interval and savings gates", async (t) => {
     const pressure = await candidate(t, {
         request: false,
         compaction: { auto: true, thresholdRatio: 0.5 },
@@ -180,7 +176,7 @@ test("official pressure and overflow bypass interval and savings gates", async (
     assert.equal(overflow.calls.length, 1);
 });
 
-test("disabled scheduling preserves legacy forced model-request behavior", async (t) => {
+test("legacy release disabled scheduling preserves forced model-request behavior", async (t) => {
     const f = await candidate(t, {
         scheduling: { enabled: false, minIntervalSteps: 100, minSavingsTokens: 1000000 },
     });
@@ -189,7 +185,7 @@ test("disabled scheduling preserves legacy forced model-request behavior", async
     assert.equal(f.calls.length, 1);
 });
 
-test("direct user compactNow bypasses economics and has no scheduling override", async (t) => {
+test("legacy release direct user compactNow bypasses economics and has no scheduling override", async (t) => {
     const f = await candidate(t, {
         request: false,
         scheduling: { minIntervalSteps: 100, minSavingsTokens: 1000000 },
@@ -200,7 +196,7 @@ test("direct user compactNow bypasses economics and has no scheduling override",
     assert.equal(f.calls.length, 1);
 });
 
-test("status plans are read-only, bounded, and include filtered transcript costs", async (t) => {
+test("legacy release status plans are read-only, bounded, and include filtered transcript costs", async (t) => {
     const f = await candidate(t);
     const before = {
         seq: f.session.seq,
@@ -237,7 +233,7 @@ test("status plans are read-only, bounded, and include filtered transcript costs
     );
 });
 
-test("interval counts committed assistant slots consistently across cold and fork replay", async (t) => {
+test("legacy release interval counts committed assistant slots consistently across cold and fork replay", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
     assistant(f);
     const live = await f.engine.schedulingStatus(f.agent);
@@ -253,7 +249,7 @@ test("interval counts committed assistant slots consistently across cold and for
     assert.equal(f.calls.length, 0);
 });
 
-test("failed scheduled transactions preserve marks and request and suppress unchanged retries", async (t) => {
+test("legacy release failed scheduled transactions preserve marks and request and suppress unchanged retries", async (t) => {
     let failSummary = true;
     const f = await candidate(t, {
         onStream: () => {
@@ -381,9 +377,10 @@ test("legacy version-4 failed requests remain terminal after fresh work and repl
     assert.equal(f.calls.length, 1);
 });
 
-test("scheduled interval follows the latest applied summary after replay", async (t) => {
+test("legacy release scheduled interval follows the latest applied summary after replay", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 3 } });
     assistant(f);
+    assistant(f, "A second committed work step completes the interval.");
     assert.ok(await f.engine.compactIfNeeded(f.agent, "pressure", signal()));
     f.appendUser("A new historical span. ".repeat(800));
     assert.equal(

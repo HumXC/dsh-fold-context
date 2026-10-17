@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ContextFormed, Message, UserMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
-import { entryId, ID_PATTERN, CONTROL_TOOLS } from "./protocol.js";
+import { entryId, ID_PATTERN, CONTROL_TOOLS, isReleasedContent } from "./protocol.js";
 import { characterCount } from "./summary-policy.js";
 import {
     attachmentBlockSchema,
@@ -440,7 +440,11 @@ export function replaceNumberedSurface(
     const attachments = state.attachments.map((item) => {
         if (item.currentSeq === null || !removed.includes(item.currentSeq)) return item;
         const owner = slots.find((slot) => slot.id === item.ownerId);
-        if (owner?.currentSeq === event.seq) {
+        if (
+            owner?.currentSeq === event.seq &&
+            message !== null &&
+            !isReleasedContent(message.content, item.id)
+        ) {
             const matches = owner.summaryShape.flatMap((shape, index) =>
                 shape.attachment?.type === item.block.type &&
                 JSON.stringify(shape.attachment.attachment) ===

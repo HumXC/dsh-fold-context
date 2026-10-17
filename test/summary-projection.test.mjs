@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { Session } from "@deepseek-ai/dsh-session";
 import { fixture } from "./fixture.mjs";
+import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { catalog } from "../lib/domain/planner.js";
 import { projectSummaryInput } from "../lib/domain/summary-projection.js";
 import {
@@ -66,7 +67,9 @@ test("default transcript omits signed assistant reasoning, records it separately
         false,
     );
     assert.equal(
-        records(f.calls[0].messages).find((record) => record.id === id).text,
+        records(f.calls[0].messages).find(
+            (record) => record.role === "assistant" && record.type === "text",
+        ).text,
         content[1].text,
     );
     const report = f.engine.state(f.session).lastSummary;
@@ -112,7 +115,7 @@ test("preserve encodes reasoning as historical data without native signatures", 
     assert.equal(source.data.message.source.replayState.response.private, "opaque-signature");
 });
 
-test("a marked signed explanation can be excluded without masquerading as its original response", async (t) => {
+test("legacy marked signed explanation can be excluded without masquerading as its original response", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -122,17 +125,25 @@ test("a marked signed explanation can be excluded without masquerading as its or
         { type: "reasoning", text: "Old thought" },
     ]);
     const id = f.idFor(source);
-    await f.invoke("context_release", { ids: [id], reason: "consumed" });
+    recordLegacyRelease(f, [id], "consumed");
     await compact(f);
     assert.equal(
-        records(f.calls[0].messages).some((record) => record.id === id),
+        records(f.calls[0].messages).some((record) =>
+            ["Discard explanation.", "Old thought"].includes(record.text),
+        ),
         false,
+    );
+    assert.equal(
+        records(f.calls[0].messages).some(
+            (record) => record.role === "user" && record.text === "User requirements. ".repeat(300),
+        ),
+        true,
     );
     assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, [id]);
     assert.equal(f.engine.state(f.session).lastSummary.projection.omittedReasoning[0].id, id);
 });
 
-test("attachment references stay native beside history records; failed target does not settle marks", async (t) => {
+test("legacy attachment references stay native beside history records; failed target does not settle marks", async (t) => {
     const f = await fixture({
         onStream: () => {
             throw new Error("image target unsupported");
@@ -171,7 +182,7 @@ test("attachment references stay native beside history records; failed target do
         records(projected).find((record) => record.type === "image").attachment.attachmentId,
         "image",
     );
-    await f.invoke("context_release", { ids: [f.idFor(source)], reason: "consumed" });
+    recordLegacyRelease(f, [f.idFor(source)], "consumed");
     await assert.rejects(compact(f), /image target unsupported/);
     assert.deepEqual(
         f.calls[0].messages
@@ -224,7 +235,6 @@ test("tool results retain success/failure and empty outcomes in historical evide
     f.session.append("turn/start", { turn: 1 });
     const original = f.toolRound("read", "42");
     const state = f.engine.state(f.session);
-    const id = f.idFor(original);
     const messages = f.session.deriveMessages();
     const project = (isError, content = original.data.message.content) =>
         projectSummaryInput(
@@ -238,19 +248,22 @@ test("tool results retain success/failure and empty outcomes in historical evide
             resolveSummaryPolicy(),
         );
     const success = records(project(false)).find(
-        (record) => record.role === "tool" && record.id === id,
+        (record) => record.role === "tool" && record.callId === original.data.message.toolCallId,
     );
     const failure = records(project(true)).find(
-        (record) => record.role === "tool" && record.id === id,
+        (record) => record.role === "tool" && record.callId === original.data.message.toolCallId,
     );
     assert.equal(success.text, failure.text);
     assert.equal(success.isError, false);
     assert.equal(failure.isError, true);
     assert.equal(failure.callId, original.data.message.toolCallId);
     assert.deepEqual(
-        records(project(true, [])).find((record) => record.role === "tool" && record.id === id),
+        records(project(true, [])).find(
+            (record) =>
+                record.role === "tool" && record.callId === original.data.message.toolCallId,
+        ),
         {
-            id,
+            id: null,
             role: "tool",
             type: "tool-result",
             callId: original.data.message.toolCallId,

@@ -9,6 +9,15 @@ import type { ContentBlock, Message, TokenUsage, ToolSchema } from "@deepseek-ai
 import { SessionSeq, type Session } from "@deepseek-ai/dsh-session";
 import type { ScopeKey } from "@deepseek-ai/dsh-scope";
 import { ledgerProjection, type LedgerState } from "../domain/ledger.js";
+import { commitInlineReleases } from "./inline-release.js";
+import { canReleaseInline } from "../domain/release.js";
+import { hasSummaryBusinessEvidence } from "../domain/summary-evidence.js";
+import { createPressureProjection, planningPressure } from "../domain/pressure.js";
+import {
+    planReleaseReminder,
+    resolveReminderPolicy,
+    type ReminderPolicy,
+} from "../domain/reminder.js";
 import { catalog, type ReleasePolicy } from "../domain/planner.js";
 import { selectedExclusions } from "../domain/exclusion.js";
 import { projectSummaryInput } from "../domain/summary-projection.js";
@@ -42,6 +51,7 @@ type SummaryResult = {
 );
 interface SchedulingSnapshot {
     readonly revision: number;
+    readonly thresholdTokens: number | null;
     readonly selection: ScheduledRange | null;
     readonly plan: ScheduledCompactionPlan | null;
     readonly decision: "execute" | "wait";
@@ -60,24 +70,26 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
     readonly summaryPolicy: Readonly<SummaryPolicy>;
     readonly schedulingPolicy: Readonly<SchedulingPolicy>;
     readonly autoEnabled: boolean;
+    readonly reminderPolicy: Readonly<ReminderPolicy>;
     constructor(
         ctx: Context,
         compaction: BasicCompactionConfig,
         releasePolicy: Readonly<ReleasePolicy>,
         summaryPolicy: Readonly<SummaryPolicy> = resolveSummaryPolicy(),
         scheduling: Partial<SchedulingPolicy> = {},
+        reminders: Partial<ReminderPolicy> = {},
     ) {
-        if (ctx.get("toolResultPruner") !== undefined)
-            throw new Error(
-                "fold-context: remove toolResultPruner in the same compaction scope before mounting",
-            );
         ctx.sessionProjections.register(ledgerProjection);
+        ctx.sessionProjections.register(
+            createPressureProjection((message) => ctx.tokenMeter.estimateMessage(message)),
+        );
         // The base owns overflow retry handling, including when ordinary automation is disabled.
         super(ctx, { ...compaction, auto: true });
         this.autoEnabled = compaction.auto ?? true;
         this.releasePolicy = releasePolicy;
         this.summaryPolicy = summaryPolicy;
         this.schedulingPolicy = resolveSchedulingPolicy(scheduling);
+        this.reminderPolicy = resolveReminderPolicy(reminders);
     }
     state(session: Session) {
         const state = this.ctx.sessionProjections.stateOf(session, "contextCompression");
@@ -97,13 +109,16 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
     override async compactIfNeeded(agent: Agent, trigger: CompactionTrigger, signal: AbortSignal) {
         signal.throwIfAborted();
         this.agentsByScope.set(agent, agent);
+        if (commitInlineReleases(this.ctx, agent.session, this.state(agent.session), signal) > 0) {
+            await this.ctx.parallel("session/flush", agent.session);
+            signal.throwIfAborted();
+        }
         if (trigger === "context-overflow") return super.compactIfNeeded(agent, trigger, signal);
         const requested = this.hasSummaryRequest(agent.session);
         if (!this.schedulingPolicy.enabled && requested)
             return super.compactIfNeeded(agent, "context-overflow", signal);
         if (this.autoEnabled) {
-            // Official pressure must run before, and independently of, economic/cooldown gates.
-            const result = await super.compactIfNeeded(agent, "pressure", signal);
+            const result = await this.compactPressure(agent, signal, requested);
             if (result !== null) return result;
         }
         if (!this.schedulingPolicy.enabled || (!requested && !this.autoEnabled)) return null;
@@ -125,6 +140,202 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             signal,
         );
     }
+    private selectionHasBusinessEvidence(
+        session: Session,
+        start: SessionSeq,
+        end: SessionSeq,
+    ): boolean {
+        const nodes = session.surface.nodes;
+        const first = nodes.indexOf(start);
+        const last = nodes.indexOf(end);
+        if (first < 0 || last < first) return false;
+        const snapshots = new Map(
+            this.pressureState(session).nodes.map((node) => [node.seq, node.snapshotEvidence]),
+        );
+        const tools = new Map(
+            this.state(session).numbering.slots.map((slot) => [slot.currentSeq, slot.tool]),
+        );
+        return nodes.slice(first, last + 1).some((seq) => {
+            const event = session.eventAt(seq);
+            const message = event === undefined ? null : session.deriveEventMessage(event);
+            return (
+                message !== null &&
+                hasSummaryBusinessEvidence(
+                    message,
+                    tools.get(seq) ?? null,
+                    snapshots.get(seq) ?? undefined,
+                )
+            );
+        });
+    }
+    private pressureState(session: Session) {
+        const state = this.ctx.sessionProjections.stateOf(session, "contextCompressionPressure");
+        if (state === undefined)
+            throw new Error("fold-context: pressure projection is not registered");
+        return state;
+    }
+    pressureStatus(session: Session) {
+        const state = this.pressureState(session);
+        const { nodes: _nodes, ...pressure } = planningPressure(
+            state,
+            this.ctx.tokenMeter.measure(session),
+        );
+        return { ...pressure, retentionPenalty: state.retentionPenalty, effect: state.effect };
+    }
+    private measurement(session: Session) {
+        const native = this.ctx.tokenMeter.measure(session);
+        return { ...native, ...planningPressure(this.pressureState(session), native) };
+    }
+    private async pressureBudget(agent: Agent, signal?: AbortSignal) {
+        const header = agent.session.requestHeader()?.config;
+        if (!header?.provider || !header.model) return null;
+        const revision = agent.session.seq;
+        const info = await this.ctx.llm.resolveModelInfo(header.provider, header.model, signal);
+        signal?.throwIfAborted();
+        if (agent.session.seq !== revision) return null;
+        const override = this.config.modelPolicies.find(
+            (item) => item.provider === header.provider && item.model === header.model,
+        );
+        const window = info.context?.contextWindow;
+        const reserved = header.maxTokens ?? info.defaultMaxTokens ?? 0;
+        const headroom = override?.headroomTokens ?? this.config.headroomTokens;
+        if (
+            window === undefined ||
+            !Number.isSafeInteger(window) ||
+            window <= 0 ||
+            !Number.isSafeInteger(reserved) ||
+            reserved < 0 ||
+            window - reserved - headroom <= 0
+        )
+            return null;
+        const threshold = Math.floor(
+            Math.min(
+                window * (override?.thresholdRatio ?? this.config.thresholdRatio),
+                window - reserved - headroom,
+            ),
+        );
+        const retain =
+            override?.retainTokens ??
+            (override?.retainRatio !== undefined
+                ? Math.floor((window - reserved) * override.retainRatio)
+                : (this.config.retainTokens ??
+                  Math.floor((window - reserved) * this.config.retainRatio!)));
+        if (retain >= threshold) return null;
+        return {
+            threshold,
+            retain,
+            retries: override?.compactionRetries ?? this.config.compactionRetries,
+        };
+    }
+    private retentionTokens(session: Session, retain: number, threshold: number) {
+        const state = this.pressureState(session);
+        const effect = state.effect;
+        const missedTarget =
+            effect?.observedPromptTokens !== null &&
+            effect?.observedPromptTokens !== undefined &&
+            effect.observedPromptTokens >= threshold &&
+            effect.route?.provider === state.route?.provider &&
+            effect.route?.model === state.route?.model;
+        // A provider-confirmed budget miss uses the widest balanced prefix on the next pass.
+        // Repeating a fixed half-tail can otherwise strand the same expensive replay forever.
+        return missedTarget ? 0 : Math.floor(retain / 2 ** state.retentionPenalty);
+    }
+    private protectedTailStart(session: Session) {
+        const nodes = session.surface.nodes;
+        const tools = new Map(
+            this.state(session).numbering.slots.map((slot) => [slot.currentSeq, slot.tool]),
+        );
+        const snapshots = new Map(
+            this.pressureState(session).nodes.map((node) => [node.seq, node.snapshotEvidence]),
+        );
+        let latestBusiness = nodes.length - 1;
+        let latestHuman = -1;
+        let latestBusinessAssistant = -1;
+        for (let index = 0; index < nodes.length; index++) {
+            const seq = nodes[index]!;
+            const event = session.eventAt(seq);
+            const message = event === undefined ? null : session.deriveEventMessage(event);
+            if (message === null) continue;
+            if (message.role === "user" && message.source.kind === "user") latestHuman = index;
+            if (
+                hasSummaryBusinessEvidence(
+                    message,
+                    tools.get(seq) ?? null,
+                    snapshots.get(seq) ?? undefined,
+                )
+            ) {
+                latestBusiness = index;
+                if (message.role === "assistant") latestBusinessAssistant = index;
+            }
+        }
+        return latestHuman > latestBusinessAssistant
+            ? Math.min(latestBusiness, latestHuman)
+            : latestBusiness;
+    }
+    private pressureRange(
+        session: Session,
+        measurement: ReturnType<ContextCompressionEngine["measurement"]>,
+        retain: number,
+    ) {
+        const allowedCuts = new Set(
+            session.surface.nodes.slice(0, this.protectedTailStart(session) + 1),
+        );
+        const headSeq = measurement.nodes[0]?.seq;
+        const headEvent = headSeq === undefined ? undefined : session.eventAt(SessionSeq(headSeq));
+        const head = headEvent === undefined ? null : session.deriveEventMessage(headEvent);
+        return selectScheduledRange({
+            nodes: measurement.nodes,
+            retainTokens: retain,
+            ...(head?.role === "system" && headSeq !== undefined
+                ? { firstSystemSeq: headSeq }
+                : {}),
+            legalCutPredicate: (seq) =>
+                allowedCuts.has(SessionSeq(seq)) &&
+                toolPairingBalancedBefore(session, SessionSeq(seq)),
+        });
+    }
+    private async compactPressure(agent: Agent, signal: AbortSignal, requested: boolean) {
+        const budget = await this.pressureBudget(agent, signal);
+        if (budget === null) return null;
+        let measured = this.measurement(agent.session);
+        if (measured.totalTokens < budget.threshold) return null;
+        const pruner = this.ctx.get("toolResultPruner");
+        if (pruner !== undefined) {
+            pruner.pruneSession(agent.session);
+            measured = this.measurement(agent.session);
+        }
+        let result: Awaited<ReturnType<BasicCompactionEngine["compactRegion"]>> | null = null;
+        let retain = this.retentionTokens(agent.session, budget.retain, budget.threshold);
+        for (
+            let attempt = 0;
+            attempt <= budget.retries && measured.totalTokens >= budget.threshold;
+            attempt++
+        ) {
+            signal.throwIfAborted();
+            const range = this.pressureRange(agent.session, measured, retain);
+            if (range === null) return result;
+            if (
+                !(requested && result === null) &&
+                !this.selectionHasBusinessEvidence(
+                    agent.session,
+                    SessionSeq(range.start),
+                    SessionSeq(range.end),
+                )
+            )
+                return result;
+            const before = measured.totalTokens;
+            result = await super.compactRegion(
+                SessionSeq(range.start),
+                SessionSeq(range.end),
+                agent,
+                signal,
+            );
+            measured = this.measurement(agent.session);
+            if (measured.totalTokens >= before) return result;
+            retain = Math.floor(retain / 2);
+        }
+        return result;
+    }
     async schedulingStatus(
         agent: Agent,
         signal?: AbortSignal,
@@ -133,6 +344,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const snapshot = await this.inspectSchedule(agent, signal);
         const plan = snapshot.plan;
         const bound = Math.max(1, Math.min(128, limit));
+        const pressure = this.pressureStatus(agent.session);
+        const effect = pressure.effect;
+        const threshold = snapshot.thresholdTokens;
         return {
             policy: { ...this.schedulingPolicy },
             auto: this.autoEnabled,
@@ -149,9 +363,99 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                           markedIds: plan.markedIds.slice(0, bound),
                           markedIdsOmitted: Math.max(0, plan.markedIds.length - bound),
                       },
+            pressure: {
+                ...pressure,
+                thresholdTokens: threshold,
+                estimatedBelowThreshold:
+                    threshold === null ? null : pressure.totalTokens < threshold,
+                verification:
+                    effect === null
+                        ? "no_compaction"
+                        : effect.status === "awaiting_usage" ||
+                            effect.status === "awaiting_replacement"
+                          ? effect.status
+                          : effect.status === "route_changed"
+                            ? "route_changed"
+                            : threshold === null
+                              ? "unknown_target"
+                              : effect.observedPromptTokens! < threshold
+                                ? "below_threshold"
+                                : "above_threshold",
+            },
             estimates:
-                "HEURISTIC token costs; latest cache usage is evidence, not a hit or TTL guarantee",
+                "HEURISTIC planning costs; replay output usage is a conservative estimate; effect remains unverified until a later primary request reports usage",
         };
+    }
+    async releaseReminder(agent: Agent, signal?: AbortSignal) {
+        signal?.throwIfAborted();
+        const session = agent.session;
+        const header = session.requestHeader()?.config;
+        let threshold: number | null = null;
+        if (this.reminderPolicy.enabled && header?.provider && header.model) {
+            const info = await this.ctx.llm.resolveModelInfo(header.provider, header.model, signal);
+            signal?.throwIfAborted();
+            const current = session.requestHeader()?.config;
+            const override = this.config.modelPolicies.find(
+                (policy) => policy.provider === header.provider && policy.model === header.model,
+            );
+            const window = info.context?.contextWindow;
+            const reserved = header.maxTokens ?? info.defaultMaxTokens ?? 0;
+            const headroom = override?.headroomTokens ?? this.config.headroomTokens;
+            if (
+                current?.provider === header.provider &&
+                current.model === header.model &&
+                current.maxTokens === header.maxTokens &&
+                window !== undefined &&
+                Number.isSafeInteger(window) &&
+                window > 0 &&
+                Number.isSafeInteger(reserved) &&
+                reserved >= 0 &&
+                window - reserved - headroom > 0
+            ) {
+                threshold = Math.floor(
+                    Math.min(
+                        window * (override?.thresholdRatio ?? this.config.thresholdRatio),
+                        window - reserved - headroom,
+                    ),
+                );
+            }
+        }
+        const state = this.state(session);
+        const measurement = this.measurement(session);
+        const tokens = new Map(measurement.nodes.map((node) => [node.seq as number, node.tokens]));
+        const candidates = state.entries.flatMap((entry) => {
+            if (
+                entry.role !== "tool" ||
+                entry.status !== "available" ||
+                !canReleaseInline(state, entry)
+            )
+                return [];
+            return [
+                {
+                    id: entry.id,
+                    tool: entry.tool,
+                    preview: entry.preview,
+                    tokens: Math.max(0, Math.floor(tokens.get(entry.currentSeq!) ?? 0)),
+                    ageSteps: Math.max(0, state.businessSteps - entry.admittedAtBusinessStep),
+                    seq: entry.currentSeq!,
+                },
+            ];
+        });
+        const plan = planReleaseReminder(
+            {
+                step: state.businessSteps,
+                candidates,
+                previous: state.reminderState,
+                progressSeq: state.lastReleaseProgressSeq,
+                activeCompaction: state.activeStart !== null,
+                pressure:
+                    threshold !== null && threshold > 0
+                        ? measurement.totalTokens / threshold
+                        : null,
+            },
+            this.reminderPolicy,
+        );
+        return { ...plan, businessSteps: state.businessSteps, thresholdTokens: threshold };
     }
     private committedStepsAfter(state: LedgerState, seq: number): number {
         return state.numbering.slots.filter(
@@ -185,6 +489,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const state = this.state(session);
         const failure = this.latestFailure(session, state);
         const wait = (reason: string): SchedulingSnapshot => ({
+            thresholdTokens: null,
             revision,
             selection: null,
             plan: null,
@@ -225,17 +530,36 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 : (this.config.retainTokens ??
                   Math.floor((window - reserved) * this.config.retainRatio!)));
         if (retain >= threshold) return wait("invalid_retention");
-        const measurement = this.ctx.tokenMeter.measure(session);
+        const measurement = this.measurement(session);
         const headSeq = measurement.nodes[0]?.seq;
-        const headEvent = headSeq === undefined ? undefined : session.eventAt(headSeq);
+        const headEvent = headSeq === undefined ? undefined : session.eventAt(SessionSeq(headSeq));
         const head = headEvent === undefined ? null : session.deriveEventMessage(headEvent);
         const firstSystemSeq = head?.role === "system" ? headSeq : undefined;
-        const selection = selectScheduledRange({
-            nodes: measurement.nodes,
-            retainTokens: retain,
-            ...(firstSystemSeq === undefined ? {} : { firstSystemSeq }),
-            legalCutPredicate: (seq) => toolPairingBalancedBefore(session, SessionSeq(seq)),
-        });
+        const selection = this.pressureRange(
+            session,
+            measurement,
+            this.retentionTokens(session, retain, threshold),
+        );
+        if (
+            selection !== null &&
+            this.autoEnabled &&
+            measurement.totalTokens >= threshold &&
+            !this.hasSummaryRequest(session) &&
+            !this.selectionHasBusinessEvidence(
+                session,
+                SessionSeq(selection.start),
+                SessionSeq(selection.end),
+            )
+        )
+            return {
+                ...wait(
+                    this.pressureState(session).effect?.status === "ineffective"
+                        ? "ineffective_compaction"
+                        : "no_business_evidence",
+                ),
+                thresholdTokens: threshold,
+                selection,
+            };
         const start =
             selection === null
                 ? -1
@@ -248,7 +572,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const selected = new Set(selectedNodes.map((node) => node.seq));
         const excluded = selectedExclusions(state, selected, revision, "transcript");
         const region = selectedNodes.flatMap((node) => {
-            const event = session.eventAt(node.seq);
+            const event = session.eventAt(SessionSeq(node.seq));
             const message = event === undefined ? null : session.deriveEventMessage(event);
             return message === null ? [] : [message];
         });
@@ -276,7 +600,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                       (total, message) => total + this.ctx.tokenMeter.estimateMessage(message),
                       0,
                   ) +
-                  headerOverheadTokens +
+                  this.pressureState(session).toolsTokens +
                   256;
         const usage =
             measurement.baseline.kind === "usage" ? measurement.baseline.usage : undefined;
@@ -320,6 +644,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             plan.forceSafety === null && failure !== null && failure.retryAfterSteps > 0;
         return {
             revision,
+            thresholdTokens: threshold,
             selection,
             plan,
             decision: cooling ? "wait" : plan.decision,

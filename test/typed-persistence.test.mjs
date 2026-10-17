@@ -30,7 +30,7 @@ function run(root, mode) {
 }
 
 test(
-    "user and assistant text releases survive real AgentLoop writes and cold-process JSONL recovery",
+    "user and assistant release rejection preserves normal summaries and exact cold-process JSONL recovery",
     { timeout: 45000 },
     async (t) => {
         const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));

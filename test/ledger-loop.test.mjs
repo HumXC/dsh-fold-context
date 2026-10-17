@@ -33,39 +33,98 @@ function assertPrefix(previous, next) {
     );
 }
 
-test("first ordinary post-compaction request carries released IDs and current summary", async (t) => {
+test("inline release changes only the T body before a covering checkpoint, with stable intervening prefixes", async (t) => {
     const original = "LEDGER_RELEASE_ORIGINAL ".repeat(900);
     let target;
+    let source;
     let checked = false;
     const f = await setup(t, {
+        auto: false,
+        scheduling: { enabled: false },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
             (_request, world) => {
-                target = world.engine
-                    .state(world.sessions.list()[0])
-                    .entries.find((entry) => entry.role === "tool").id;
+                const session = world.sessions.list()[0];
+                const entry = world.engine
+                    .state(session)
+                    .entries.find((item) => item.role === "tool");
+                target = entry.id;
+                source = session.snapshotEvents().find((event) => event.seq === entry.sourceSeq);
                 return call("context_release", { ids: [target], reason: "Consumed evidence" });
             },
             (request, world) => {
                 assert.equal(world.summaries.length, 0);
+                const state = world.engine.state(world.sessions.list()[0]);
+                assert.equal(state.lastSummary, null);
+                assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
+                const expected = structuredClone(world.requests.at(-2).messages);
+                const priorResult = expected.find(
+                    (message) => message.id === source.data.message.id,
+                );
+                const currentResult = request.messages.find(
+                    (message) => message.id === priorResult.id,
+                );
+                assert.deepEqual(priorResult.content, [{ type: "text", text: original }]);
+                assert.match(textOf(currentResult), new RegExp(target.replace(/§$/, "R§")));
+                priorResult.content = currentResult.content;
+                assert.deepEqual(
+                    request.messages.slice(0, expected.length),
+                    expected,
+                    "only the deliberately released T body changes in the prior request",
+                );
+                const notice = latestNotice(request);
+                assert.match(textOf(notice), new RegExp(`${target.replace(/§$/, "R§")} released`));
+                assert.ok(notice.source.ledgerView.rows.length <= 8);
+                return call("context_status", { ids: [target] });
+            },
+            (request, world) => {
+                assert.equal(world.summaries.length, 0);
                 assertPrefix(world.requests.at(-2), request);
-                assert.match(textOf(latestNotice(request)), new RegExp(`${target} queued`));
                 return call("context_compact", { reason: "Checkpoint after releasing" });
             },
             (request, world) => {
                 assert.equal(world.summaries.length, 1);
-                const state = world.engine.state(world.sessions.list()[0]);
-                assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
+                const session = world.sessions.list()[0];
+                const state = world.engine.state(session);
+                assert.equal(
+                    state.entries.find((entry) => entry.id === target).status,
+                    "summarized",
+                );
+                assert.ok(state.lastSummary.ids.includes(target));
+                assert.equal(
+                    state.lastSummary.excludedIds.includes(target),
+                    false,
+                    "the covering summary cannot exclude an original body already released inline",
+                );
                 const notice = latestNotice(request);
                 const text = textOf(notice);
-                assert.match(text, new RegExp(`${target} released`));
+                assert.match(text, new RegExp(`${target} summarized`));
                 assert.match(text, /lastSummary: coverage/);
-                assert.ok(text.slice(text.indexOf("excluded")).includes(target));
                 assert.equal(notice.source.ledgerView.summaryWatermark, state.lastSummary.seq);
                 assert.doesNotMatch(text, new RegExp(`${target} queued`));
-                const durable = world.sessions
-                    .list()[0]
+                assert.ok(notice.source.ledgerView.rows.length <= 8);
+                assert.equal(
+                    session
+                        .deriveMessages()
+                        .some((message) =>
+                            message.content.some(
+                                (block) =>
+                                    block.type === "text" &&
+                                    block.text.startsWith(
+                                        `[${target.replace(/§$/, "R§")} body released;`,
+                                    ),
+                            ),
+                        ),
+                    false,
+                );
+                assert.equal(
+                    JSON.stringify(
+                        session.snapshotEvents().find((event) => event.seq === source.seq),
+                    ),
+                    JSON.stringify(source),
+                );
+                const durable = session
                     .snapshotEvents()
                     .find((event) => event.type === "user/message" && event.data.id === notice.id);
                 assert.deepEqual(durable.data.source.ledgerView, notice.source.ledgerView);
@@ -77,8 +136,11 @@ test("first ordinary post-compaction request carries released IDs and current su
     const handle = await f.create();
     await f.followup(handle, "Preserve this goal through the checkpoint. ".repeat(180));
     assert.equal(checked, true);
-    assert.equal(f.requests.length, 4);
+    assert.equal(f.requests.length, 5);
     assertPrefix(f.requests[0], f.requests[1]);
+    assertPrefix(f.requests[2], f.requests[3]);
+    await f.followup(handle, "Continue with the covered evidence.");
+    assertPrefix(f.requests[4], f.requests[5]);
     assert.ok(
         f.requests.every(
             (request) =>

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { ledgerProjection } from "../lib/domain/ledger.js";
 import { selectedExclusions, summaryInput } from "../lib/domain/exclusion.js";
 import { summaryRecords } from "./summary-records.mjs";
@@ -16,7 +17,7 @@ async function compactSurface(f) {
     return f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
 }
 
-test("ambiguous call IDs within one assistant preserve both calls and results", async (t) => {
+test("legacy ambiguous call IDs within one assistant preserve both calls and results", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -60,9 +61,7 @@ test("ambiguous call IDs within one assistant preserve both calls and results", 
     f.advanceSteps(1);
     const tools = f.engine.state(f.session).entries.filter((entry) => entry.role === "tool");
     assert.equal(tools.length, 2);
-    parsed(
-        await f.invoke("context_release", { ids: [tools[0].id], reason: "consumed first call" }),
-    );
+    recordLegacyRelease(f, [tools[0].id], "consumed first call");
     const state = f.engine.state(f.session);
     assert.deepEqual(selectedExclusions(state, new Set(state.surface), f.session.seq), []);
     const messages = f.session.deriveMessages();
@@ -80,11 +79,11 @@ test("ambiguous call IDs within one assistant preserve both calls and results", 
         supplied.filter((record) => record.role === "tool" && record.callId === "reused").length,
         2,
     );
-    assert.equal(
+    assert.deepEqual(
         supplied
             .filter((record) => record.type === "tool-call" && record.callId === "reused")
-            .every((record) => record.id === null),
-        true,
+            .map(({ name, arguments: args }) => ({ name, arguments: args })),
+        message.content.map(({ name, arguments: args }) => ({ name, arguments: args })),
     );
     assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, []);
     assert.equal(
@@ -93,13 +92,13 @@ test("ambiguous call IDs within one assistant preserve both calls and results", 
     );
 });
 
-test("a same-identity replacement removing user text cannot produce a false exclusion receipt", async (t) => {
+test("legacy same-identity replacement removing user text cannot produce a false exclusion receipt", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     const original = f.appendUser("Text originally marked for exclusion. ".repeat(200));
     const id = f.idFor(original);
-    parsed(await f.invoke("context_release", { ids: [id], reason: "consumed text" }));
+    recordLegacyRelease(f, [id], "consumed text");
     const replacement = f.session.append(
         "user/message",
         {
@@ -124,7 +123,7 @@ test("a same-identity replacement removing user text cannot produce a false excl
     await compactSurface(f);
     assert.deepEqual(
         summaryRecords(f.calls[0].messages)
-            .filter((record) => record.id === id)
+            .filter((record) => record.role === "user" && record.type === "reasoning")
             .map(({ type, text }) => ({ type, text })),
         replacement.data.content,
     );
@@ -139,13 +138,14 @@ test("a same-identity replacement removing user text cannot produce a false excl
     assert.deepEqual(replayed, f.engine.state(f.session));
 });
 
-test("a foreign compaction end cannot clear pending proof in a pure replay fold", async (t) => {
+test("legacy foreign compaction end cannot clear pending proof in a pure replay fold", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
+    f.appendUser("Keep the ongoing task objective. ".repeat(200));
     const original = f.appendUser("Completed evidence. ".repeat(200));
     const id = f.idFor(original);
-    parsed(await f.invoke("context_release", { ids: [id], reason: "consumed" }));
+    recordLegacyRelease(f, [id], "consumed");
     await compactSurface(f);
     const events = f.session.snapshotEvents();
     const checkpointIndex = events.findIndex(

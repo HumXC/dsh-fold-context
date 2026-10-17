@@ -4,7 +4,8 @@ import type { LedgerState } from "./ledger.js";
 import type { ReleasePolicy } from "./planner.js";
 import { selectedExclusions } from "./exclusion.js";
 import { ALLOCATION_SOURCE } from "./numbering.js";
-import { ID_PATTERN } from "./protocol.js";
+import { ID_PATTERN, displayId } from "./protocol.js";
+import { pendingReleaseReason, hasInlinePlaceholder } from "./release.js";
 
 const MAX_ROWS = 8;
 const MAX_LOOKUP_NODES = 64;
@@ -49,23 +50,7 @@ export function previousAdmissionLedger(session: Session): PreviousAdmissionLedg
     return null;
 }
 
-function pendingReason(
-    state: LedgerState,
-    entry: LedgerState["entries"][number],
-    selectable: ReadonlySet<string>,
-): string | null {
-    if (entry.status !== "queued") return null;
-    if (!selectable.has(entry.id)) return "protocol_protection";
-    if (state.activeStart !== null) return "summary_in_progress";
-    if (
-        state.lastSummary !== null &&
-        entry.queuedAt !== null &&
-        entry.queuedAt < state.lastSummary.seq
-    )
-        return "outside_selection";
-    if (state.summaryRequests.at(-1)?.status === "failed") return "summary_failed";
-    return "awaiting_covering_summary";
-}
+const pendingReason = pendingReleaseReason;
 
 function boundedIds(ids: readonly string[], limit: number): string {
     const shown = ids.slice(-limit);
@@ -129,7 +114,7 @@ export function admissionLedger(
             shown
                 .map(
                     (row) =>
-                        `${row.id} ${row.status}${row.pending === null ? "" : ` (${row.pending})`}`,
+                        `${displayId(row.id, hasInlinePlaceholder(state.entries.find((entry) => entry.id === row.id)))} ${row.status}${row.pending === null ? "" : ` (${row.pending})`}`,
                 )
                 .join("; "),
         );

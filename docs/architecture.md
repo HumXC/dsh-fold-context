@@ -2,24 +2,15 @@
 
 ## 目标与层次
 
-模型选择稳定编号，插件记录释放意图，在临时摘要输入中排除可处理的内容；官方 compaction engine 生成摘要并替换整个原始选区。插件不单独改写用户、助手或工具正文，不引入 DSH 核心补丁。记忆提炼是独立适配契约，尚未自动调用。
+模型选择稳定编号，插件记录释放意图，在安全步骤边界独立替换工具结果正文或单次附件。官方 compaction engine 另行生成摘要并替换平衡历史选区。用户文字、助手原记录与签名不原位改写，不引入 DSH 核心补丁；官方 tool-result-pruner 可共存，记忆提炼仍是独立适配契约。
 
 ```text
-模型工具 / PTC trace
-       │ 版本化意图回执
-       ▼
-Session 日志 ──► sessionProjections 纯 ledger
-       │                  │
-       └─ sessionQuery ──► 有界搜索与原文展开
-                          │
-官方选区 + 摘要开始截止位置 + 已排队编号
-                          ▼
-                纯 selectedExclusions（带模式）
-                    ├─ projectSummaryInput 历史数据
-                    │    └─ super.summarize() + 策略标记
-                    └─ 真实 checkpoint 时按持久策略重放回执
-                          ▼
-            checkpoint 真正提交 → 编号状态和有界目录
+模型工具 / PTC trace → 版本化意图 → Session 日志 → 纯 ledger
+                                      │             │
+                                      │             ├─ 安全步骤边界 → prune + 同身份替换 → R 占位
+                                      │             ├─ 业务步计数 + 提醒状态 → 既有准入通知
+                                      │             └─ 官方摘要选区 → 过滤 / fresh evidence → checkpoint
+                                      └─ sessionQuery → 原文搜索与附件恢复
 
 可选记忆：来源引用 + checkpoint → 独立提炼与保存回执
 ```
@@ -28,7 +19,7 @@ Session 日志 ──► sessionProjections 纯 ledger
 
 ## 稳定身份与预分配
 
-`§U17§`、`§A18§`、`§T19§`、`§I20§`、`§F21§` 共用正整数 ordinal；seq 只定位日志。U/A 控制普通 text，T 控制调用与结果，I/F 控制一条消息内某次附件出现。相同引用重复出现分别编号。surface 顺序由节点数组决定，不能按 seq 大小推断。
+`§U17§`、`§A18§`、`§T19§`、`§I20§`、`§F21§` 共用正整数 ordinal；seq 定位日志。U/A 是对话检索身份，新的释放请求只接受 T/I/F。原位 T 仅替换结果正文，I/F 仅替换单次附件；相同引用重复出现分别编号。`R` 是当前占位的显示后缀，输入时归一到原 ID，不生成新身份。摘要覆盖后移除逐项占位；旧版通过摘要排除的条目不生成 R。surface 顺序由节点数组决定，不能按 seq 大小推断。
 
 [allocation.ts](../src/integration/allocation.ts) 在 `agent/pre-step` 先 `await next()`，按实际 accepted messages 追加一次 user-role notice。它在后续中间件与官方压缩完成后读取 ledger，因此第一条摘要后请求能收到新的提交回执。保留原消息对象和 decision 字段，不把声明当 runtime snapshot。空首步骤与被过滤为空的输入保持空，合法工具继续步骤仍能预留。
 
@@ -40,19 +31,37 @@ Session 日志 ──► sessionProjections 纯 ledger
 
 准入 version 3 先接纳实际输入及其附件，再预留 A。旧 version 1/2 重放不分配新 I/F，维持已有 ordinal；首次新声明才启用附件协议并接纳存量出现。助手及工具的新附件在消息提交时绑定，控制工具结果和附件恢复 notice 不重新建立证据编号。单节点同身份替换匹配完整引用、按出现顺序保留已有附件身份；新出现立刻建立条目，移除或 checkpoint 后保持 settled 状态，不能晚到地复活 available。
 
-释放意图保持 version 4，projection stateVersion 12。调度启用时新摘要请求使用 version 5，标记 retryable；禁用时仍写 version 4。旧声明和 version 2/3/4 意图保持历史解释，旧 version 4 failed 摘要请求不会因升级自动变成待重试。工具 prune 字节仅用于恢复旧日志。新版本不写 prune 或 assistant replacement，不需要核心补丁。
+新的释放意图为 version 6，`releaseMode: inline`；旧 version 2/3/4 保持 `summary` 模式。projection stateVersion 为 13，新增业务步、释放进展和提醒状态。调度启用的新摘要请求使用 version 5、标记 retryable；禁用时保留 version 4。旧 failed 请求不会因升级自动重试。原位替换沿用公开 `compaction/prune` 与 `surfaceOp: replace`，原始事件继续保留，不需要核心补丁。
 
-## 排队、过滤与配对
+## 动态提醒
 
-context_release 验证全部编号，去重；unknown 或已知 unsupported 使整批拒绝。回执真正写入日志后，available 成为 queued。工具返回 queued 不代表已经缩短上下文。
+`domain/reminder.ts` 是确定性的纯计划器：候选默认至少放置两个后续业务步；积累 16000 token、4000 token 停留 8 步，或输入达到官方有效阈值的 80% 且有 4000 token 候选时提醒。8000-token 大项只影响排序。普通间隔 6 步、压力间隔 4 步；连续忽略退避到 12/24 步，新的有效释放进展或 8000-token 积累增长可解除退避，但不绕过最小间隔。无候选、关闭提醒或正在摘要时不发送。
+
+业务时钟只在已提交业务回复的 step/end 推进。纯管理调用即使附带解释文字也不推进，混合业务调用只计一步。候选计量使用当前 surface 的工具结果，pruner 产生的可见缩短立即反映，queued/released 不再计入。压力沿用官方容量、输出预留、headroom 和精确模型覆盖；容量未知或无效时不触发压力提醒。
+
+allocation 在既有准入 notice 追加最多 5 条候选，预览截短为 80 字符；不增加模型请求。计划预览不写状态，只有被接纳的 `source.releaseReminderState` 才进入纯投影，因此拒绝、取消和未提交预览不会消耗冷却。提醒状态与候选年龄随日志冷重放和 fork 保留。
+
+## 排队、原位替换与摘要配对
+
+context_release 归一 R 别名、去重并验证整批编号；unknown 或 unsupported 使整批拒绝。只有意图真正进入日志才从 available 变为 queued。`commitInlineReleases` 在官方压力/调度路径前批量处理，auto 和 scheduling 均关闭时仍可生效，摘要锁存在时等待。每次同步先规划再追加 prune/replace；替换保留消息 ID、工具调用 ID 与来源引用，完成后 flush。个别附件用编号占位替换当前原生块，其他内容保持；编号重绑跳过已标记出现，防止相同附件的兄弟条目串号。
+
+助手原记录保持完整，助手附件或已 offload 的受保护出现等待覆盖摘要。`released` 只表示真实替换或真实摘要排除；R 占位指向当前 marker 节点，后续摘要覆盖能移除它。原位释放之后的 context_expand 是新证据，不撤销替换。
+
+成功控制回执在已有改写内清理：只删除目标全部结算、无签名且没有普通文字/其他工具的完整 release 调用与结果组，保留最近两组。清理不另发起改写，也不把最早变化点移到本次原位目标之前；受保护或更早的旧组可以继续保留。失败/拒绝和原始日志不删，替换通知不创建新的业务编号。
 
 官方引擎选择原始平衡连续范围。`summarize()` 取得该范围及官方可能保留的头部 system 输入，用 `projectSummaryInput(state, input.messages, startSeq, summaryPolicy)` 新建历史数据请求，再交给 `super.summarize()`。保留原有最前面的 system；后续历史各块编码为包含 id、role、blockIndex、type 的 JSON 记录，明确它们是证据而非新指令。
 
-文本和工具参数作为历史数据；原生 assistant/tool 消息、replayState、签名和 usage 不转发。工具结果保留 callId、isError，空结果或附件全被标记后仍保留 outcome 记录。未知块和含糊身份显式失败。
+文本和工具参数作为历史数据；原生 assistant/tool 消息、replayState、签名和 usage 不转发。投影先省略本插件的编号/释放管理通知，再进行身份检查；U/A/T 来源编号不交给摘要模型，普通记录使用 id:null。附件保留 I/F 归档引用但不携带 ownerId；完整身份与覆盖关系继续留在 ledger/projection 回执中。摘要指令明确区分来源标签和任务内容，禁止复制或编造来源前缀，业务文本/代码中真正讨论的编号字符串保持原样。旧 checkpoint 正文不以正则全局删号，避免损坏业务内容。工具结果保留 callId、isError，空结果或附件全被标记后仍保留 outcome 记录。未知块和含糊身份显式失败。
+
+普通压力尝试按实际 surface 切片检查业务证据：旧 checkpoint、编号/释放通知和纯状态/释放控制调用不构成新证据。agent-instructions baseline 与 MCP snapshot 使用每类最近的内容/identity 指纹识别重复注入；相同快照不构成证据，实际内容或 workspace identity 变化仍构成证据，首个带真实 changes 的 baseline 也不会被一概排除。指纹随 projection 重放和缓存恢复，不保存额外正文。这些 baseline 仍保留在主请求中，覆盖真实业务的摘要也可读取它们；只改变自动摘要触发判断。没有业务证据时，在 compaction/start 和辅助请求之前停止。显式 checkpoint 请求的首个提交、手动 compactNow 和真实 context-overflow 路径保留兜底。
+
+`domain/pressure.ts` 注册独立、可重放的 `contextCompressionPressure` 投影，只存当前 surface 的轻量成本与最近主请求采样，不存签名正文。同一路由的原生回放成本取可见估算与该回复 outputTokens 的较大值；它是保守选区估计，不是精确的回放计费。主请求锚点使用 input + cacheRead + cacheWrite，不把各回复完整 input 相加，不按 encrypted signature 长度计算。模型路由改变后，旧路由回放成本与输入锚点不再用于校准。选区保留路由图片定价和官方工具配对检查，提交继续调用官方 compactRegion，`shadowedTokenCount` 继续由 SDK 的原始估算产生。
+
+原生回放额外成本的扣减锚点独立跟随 SDK 已提交的 assistant/message，assistant/attempt 只更新主请求校准与效果，不能复活已移除的回放成本。规划同时受当前有效 surface 成本下限约束，不修改 DSH 的原生 contextPressure 或其 footer。摘要后记录 before/after 估计并等待下一次主请求 usage；compaction 的辅助 usage 不参与。观察值扣除摘要后新增内容的估算变化，独立报告实际主请求输入是否低于当前阈值。未观察到改善时逐步降低保留预算；确认主请求仍超阈值时，下一轮采用最大合法前缀，保留当前新用户任务、最新业务尾部与完整工具配对。同次压力处理每次有预计改善才继续，最多 compactionRetries + 1 次；业务证据检查阻止 checkpoint 自循环，模型切换立即将旧 effect 标为 route_changed。
 
 允许排除的条目必须同时满足：queued、queuedAt 严格小于 compaction/start.seq、当前节点属于选区、消息身份及调用配对仍成立。范围外或摘要开始后的标记不进入本次过滤。
 
-U/A 只排除普通 text，不控制相邻附件或 tool-call。T 删除对应 owner 的调用记录和整个结果，要求两个节点都在选区且 callId 唯一。I/F 只过滤当前绑定的单次附件；其他相同引用和相邻文字仍在。范围外附件标记继续等待。整 T 排除同时记录其附件为 tool-pair-excluded；如果 I/F 同时标记且满足选区，则作为标记排除回执结算。
+旧 U/A 排除意图只作用于普通 text，不控制相邻附件或 tool-call；新请求不接受 U/A。尚未原位处理而进入摘要的 T 要求调用和结果均在选区、callId 唯一，才从临时历史输入同时排除。I/F 只过滤当前绑定的出现；范围外和受保护条目继续等待。已原位移除的内容不伪造成新的摘要排除回执。
 
 `summary.reasoning` 为 `preserve` 或默认 `omit-from-summary`。preserve 将助手 reasoning 按原文字节编码为普通历史记录，omit 仅在新摘要请求中省略并独立记录原始编号、sourceSeq/currentSeq、blockIndex 和 Unicode 码点数。原文和签名仍保留在日志。签名历史不作为原生回复转发，因此 transcript 模式不需要旧 native 模式的 replayState／仅剩 reasoning 保护；旧摘要重放仍使用旧规则。
 
@@ -101,7 +110,7 @@ I 使用实际摘要投影的估算，包含保留 system、过滤后的历史�
 
 失败的 version 5 摘要请求保留 retryable。最近一次摘要后的 `compaction/end` 错误与错误后已提交的助手 slot 推导冷却步数 `max(1, min(8, minIntervalSteps))`；新的 queued 释放或摘要意图可令剩余等待为 0。失败不创建额外重试事件或运行期重试计数器；恢复和 fork 继续依据各自日志。历史 version 4 failed 请求不参与自动重试。官方提交后，之前 queued 及 failed/retryable 请求才成为 applied。
 
-`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure 和 plan；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 active_compaction、no_route、invalid_capacity、invalid_retention、state_changed、failed_cooldown 等等待原因。查询只预览，不消耗稳定编号，不追加日志或修改 surface。摘要输入估算会创建临时消息 UUID，但没有声明提交就不分配编号。
+`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure、plan 和 pressure；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。pressure 返回选择用的预计总量、回放额外成本、最近主请求输入、当前阈值、预计是否低于阈值以及最近摘要的 effect/verification，不返回逐节点成本表。verification 区分 awaiting_replacement、awaiting_usage、below_threshold、above_threshold、unknown_target 和 route_changed；observedSavingsTokens 是移除新增内容估算后的观测值，不代表精确供应商账单。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 no_business_evidence、ineffective_compaction、active_compaction、no_route、invalid_capacity、invalid_retention、state_changed、failed_cooldown 等。查询只预览，不消耗稳定编号、不追加日志或修改 surface。
 
 ## 准入 ledger、目录与恢复
 
@@ -125,8 +134,11 @@ context_search 用 observeSession immutable lease，只检索当前会话原始�
 
 ContextMemoryAdapter 服务的 extract(batch, signal?) 接收版本、sessionId、sourceSeqs、checkpoint、idempotencyKey；回执为 stored/duplicate/skipped/failed。未来调用必须独立安排提炼和保存，遵守目标记忆插件的 API 与授权，不能编辑生成的记忆文件或回滚已提交压缩。
 
-每个 Cordis scope 只有一个 compaction provider。替换实际 preset 隔离组中的官方 provider，移除盲截断 tool-result-pruner，保留 command-compact；恢复需要可见 sessionQuery。运行 profile 没有修改。
+每个 Cordis scope 只有一个 compaction provider。公共 bundle 的 `cordis.patch.yml` 按 Loader row id 对 `preset-standard`、`preset-ptc`、`preset-cordis` 做完整 config 覆盖，因为 Loader 不深合并 config。配置来自 DSH `0.2.0-rc.2` 的公开 shipped 模板，保留全部默认字段和 `!!js` 表达式，只在启用的 compaction 组中用 fold-context 替换 compaction-basic，保留 command-compact 和 tool-result-pruner。各组保持原有 `compaction: true`、`toolResultPruner: true` isolation realm；pruner 配置为 `thresholdChars: 8192`、`headChars: 4096`、`tailChars: 1024`。DSH 提供官方运行包，pruner 仅作为本包的开发依赖支持隔离共存回归。恢复需要可见 sessionQuery。
+自定义 preset 可省略 tool-result-pruner，但不能同时挂载第二个 compaction provider。普通 pruner 在官方条件满足时可以先截短正文，再决定是否摘要；本插件原位释放则在步骤边界独立运行，使用独立语义意图及实际占位结算。两者均保存原始事件；普通 pruner 截短本身不构成语义 released。
+
+profile 中优先级更高的自定义 preset 快照仍可能覆盖公共 bundle，需要在其 compaction 组单独同步；公共包不复制用户专属 profile 内容。既有会话保留启动时的 preset revision，应在新会话验证。本次打包不修改运行 profile。
 
 Session 提交不等于磁盘成功。官方 session-checkpoint-policy 实际启用且 flush 成功时，才保证模型分发／工具执行前的来源先落盘。插件不在同步提示回调或事件观察者里追加日志。
 
-验证使用公开 RAM 服务、官方 AgentLoop、本地 mock adapter、真实 LocalAttachmentStore 和临时 JSONL。独立进程验证冷恢复与 fork，包括原始 I/F、二进制校验和子会话私有附件隔离；公共 imageOffloadProjection 验证实际 derived 图像与 live/cold 回执一致。路径检查后清理，避免当前实例。调度与准入 ledger 验证仍在进行，不在此声明最终通过数量。完整 PTC runtime、真实模型视觉理解、供应商缓存与实际节费、异常断电、运行 profile 与 dsh-context Web 尚未验证。
+验证使用公开 RAM 服务、官方 AgentLoop、本地 mock adapter、真实 LocalAttachmentStore 和临时 JSONL。独立进程验证冷恢复与 fork，包括原始 I/F、二进制校验和子会话私有附件隔离；公共 imageOffloadProjection 验证 derived 图像与 live/cold 回执一致。业务时钟、提醒持久化、拒绝/取消纯预览、可见 token 计量、原位释放及控制回执清理有独立回归；历史 summary-only 测试显式构造旧意图，不伪称当前工具仍接受 U/A。真实模型视觉理解、供应商缓存和实际节费、完整 PTC runtime 及异常断电仍需另行验证。安装替换现有包后依照 plugin_manager 的 application 结果判断是否需要重启；既有会话仍使用原 preset revision。

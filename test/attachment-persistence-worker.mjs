@@ -26,9 +26,31 @@ try {
         world = await loopFixture(root, {
             attachments: true,
             inputModalities: ["text", "image"],
+            auto: false,
+            scheduling: { enabled: false },
             responses: [
-                call("context_release", { ids: ["§I2§", "§F3§"], reason: "consumed attachments" }),
-                call("context_compact", { reason: "cover original attachments" }),
+                call("context_release", {
+                    ids: ["§I2§", "§F4§"],
+                    reason: "consumed first attachment occurrences",
+                }),
+                (_request, current) => {
+                    assert.equal(current.summaries.length, 0);
+                    const state = current.engine.state(current.sessions.list()[0]);
+                    assert.equal(state.lastSummary, null);
+                    for (const id of ["§I2§", "§F4§"])
+                        assert.equal(
+                            state.entries.find((entry) => entry.id === id).status,
+                            "released",
+                        );
+                    for (const id of ["§I3§", "§F5§"])
+                        assert.equal(
+                            state.entries.find((entry) => entry.id === id).status,
+                            "available",
+                        );
+                    return {
+                        blocks: [{ type: "text", text: "Inline attachment release persisted." }],
+                    };
+                },
             ],
         });
         const image = await world.attachments.saveImage({
@@ -41,13 +63,44 @@ try {
             name: "original.txt",
         });
         const handle = await world.create();
-        await world.followup(handle, [
+        const content = [
             { type: "text", text: "Keep original attachment conclusions. ".repeat(700) },
             { type: "image", attachment: image },
+            { type: "image", attachment: image },
             { type: "file", attachment: file },
-        ]);
-        const state = world.engine.state(handle.agent.session);
-        assert.deepEqual(state.lastSummary.excludedIds, ["§I2§", "§F3§"]);
+            { type: "file", attachment: file },
+            { type: "text", text: "Preserve adjacent text and the duplicate occurrences." },
+        ];
+        await world.followup(handle, content);
+        const session = handle.agent.session;
+        const state = world.engine.state(session);
+        assert.equal(world.summaries.length, 0);
+        assert.equal(state.lastSummary, null);
+        const sourceSeq = state.numbering.attachments.find((item) => item.id === "§I2§").sourceSeq;
+        const source = session.snapshotEvents().find((event) => event.seq === sourceSeq);
+        assert.deepEqual(source.data.content, content);
+        const replacement = session
+            .deriveMessages()
+            .find((message) => message.id === source.data.id);
+        assert.ok(replacement);
+        const expectedContent = structuredClone(content);
+        for (const [index, id] of [
+            [1, "§I2R§"],
+            [3, "§F4R§"],
+        ]) {
+            assert.match(replacement.content[index].text, new RegExp(id));
+            expectedContent[index] = replacement.content[index];
+        }
+        assert.deepEqual(replacement.content, expectedContent);
+        for (const [id, index] of [
+            ["§I3§", 2],
+            ["§F5§", 4],
+        ]) {
+            const slot = state.numbering.attachments.find((item) => item.id === id);
+            assert.equal(slot.blockIndex, index);
+            assert.equal(slot.currentBlockIndex, index);
+            assert.deepEqual(replacement.content[index], slot.block);
+        }
         await world.flush(handle);
         await writeFile(
             expectedPath,
@@ -55,19 +108,30 @@ try {
                 sessionId: handle.agent.session.id,
                 numbering: state.numbering,
                 lastSummary: state.lastSummary,
+                events: session.snapshotEvents(),
+                surface: [...session.surface.nodes],
+                entries: state.entries,
+                source,
                 image,
                 file,
             }),
         );
-        console.log(JSON.stringify({ written: true, pid: process.pid }));
+        console.log(
+            JSON.stringify({
+                written: true,
+                inlineReleased: true,
+                summaries: world.summaries.length,
+                pid: process.pid,
+            }),
+        );
     } else if (mode === "read") {
         const expected = JSON.parse(await readFile(expectedPath, "utf8"));
         world = await loopFixture(root, {
             attachments: true,
             inputModalities: ["text", "image"],
             responses: [
-                call("context_expand", { id: "§I2§" }),
-                call("context_expand", { id: "§F3§" }),
+                call("context_expand", { id: "§I2R§" }),
+                call("context_expand", { id: "§F4R§" }),
             ],
         });
         const parent = await world.resume(expected.sessionId);
@@ -76,9 +140,25 @@ try {
             world.engine.state(parent.agent.session).lastSummary,
             expected.lastSummary,
         );
-        assert.deepEqual((await expand(parent, "§I2§")).attachment, expected.image);
-        const recovered = await expand(parent, "§F3§");
+        assert.deepEqual(
+            parent.agent.session.snapshotEvents().slice(0, expected.events.length),
+            expected.events,
+        );
+        assert.deepEqual(parent.agent.session.surface.nodes, expected.surface);
+        assert.deepEqual(world.engine.state(parent.agent.session).entries, expected.entries);
+        const imageRecovery = await expand(parent, "§I2R§");
+        assert.deepEqual(imageRecovery.attachment, expected.image);
+        assert.equal(imageRecovery.releaseStatus, "released");
+        assert.equal(imageRecovery.verifiedBytes, expected.image.bytes);
+        const recovered = await expand(parent, "§F4R§");
         assert.deepEqual(recovered.attachment, expected.file);
+        assert.equal(recovered.releaseStatus, "released");
+        assert.deepEqual(
+            parent.agent.session.surface.nodes,
+            expected.surface,
+            "expansion leaves releases applied",
+        );
+        assert.deepEqual(await readFile(world.attachments.imageHostPath(expected.image)), png());
         assert.equal(recovered.verifiedBytes, expected.file.bytes);
         assert.equal(
             await readFile(world.attachments.fileHostPath(expected.file), "utf8"),
@@ -100,7 +180,8 @@ try {
             inheritedEventCount: SessionLogOffset(boundary + 1),
             meta: { cwd: root, parentSession: parent.agent.session.id, isSeeded: true },
         });
-        assert.deepEqual((await expand(child, "§I2§")).attachment, expected.image);
+        assert.deepEqual((await expand(child, "§I2R§")).attachment, expected.image);
+        assert.deepEqual((await expand(child, "§F4R§")).attachment, expected.file);
         const privateFile = await world.attachments.saveFile({
             data: Buffer.from("PRIVATE_CHILD_ATTACHMENT"),
             name: "private-child.txt",
@@ -129,15 +210,36 @@ try {
                 numbering: world.engine.state(child.agent.session).numbering,
             }),
         );
-        console.log(JSON.stringify({ restored: true, forkIsolated: true, pid: process.pid }));
+        assert.equal(world.summaries.length, 0);
+        console.log(
+            JSON.stringify({
+                restored: true,
+                inlineReleased: true,
+                forkIsolated: true,
+                pid: process.pid,
+            }),
+        );
     } else if (mode === "read-child") {
         const expected = JSON.parse(await readFile(expectedPath, "utf8"));
         const child = JSON.parse(await readFile(join(root, "attachment-child.json"), "utf8"));
         world = await loopFixture(root, { attachments: true, inputModalities: ["text", "image"] });
         const handle = await world.resume(child.sessionId);
         assert.deepEqual(world.engine.state(handle.agent.session).numbering, child.numbering);
-        assert.deepEqual((await expand(handle, "§I2§")).attachment, expected.image);
-        assert.deepEqual((await expand(handle, "§F3§")).attachment, expected.file);
+        assert.deepEqual((await expand(handle, "§I2R§")).attachment, expected.image);
+        assert.deepEqual((await expand(handle, "§F4R§")).attachment, expected.file);
+        const state = world.engine.state(handle.agent.session);
+        for (const id of ["§I2§", "§F4§"])
+            assert.equal(state.entries.find((entry) => entry.id === id).status, "released");
+        for (const id of ["§I3§", "§F5§"])
+            assert.equal(state.entries.find((entry) => entry.id === id).status, "available");
+        assert.equal(
+            JSON.stringify(
+                handle.agent.session
+                    .snapshotEvents()
+                    .find((event) => event.seq === expected.source.seq),
+            ),
+            JSON.stringify(expected.source),
+        );
         assert.equal((await expand(handle, child.privateId)).representation, "file-handle");
         console.log(JSON.stringify({ restoredChild: true, pid: process.pid }));
     } else throw new Error("unknown attachment persistence mode");

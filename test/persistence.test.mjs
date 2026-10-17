@@ -26,7 +26,7 @@ function run(root, mode) {
 }
 
 test(
-    "actual JSONL survives process exit and cold resume, with fork history and numbering isolated",
+    "inline release and its covering checkpoint survive process exit, cold resume and isolated forks",
     { timeout: 45000 },
     async (t) => {
         const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
@@ -36,6 +36,8 @@ test(
         });
         const written = run(root, "write");
         assert.ok(written.jsonlBytes > 0);
+        assert.equal(written.inlineReleased, true);
+        assert.equal(written.summaryCovered, true);
         const resumed = run(root, "read-and-fork");
         assert.notEqual(resumed.pid, written.pid);
         assert.equal(resumed.restored, true);

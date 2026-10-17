@@ -97,44 +97,77 @@ test("real AgentLoop declares IDs before stream and reserves tool results before
     );
 });
 
-test("real queued release waits for a covering summary and the original is recovered through a real tool call", async (t) => {
+test("real inline release replaces only the tool body before recovery without an auxiliary model call", async (t) => {
     const original = "RELEASE_LOOP_ORIGINAL ".repeat(700);
+    let originalEvent;
+    let assistantEvent;
+    let callEvent;
+    let beforeRelease;
     const f = await setup(t, {
+        auto: false,
+        scheduling: { enabled: false },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
-            (_request, world) =>
-                call("context_release", {
-                    ids: [
-                        world.engine
-                            .state(world.sessions.list()[0])
-                            .entries.find((entry) => entry.role === "tool").id,
-                    ],
-                    reason: "Consumed",
-                }),
             (request, world) => {
                 const session = world.sessions.list()[0];
                 const entry = world.engine
                     .state(session)
-                    .entries.find((entry) => entry.role === "tool");
-                assert.equal(entry.status, "queued");
-                assert.equal(world.summaries.length, 0);
-                assert.ok(session.surface.nodes.includes(entry.sourceSeq));
-                assert.ok(
-                    request.messages.some((message) =>
-                        message.content.some(
-                            (block) => block.type === "text" && block.text === original,
-                        ),
-                    ),
-                );
-                return call("context_compact", { reason: "Cover consumed evidence" });
+                    .entries.find((item) => item.role === "tool");
+                originalEvent = session
+                    .snapshotEvents()
+                    .find((event) => event.seq === entry.sourceSeq);
+                assistantEvent = session
+                    .snapshotEvents()
+                    .find(
+                        (event) =>
+                            event.type === "assistant/message" &&
+                            event.data.message.content.some(
+                                (block) =>
+                                    block.type === "tool-call" &&
+                                    block.id === originalEvent.data.message.toolCallId,
+                            ),
+                    );
+                callEvent = session
+                    .snapshotEvents()
+                    .find(
+                        (event) =>
+                            event.type === "tool/call" &&
+                            event.data.callId === originalEvent.data.message.toolCallId,
+                    );
+                beforeRelease = JSON.parse(JSON.stringify(request.messages));
+                return call("context_release", { ids: [entry.id], reason: "Consumed" });
             },
-            (_request, world) => {
-                const entry = world.engine
-                    .state(world.sessions.list()[0])
-                    .entries.find((entry) => entry.role === "tool");
+            (request, world) => {
+                const session = world.sessions.list()[0];
+                const state = world.engine.state(session);
+                const entry = state.entries.find((item) => item.role === "tool");
                 assert.equal(entry.status, "released");
-                return call("context_expand", { id: entry.id, limit: 64 });
+                assert.equal(world.summaries.length, 0);
+                assert.equal(state.lastSummary, null);
+                assert.equal(session.surface.nodes.includes(entry.sourceSeq), false);
+                assert.ok(session.surface.nodes.includes(entry.currentSeq));
+                const replacement = request.messages.find(
+                    (message) => message.id === originalEvent.data.message.id,
+                );
+                assert.ok(replacement);
+                assert.equal(replacement.role, "tool");
+                assert.equal(replacement.toolCallId, originalEvent.data.message.toolCallId);
+                assert.match(replacement.content[0].text, new RegExp(entry.id.replace(/§$/, "R§")));
+                assert.equal(JSON.stringify(request.messages).includes(original), false);
+                const expectedPrefix = structuredClone(beforeRelease);
+                expectedPrefix.find((message) => message.id === replacement.id).content =
+                    replacement.content;
+                assert.deepEqual(request.messages.slice(0, expectedPrefix.length), expectedPrefix);
+                for (const event of [originalEvent, assistantEvent, callEvent]) {
+                    assert.equal(
+                        JSON.stringify(
+                            session.snapshotEvents().find((item) => item.seq === event.seq),
+                        ),
+                        JSON.stringify(event),
+                    );
+                }
+                return call("context_expand", { id: entry.id.replace(/§$/, "R§"), limit: 64 });
             },
         ],
     });
@@ -150,16 +183,22 @@ test("real queued release waits for a covering summary and the original is recov
     const expanded = toolOutcome(handle.agent.session, "context_expand");
     assert.equal(expanded.text, original.slice(0, 64));
     assert.equal(expanded.releaseStatus, "released");
-    assert.equal(
-        f.engine.state(handle.agent.session).entries.filter((entry) => entry.role === "tool")
-            .length,
-        1,
-    );
-    assert.equal(
+    assert.equal(expanded.restoresSurface, false);
+    const entries = f.engine
+        .state(handle.agent.session)
+        .entries.filter((entry) => entry.role === "tool");
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].status, "released");
+    assert.ok(
         handle.agent.session.snapshotEvents().some((event) => event.type === "compaction/prune"),
-        false,
     );
-    assert.equal(f.summaries.length, 1);
+    assert.equal(f.summaries.length, 0);
+    assert.equal(f.requests.length, 4);
+    assert.equal(
+        f.originalCalls.length,
+        f.requests.length,
+        "release and expansion make no auxiliary LLM requests",
+    );
 });
 
 test("real explicit summary runs below threshold and search discovers folded evidence", async (t) => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-context",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Predictable context compression and recoverable evidence for DSH",
   "packageManager": "pnpm@11.15.0",
   "type": "module",
@@ -15,21 +15,37 @@
       "types": "./lib/memory/contracts.d.ts",
       "default": "./lib/memory/contracts.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
   },
   "files": [
     "lib",
+    "cordis.patch.yml",
     "README.md",
     "docs",
     "examples",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && node --test test/*.test.mjs",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.yaml\" \"examples/*.yml\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.yaml\" \"examples/*.yml\"",
+    "test": "node scripts/verify-isolated.mjs",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\"",
     "prepack": "pnpm run build"
   },
   "peerDependencies": {
@@ -56,6 +72,7 @@
     "@deepseek-ai/dsh-attachment-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-fs-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-compaction-image-offload": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
     "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-persistence": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.2",

@@ -98,7 +98,7 @@ test("old release marker bytes and old projection-version fallback reconstruct r
         f.session.header,
         f.session.inheritedEventCount,
     );
-    assert.equal(restored.checkpoint.contextCompression.ver, 12);
+    assert.equal(restored.checkpoint.contextCompression.ver, 13);
     const restoredEntry = restored.checkpoint.contextCompression.val.entries.find(
         (entry) => entry.id === id,
     );

@@ -20,10 +20,17 @@ import {
     originalMessage,
     type ArchiveRole,
 } from "../domain/archive.js";
-import { EXPAND_TOOL, SEARCH_TOOL, ID_PATTERN } from "../domain/protocol.js";
+import {
+    EXPAND_TOOL,
+    SEARCH_TOOL,
+    ID_INPUT_PATTERN,
+    normalizeId,
+    displayId,
+} from "../domain/protocol.js";
+import { hasInlinePlaceholder } from "../domain/release.js";
 import "@deepseek-ai/dsh-session-query";
 import { expandAttachment, renderRecovered } from "./attachment-recovery.js";
-const idSchema = z.string().max(19).regex(ID_PATTERN);
+const idSchema = z.string().max(20).regex(ID_INPUT_PATTERN).transform(normalizeId);
 const rolesSchema = z
     .array(z.enum(["user", "assistant", "tool"]))
     .min(1)
@@ -48,6 +55,10 @@ function metadata(state: LedgerState, slot: NumberSlot) {
     const tool = slot.tool === null ? null : characterPage(slot.tool, 0, 128);
     return {
         id: slot.id,
+        displayId: displayId(
+            slot.id,
+            hasInlinePlaceholder(state.entries.find((entry) => entry.id === slot.id)),
+        ),
         role: slot.role,
         status: slot.status,
         releaseStatus: state.entries.find((entry) => entry.id === slot.id)?.status ?? null,
@@ -75,7 +86,7 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                     type: "string",
                     required: true,
                     description:
-                        "Exact session-local ID, such as §U7§, §A8§, §T9§, §I10§ or §F11§.",
+                        "Session-local ID, such as §T9§ or its released alias §T9R§; U/A/I/F IDs are also accepted.",
                 },
                 offset: {
                     type: "integer",

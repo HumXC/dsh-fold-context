@@ -17,38 +17,81 @@ function result(session, name) {
     return JSON.parse(outcome.data.message.content.find((block) => block.type === "text").text);
 }
 
-test("real AgentLoop releases attachments only at summary commit and reintroduces a native image plus a nested file handle", async (t) => {
+test("real AgentLoop releases only selected attachment occurrences before recovery without a summary", async (t) => {
+    let world;
+    t.after(() => world?.close());
     const root = await temporaryRoot(t);
     let ids;
+    let siblings;
+    let originalInput;
+    let content;
     let checked = false;
-    const world = await loopFixture(root, {
+    world = await loopFixture(root, {
         attachments: true,
         inputModalities: ["text", "image"],
+        auto: false,
+        scheduling: { enabled: false },
         responses: [
             (_request, current) => {
-                const state = current.engine.state(current.sessions.list()[0]);
-                ids = state.numbering.attachments.map((item) => item.id);
-                assert.deepEqual(ids, ["§I2§", "§F3§"]);
+                const session = current.sessions.list()[0];
+                const state = current.engine.state(session);
+                const occurrences = state.numbering.attachments;
+                assert.deepEqual(
+                    occurrences.map((item) => item.id),
+                    ["§I2§", "§I3§", "§F4§", "§F5§"],
+                );
+                ids = [occurrences[0].id, occurrences[2].id];
+                siblings = [occurrences[1], occurrences[3]];
+                originalInput = session
+                    .snapshotEvents()
+                    .find((event) => event.seq === occurrences[0].sourceSeq);
                 return call("context_release", { ids, reason: "both attachments consumed" });
             },
             (_request, current) => {
                 assert.equal(current.summaries.length, 0);
-                assert.ok(
-                    current.engine
-                        .state(current.sessions.list()[0])
-                        .entries.filter((entry) => ids.includes(entry.id))
-                        .every((entry) => entry.status === "queued"),
+                const session = current.sessions.list()[0];
+                const state = current.engine.state(session);
+                assert.equal(state.lastSummary, null);
+                for (const id of ids)
+                    assert.equal(state.entries.find((entry) => entry.id === id).status, "released");
+                const replacement = session
+                    .deriveMessages()
+                    .find((message) => message.id === originalInput.data.id);
+                assert.ok(replacement);
+                const expected = structuredClone(content);
+                for (const [index, id] of [
+                    [1, ids[0]],
+                    [4, ids[1]],
+                ]) {
+                    assert.match(
+                        replacement.content[index].text,
+                        new RegExp(id.replace(/§$/, "R§")),
+                    );
+                    expected[index] = replacement.content[index];
+                }
+                assert.deepEqual(
+                    replacement.content,
+                    expected,
+                    "adjacent text and duplicate siblings stay byte-identical",
                 );
-                return call("context_compact", { reason: "cover consumed attachments" });
-            },
-            (_request, current) => {
-                assert.ok(
-                    current.engine
-                        .state(current.sessions.list()[0])
-                        .entries.filter((entry) => ids.includes(entry.id))
-                        .every((entry) => entry.status === "released"),
+                for (const sibling of siblings) {
+                    const slot = state.numbering.attachments.find((item) => item.id === sibling.id);
+                    assert.equal(
+                        state.entries.find((entry) => entry.id === sibling.id).status,
+                        "available",
+                    );
+                    assert.equal(slot.blockIndex, sibling.blockIndex);
+                    assert.equal(slot.currentBlockIndex, sibling.currentBlockIndex);
+                    assert.equal(slot.sourceSeq, sibling.sourceSeq);
+                    assert.deepEqual(replacement.content[slot.currentBlockIndex], sibling.block);
+                }
+                assert.equal(
+                    JSON.stringify(
+                        session.snapshotEvents().find((event) => event.seq === originalInput.seq),
+                    ),
+                    JSON.stringify(originalInput),
                 );
-                return call("context_expand", { id: ids[0] });
+                return call("context_expand", { id: ids[0].replace(/§$/, "R§") });
             },
             call("nested_file"),
             (request, current) => {
@@ -82,7 +125,6 @@ test("real AgentLoop releases attachments only at summary commit and reintroduce
             },
         ],
     });
-    t.after(world.close);
     world.ctx.tools.register(
         defineTool({
             name: "nested_file",
@@ -95,7 +137,7 @@ test("real AgentLoop releases attachments only at summary commit and reintroduce
             execute: async (_args, exec) => {
                 const outcome = await world.ctx.tools.execute({
                     name: "context_expand",
-                    arguments: { id: ids[1] },
+                    arguments: { id: ids[1].replace(/§$/, "R§") },
                     callId: `${exec.callId}:child`,
                     agent: exec.agent,
                     parent: exec.token,
@@ -113,41 +155,80 @@ test("real AgentLoop releases attachments only at summary commit and reintroduce
         name: "report.txt",
     });
     const handle = await world.create();
-    await world.followup(handle, [
+    content = [
         { type: "text", text: "Keep the attachment conclusions and user goal. ".repeat(700) },
         { type: "image", attachment: image },
+        { type: "text", text: "Keep text between identical image occurrences." },
+        { type: "image", attachment: image },
         { type: "file", attachment: file },
-    ]);
+        { type: "text", text: "Keep text between identical file occurrences." },
+        { type: "file", attachment: file },
+        { type: "text", text: "Keep the final user requirement." },
+    ];
+    await world.followup(handle, content);
     assert.equal(checked, true);
-    assert.equal(world.summaries.length, 1);
-    assert.deepEqual(
-        world.engine
-            .state(handle.agent.session)
-            .lastSummary.projection.attachments.map((item) => item.action),
-        ["marked-excluded", "marked-excluded"],
-    );
+    assert.equal(world.summaries.length, 0);
+    const state = world.engine.state(handle.agent.session);
+    assert.equal(state.lastSummary, null);
+    for (const id of ids)
+        assert.equal(state.entries.find((entry) => entry.id === id).status, "released");
+    for (const sibling of siblings)
+        assert.equal(state.entries.find((entry) => entry.id === sibling.id).status, "available");
     assert.equal(result(handle.agent.session, "context_expand").representation, "native-image");
     assert.equal(result(handle.agent.session, "nested_file").representation, "file-handle");
 });
 
-test("whole tool-pair exclusion reports child image omission without leaving an unmatched call", async (t) => {
+test("a released tool body and its child image remain archived after a covering summary without fabricated omission receipts", async (t) => {
+    let world;
+    t.after(() => world?.close());
     const root = await temporaryRoot(t);
     let target;
-    const world = await loopFixture(root, {
+    let child;
+    let originalResult;
+    world = await loopFixture(root, {
         attachments: true,
         inputModalities: ["text", "image"],
         responses: [
             call("picture"),
             (_request, current) => {
-                target = current.engine
-                    .state(current.sessions.list()[0])
-                    .entries.find((entry) => entry.role === "tool").id;
+                const session = current.sessions.list()[0];
+                const state = current.engine.state(session);
+                const entry = state.entries.find((item) => item.role === "tool");
+                target = entry.id;
+                child = state.numbering.attachments.find((item) => item.ownerId === target);
+                assert.ok(child);
+                originalResult = session
+                    .snapshotEvents()
+                    .find((event) => event.seq === entry.sourceSeq);
                 return call("context_release", { ids: [target], reason: "visual result consumed" });
             },
-            call("context_compact", { reason: "summarize prior work" }),
+            (request, current) => {
+                const state = current.engine.state(current.sessions.list()[0]);
+                assert.equal(current.summaries.length, 0);
+                assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
+                assert.equal(
+                    state.entries.find((entry) => entry.id === child.id).status,
+                    "released",
+                );
+                assert.equal(
+                    request.messages
+                        .flatMap((message) => message.content)
+                        .some((block) => block.type === "image"),
+                    false,
+                );
+                return call("context_compact", { reason: "summarize prior work" });
+            },
+            (_request, current) => {
+                assert.equal(
+                    current.engine
+                        .state(current.sessions.list()[0])
+                        .entries.find((entry) => entry.id === child.id).status,
+                    "released",
+                );
+                return call("context_expand", { id: child.id.replace(/§$/, "R§") });
+            },
         ],
     });
-    t.after(world.close);
     const ref = await world.attachments.saveImage({ data: png(), mediaType: "image/png" });
     world.ctx.tools.register(
         defineTool({
@@ -164,9 +245,28 @@ test("whole tool-pair exclusion reports child image omission without leaving an 
     const handle = await world.create();
     await world.followup(handle, "Keep this completed-work objective. ".repeat(700));
     assert.equal(world.summaries.length, 1);
-    const receipt = world.engine.state(handle.agent.session).lastSummary;
-    assert.ok(receipt.excludedIds.includes(target));
-    assert.equal(receipt.projection.attachments[0].action, "tool-pair-excluded");
+    const state = world.engine.state(handle.agent.session);
+    const receipt = state.lastSummary;
+    assert.equal(state.entries.find((entry) => entry.id === target).status, "summarized");
+    assert.equal(state.entries.find((entry) => entry.id === child.id).status, "released");
+    assert.equal(receipt.excludedIds.includes(target), false);
+    assert.equal(receipt.excludedIds.includes(child.id), false);
+    assert.equal(
+        receipt.projection.attachments.some((item) => item.id === child.id),
+        false,
+        "the image was removed before summary projection and has no checkpoint omission receipt",
+    );
+    assert.equal(
+        JSON.stringify(
+            handle.agent.session.snapshotEvents().find((event) => event.seq === originalResult.seq),
+        ),
+        JSON.stringify(originalResult),
+    );
+    const recovered = result(handle.agent.session, "context_expand");
+    assert.deepEqual(recovered.attachment, ref);
+    assert.equal(recovered.releaseStatus, "released");
+    assert.equal(recovered.representation, "native-image");
+    assert.equal(recovered.verifiedBytes, ref.bytes);
     assert.equal(
         world.summaries[0].messages
             .flatMap((message) => message.content)

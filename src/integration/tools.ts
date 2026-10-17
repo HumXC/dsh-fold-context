@@ -8,10 +8,14 @@ import {
     RECEIPT_KEY,
     RELEASE_TOOL,
     STATUS_TOOL,
-    ID_PATTERN,
+    ID_INPUT_PATTERN,
+    normalizeId,
 } from "../domain/protocol.js";
 
-const idsSchema = z.array(z.string().regex(ID_PATTERN)).min(1).max(128);
+const idsSchema = z
+    .array(z.string().max(20).regex(ID_INPUT_PATTERN).transform(normalizeId))
+    .min(1)
+    .max(128);
 function actor(exec: ToolRunContext) {
     if (exec.agent === undefined) throw new Error("fold-context tools require an owning agent");
     exec.signal.throwIfAborted();
@@ -22,14 +26,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: RELEASE_TOOL,
             description:
-                "Mark user/assistant text (§U/§A), a tool pair (§T), or an individual image/file (§I/§F) to omit from a future covering summary. Normal requests stay unchanged until official checkpoint commit; returns queued/settled IDs with recoverable originals.",
+                "Release consumed tool-result bodies or individual attachments without a summary. Returns queued/settled IDs; applied releases leave recoverable numbered placeholders. User and assistant conversation text is preserved.",
             parameters: {
                 ids: {
                     type: "array",
                     items: { type: "string" },
                     required: true,
                     description:
-                        "1–128 exact releasable session IDs, such as §U7§, §A8§, §T9§, §I10§ or §F11§. One shared ordinal; attachment IDs omit only that occurrence.",
+                        "1–128 session IDs: §T9§ for a result body, §I10§ or §F11§ for one attachment. An R suffix before the closing delimiter means already released; both forms are accepted.",
                 },
                 reason: {
                     type: "string",
@@ -50,9 +54,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 return {
                     ...plan,
                     [RECEIPT_KEY]:
-                        plan.accepted && plan.queued.length > 0
+                        plan.accepted &&
+                        plan.queued.some(
+                            (id) =>
+                                engine.state(agent.session).entries.find((entry) => entry.id === id)
+                                    ?.status === "available",
+                        )
                             ? {
-                                  version: 4,
+                                  version: 6,
                                   kind: "release",
                                   sessionId: agent.session.id,
                                   ids: plan.queued,
@@ -109,7 +118,8 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 ids: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Optional 1–128 exact IDs to inspect.",
+                    description:
+                        "Optional 1–128 session IDs; ordinary IDs and released R aliases are accepted.",
                 },
                 limit: {
                     type: "integer",
@@ -129,6 +139,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                     args.limit === undefined
                         ? engine.releasePolicy.catalogLimit
                         : z.number().int().min(1).max(128).parse(args.limit);
+                const reminder = await engine.releaseReminder(agent, exec.signal);
                 const view = catalog(
                     engine.state(agent.session),
                     engine.releasePolicy,
@@ -138,6 +149,12 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 );
                 return {
                     scheduling: await engine.schedulingStatus(agent, exec.signal, limit),
+                    reminders: {
+                        ...reminder,
+                        state: { ...reminder.state },
+                        candidates: reminder.candidates.map((candidate) => ({ ...candidate })),
+                        policy: { ...engine.reminderPolicy },
+                    },
                     summaryPolicy: view.summaryPolicy,
                     attachments: view.attachments,
                     attachmentsOmitted: view.attachmentsOmitted,

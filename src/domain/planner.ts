@@ -1,6 +1,8 @@
 import type { LedgerState } from "./ledger.js";
 import { selectedExclusions } from "./exclusion.js";
 import { resolveSummaryPolicy, type SummaryPolicy } from "./summary-policy.js";
+import { normalizeId, displayId } from "./protocol.js";
+import { pendingReleaseReason, hasInlinePlaceholder } from "./release.js";
 
 export interface ReleasePolicy {
     catalogLimit: number;
@@ -18,13 +20,19 @@ export function resolveReleasePolicy(config: Partial<ReleasePolicy> = {}): Reado
 }
 export function planRelease(state: LedgerState, ids: readonly string[]) {
     const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
-    const unique = [...new Set(ids)];
+    const unique = [...new Set(ids.map(normalizeId))];
     const known = new Set([
         ...state.numbering.slots.map((slot) => slot.id),
         ...state.numbering.attachments.map((slot) => slot.id),
     ]);
     const unknown = unique.filter((id) => !known.has(id));
-    const unsupported = unique.filter((id) => known.has(id) && !entries.has(id));
+    const unsupported = unique.filter(
+        (id) =>
+            known.has(id) &&
+            (!entries.has(id) ||
+                entries.get(id)!.role === "user" ||
+                entries.get(id)!.role === "assistant"),
+    );
     if (unknown.length > 0 || unsupported.length > 0)
         return { accepted: false as const, unknown, unsupported, queued: [], settled: [] };
     return {
@@ -44,6 +52,7 @@ export function catalog(
     ids?: readonly string[],
     summaryPolicy: SummaryPolicy = resolveSummaryPolicy(),
 ) {
+    ids = ids?.map(normalizeId);
     const targets =
         ids === undefined ? state.entries : state.entries.filter((entry) => ids.includes(entry.id));
     const selectable = new Set(
@@ -56,20 +65,8 @@ export function catalog(
     );
     const entries = targets.slice(-limit).map((entry) => ({
         ...entry,
-        pendingReason:
-            entry.status !== "queued"
-                ? null
-                : !selectable.has(entry.id)
-                  ? "protocol_protection"
-                  : state.activeStart !== null
-                    ? "summary_in_progress"
-                    : state.lastSummary !== null &&
-                        entry.queuedAt !== null &&
-                        entry.queuedAt < state.lastSummary.seq
-                      ? "outside_selection"
-                      : state.summaryRequests.at(-1)?.status === "failed"
-                        ? "summary_failed"
-                        : "awaiting_covering_summary",
+        displayId: displayId(entry.id, hasInlinePlaceholder(entry)),
+        pendingReason: pendingReleaseReason(state, entry, selectable),
     }));
     const matching = (values: readonly string[]) =>
         values.filter((id) => ids === undefined || ids.includes(id));
@@ -136,9 +133,17 @@ export function catalog(
         ids === undefined
             ? state.numbering.slots
             : state.numbering.slots.filter((slot) => ids.includes(slot.id));
-    const releasable = new Set(state.entries.map((entry) => entry.id));
+    const releasable = new Set(
+        state.entries
+            .filter((entry) => entry.role !== "user" && entry.role !== "assistant")
+            .map((entry) => entry.id),
+    );
     const numbers = numbered.slice(-limit).map(({ summaryShape: _shape, ...slot }) => ({
         ...slot,
+        displayId: displayId(
+            slot.id,
+            hasInlinePlaceholder(state.entries.find((entry) => entry.id === slot.id)),
+        ),
         releasable: releasable.has(slot.id),
     }));
     return {
@@ -150,6 +155,10 @@ export function catalog(
             .slice(-limit)
             .map(({ block, ...item }) => ({
                 ...item,
+                displayId: displayId(
+                    item.id,
+                    hasInlinePlaceholder(state.entries.find((entry) => entry.id === item.id)),
+                ),
                 attachment: {
                     attachmentId: block.attachment.attachmentId,
                     name:

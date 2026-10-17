@@ -356,11 +356,16 @@ test("tool results are allocated in assistant call order before execution and bi
             .map((block) => JSON.parse(block.text)),
     );
     assert.equal(
-        records.some((record) => record.id === "§T3§"),
+        records.some((record) => record.callId === "alpha"),
         false,
     );
     assert.equal(
-        records.some((record) => record.id === "§T4§" && record.role === "tool"),
+        records.some(
+            (record) =>
+                record.callId === "beta" &&
+                record.role === "tool" &&
+                record.text === "Result ".repeat(1000),
+        ),
         true,
     );
     assert.deepEqual(
@@ -447,7 +452,7 @@ test("resume and fork abandon orphan assistant reservations without recycling or
     assert.equal(slots(f)[1].status, "reserved");
 });
 
-test("user text is releasable while non-text assistant IDs reject the entire mixed plan", async (t) => {
+test("conversation IDs reject a mixed batch while tool results remain individually releasable", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const first = f.appendUser("Consumed user input ".repeat(1000));
@@ -468,21 +473,34 @@ test("user text is releasable while non-text assistant IDs reject the entire mix
     );
     const status = await f.invoke("context_status", { ids: [userId] });
     assert.equal(status.value.numbers[0].role, "user");
-    assert.equal(status.value.numbers[0].releasable, true);
+    assert.equal(status.value.numbers[0].releasable, false);
     assert.equal(status.value.entries.length, 1);
     const accepted = await f.invoke("context_release", {
         ids: [userId, toolId],
         reason: "Consumed bodies",
     });
-    assert.equal(accepted.value.accepted, true);
+    assert.equal(accepted.value.accepted, false);
+    assert.deepEqual(accepted.value.unsupported, [userId]);
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === toolId).status,
+        "available",
+    );
+    assert.equal(
+        (await f.invoke("context_release", { ids: [toolId], reason: "Consumed tool output" })).value
+            .accepted,
+        true,
+    );
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
-    assert.ok(await f.engine.compactNow(f.agent, signal()));
-    for (const id of [userId, toolId]) {
-        assert.equal(
-            f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
-            "released",
-        );
-    }
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === toolId).status,
+        "released",
+    );
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === userId).status,
+        "available",
+    );
+    assert.ok(f.session.surface.nodes.includes(first.seq));
+    assert.deepEqual(f.session.eventAt(first.seq).data.content, first.data.content);
     for (const id of ["c42", "42", "§0§", "§01§", "§-1§", "§42", "§42§", "§T0§", "§A01§", "§X1§"]) {
         const invalid = await f.invoke("context_release", { ids: [id], reason: "Invalid marker" });
         assert.equal(invalid.isError, true);

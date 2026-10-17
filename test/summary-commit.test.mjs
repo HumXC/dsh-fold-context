@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { ledgerProjection } from "../lib/domain/ledger.js";
 import { selectedExclusions, summaryInput } from "../lib/domain/exclusion.js";
 import { summaryRecords } from "./summary-records.mjs";
@@ -17,13 +18,13 @@ function folded(events) {
     );
 }
 
-test("only the matching adjacent checkpoint settles excluded IDs; subsequent end error does not roll back", async (t) => {
+test("legacy matching adjacent checkpoint settles excluded IDs; subsequent end error does not roll back", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     const original = f.appendUser("Completed evidence. ".repeat(500));
     const id = f.idFor(original);
-    parsed(await f.invoke("context_release", { ids: [id], reason: "redundant" }));
+    recordLegacyRelease(f, [id], "redundant");
     parsed(await f.invoke("context_compact", { reason: "checkpoint" }));
     const nodes = f.session.surface.nodes;
     await f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
@@ -85,7 +86,7 @@ test("only the matching adjacent checkpoint settles excluded IDs; subsequent end
     assert.deepEqual(selectedExclusions(late, new Set(before.surface), before.activeStart), []);
 });
 
-test("native legacy protection remains replayable while transcript excludes combined marked explanation and pair", async (t) => {
+test("legacy native protection remains replayable while transcript excludes combined marked explanation and pair", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -127,7 +128,7 @@ test("native legacy protection remains replayable while transcript excludes comb
     f.session.append("step/end", { turn: 1, step: 1 });
     f.advanceSteps(1);
     const ids = [f.idFor(assistant), f.idFor(result)];
-    parsed(await f.invoke("context_release", { ids, reason: "consumed" }));
+    recordLegacyRelease(f, ids, "consumed");
     const status = parsed(await f.invoke("context_status", { ids }));
     assert.equal(
         status.entries.every((entry) => entry.pendingReason === "awaiting_covering_summary"),
@@ -145,8 +146,19 @@ test("native legacy protection remains replayable while transcript excludes comb
     const nodes = f.session.surface.nodes;
     await f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
     assert.equal(
-        summaryRecords(f.calls[0].messages).some((record) => ids.includes(record.id)),
+        summaryRecords(f.calls[0].messages).some(
+            (record) =>
+                [message.content[0].text, message.content[1].text].includes(record.text) ||
+                record.callId === "call",
+        ),
         false,
+    );
+    assert.equal(
+        summaryRecords(f.calls[0].messages).some(
+            (record) =>
+                record.role === "user" && record.text === "Keep the task goal. ".repeat(200),
+        ),
+        true,
     );
     assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, ids);
     assert.equal(f.engine.state(f.session).lastSummary.projection.omittedReasoning[0].id, ids[0]);

@@ -22,7 +22,7 @@ function run(root, mode) {
     return JSON.parse(outcome.stdout.trim().split("\n").at(-1));
 }
 test(
-    "image/file occurrence IDs, receipts and verified binaries survive independent-process restart and fork",
+    "inline image/file releases, duplicate occurrence IDs and verified binaries survive process restart and fork",
     { timeout: 60000 },
     async (t) => {
         const root = await temporaryRoot(t);
@@ -30,7 +30,10 @@ test(
         const restored = run(root, "read");
         const child = run(root, "read-child");
         assert.equal(written.written, true);
+        assert.equal(written.inlineReleased, true);
+        assert.equal(written.summaries, 0);
         assert.equal(restored.restored, true);
+        assert.equal(restored.inlineReleased, true);
         assert.equal(restored.forkIsolated, true);
         assert.equal(child.restoredChild, true);
         assert.equal(new Set([written.pid, restored.pid, child.pid]).size, 3);

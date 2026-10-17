@@ -17,6 +17,31 @@ export const CONTROL_TOOLS = new Set([
 export type EntryStatus = "available" | "queued" | "released" | "summarized";
 export type EntryRole = "user" | "assistant" | "tool";
 export const ID_PATTERN = /^§[UATIF][1-9]\d*§$/;
+/** Released labels are aliases; durable resource identities never change. */
+export const ID_INPUT_PATTERN = /^§[UATIF][1-9]\d*R?§$/;
+export function normalizeId(id: string): string {
+    if (!ID_INPUT_PATTERN.test(id)) throw new Error("fold-context: invalid context ID");
+    return id.replace(/R§$/, "§");
+}
+export function displayId(id: string, released: boolean): string {
+    const canonical = normalizeId(id);
+    return released ? canonical.replace(/§$/, "R§") : canonical;
+}
+export function inlineReleaseContent(id: string): { type: "text"; text: string }[] {
+    return [
+        {
+            type: "text",
+            text: `[${displayId(id, true)} body released; original recoverable with context_expand.]`,
+        },
+    ];
+}
+export function isReleasedContent(content: readonly ContentBlock[], id: string): boolean {
+    const legacy = releaseContent(id)[0]!.text;
+    const inline = ID_INPUT_PATTERN.test(id) ? inlineReleaseContent(id)[0]!.text : null;
+    return content.some(
+        (block) => block.type === "text" && (block.text === legacy || block.text === inline),
+    );
+}
 export interface ContextEntry {
     id: string;
     role: EntryRole | "image" | "file";

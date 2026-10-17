@@ -6,21 +6,20 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { ledgerProjection } from "../lib/domain/ledger.js";
 import { catalog, planRelease } from "../lib/domain/planner.js";
 import { entryId } from "../lib/domain/protocol.js";
+import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 
 const longText = (label) => `${label} `.repeat(1500);
 const signal = () => new AbortController().signal;
 
-test("numbered release queues without changing a pressure boundary and commits only with a summary", async (t) => {
+test("legacy numbered release waits for a covering summary and remains replayable", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const result = f.toolRound("read", longText("ORIGINAL"));
+    f.appendUser("Keep the historical task objective in the summary.");
+    f.appendUser(longText("CURRENT_TAIL"));
     const id = f.idFor(result);
-    const receipt = await f.invoke("context_release", {
-        ids: [id, id],
-        reason: "Consumed evidence",
-    });
-    assert.equal(receipt.isError, false);
-    assert.equal(receipt.meta.dshContextCompression.version, 4);
+    const receipt = recordLegacyRelease(f, [id], "Consumed evidence");
+    assert.equal(receipt.dshContextCompression.version, 4);
     assert.equal(f.engine.state(f.session).entries[0].status, "queued");
     const surface = [...f.session.surface.nodes];
     const messages = f.session.deriveMessages();
@@ -212,7 +211,7 @@ test("failed official summary retains history and queued releases, closes transa
     f.appendUser(longText("GOAL"));
     const result = f.toolRound("read", longText("QUEUED_ON_FAILURE"));
     const id = f.idFor(result);
-    await f.invoke("context_release", { ids: [id], reason: "Consumed" });
+    recordLegacyRelease(f, [id], "Consumed");
     await f.invoke("context_compact", { reason: "Checkpoint" });
     const before = [...f.session.surface.nodes];
     await assert.rejects(
@@ -428,15 +427,21 @@ test("cancellation before a boundary preserves queued intent and never rewrites 
     assert.equal(f.engine.state(f.session).entries[0].status, "queued");
 });
 
-test("a tiny marked result remains queued rather than growing its context body", async (t) => {
+test("an explicit tiny release still replaces its body with a bounded recoverable marker", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const result = f.toolRound("read", "ok");
     await f.invoke("context_release", { ids: [f.idFor(result)], reason: "Done" });
     const before = f.session.seq;
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
-    assert.equal(f.session.seq, before);
-    assert.equal(f.engine.state(f.session).entries[0].status, "queued");
+    assert.ok(f.session.seq > before);
+    assert.equal(f.engine.state(f.session).entries[0].status, "released");
+    const current = f.session
+        .deriveMessages()
+        .find((message) => message.id === result.data.message.id);
+    assert.ok(current.content[0].text.length < 128);
+    assert.equal(f.session.eventAt(result.seq).data.message.content[0].text, "ok");
+    assert.equal(f.calls.length, 0);
 });
 
 test("large summary coverage stays bounded and exact IDs remain queryable", async (t) => {
@@ -460,5 +465,5 @@ test("large summary coverage stays bounded and exact IDs remain queryable", asyn
     const excluded = catalog(state, policy, 1, [excludedIds[0]]);
     assert.deepEqual(excluded.lastSummary.ids, [excludedIds[0]]);
     assert.deepEqual(excluded.lastSummary.excludedIds, [excludedIds[0]]);
-    assert.equal(ledgerProjection.stateVersion, 12);
+    assert.equal(ledgerProjection.stateVersion, 13);
 });
