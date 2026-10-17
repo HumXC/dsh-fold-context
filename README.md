@@ -1,5 +1,7 @@
 # dsh-fold-context
 
+[![CI and Release](https://github.com/HumXC/dsh-fold-context/actions/workflows/ci.yml/badge.svg)](https://github.com/HumXC/dsh-fold-context/actions/workflows/ci.yml)
+
 让 DSH 的长任务上下文压缩更可预测：已用完的工具结果和单个附件可独立释放，保留可恢复的编号占位；较旧历史由官方摘要流程整理。插件按积累、停留时间和压力提醒模型检查候选，并明确区分排队、实际释放和摘要覆盖。
 
 适合需要持续阅读文件、调用工具、反复调查和跨多轮推进的任务。压缩以 DSH 官方摘要事务为基础，记忆提炼采用独立适配接口。
@@ -241,6 +243,23 @@ pnpm format:check
 普通压力压缩若只选中旧 checkpoint、编号/释放管理通知、重新注入的指令 baseline 或 MCP snapshot，不再重复调用摘要模型；真实业务内容和非 baseline 的指令变化仍可触发。手动 `/compact`、显式 checkpoint 请求与真实溢出恢复保留兜底。摘要输入省略管理通知以及 U/A/T 来源编号，I/F 归档引用和任务本身涉及的编号字符串继续保留。
 
 工程细节见[架构说明](./docs/architecture.md)；参考设计见[Magic Context 对照](./docs/magic-context-research.md)。
+
+## GitHub CI 与发布
+
+GitHub Actions 使用 Node.js 24，并读取 `packageManager` 中锁定的 pnpm 版本：
+
+- 推送 `main`、向 `main` 提交 PR 或手动运行工作流时，检查格式和类型，构建 Host 与 Client，运行全套测试并打包。
+- 每次成功构建保留 14 天的 Actions artifact，包含 `dsh-fold-context.tgz` 和 `SHA256SUMS`。
+- 推送 `v*` 标签时，先校验标签与 `package.json` 的版本一致，再执行相同检查。通过后自动创建 GitHub Release，上传安装包和校验文件；带 `-` 的版本标记为 prerelease。
+
+发布前先提交版本与代码，再推送对应标签。例如当前包版本为 `0.2.1` 时：
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外配置发布凭据。发布后的安装包可从 [GitHub Releases](https://github.com/HumXC/dsh-fold-context/releases) 下载；将安装包和 `SHA256SUMS` 放在同一目录后，执行 `sha256sum --check SHA256SUMS` 校验，再通过 DSH 插件管理安装。
 
 ## 许可证
 

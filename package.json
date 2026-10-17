@@ -44,8 +44,8 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/verify-isolated.mjs",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\"",
+    "format": "prettier --write \"src/**/*.{ts,js}\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\" \".github/workflows/*.{yaml,yml}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,js}\" \"test/**/*.mjs\" \"scripts/**/*.mjs\" \"*.json\" \"*.{yaml,yml}\" \"examples/*.yml\" \".github/workflows/*.{yaml,yml}\"",
     "prepack": "pnpm run build"
   },
   "peerDependencies": {

@@ -1,0 +1,97 @@
+name: CI and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Check, build, test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          node -e 'const version = require("./package.json").version; if (process.env.GITHUB_REF_NAME !== "v" + version) throw new Error("Release tag must match package version v" + version);'
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Install project dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check formatting and types
+        run: |
+          pnpm format:check
+          pnpm typecheck
+      - name: Build and test
+        run: |
+          pnpm build
+          pnpm test
+      - name: Pack release asset
+        run: |
+          mkdir -p dist
+          npm pack --ignore-scripts --pack-destination dist
+          fold_context_version="$(node -p 'require("./package.json").version')"
+          cp "dist/dsh-fold-context-$fold_context_version.tgz" dist/dsh-fold-context.tgz
+      - name: Generate checksum
+        working-directory: dist
+        run: sha256sum dsh-fold-context.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: fold-context-${{ github.sha }}
+          path: |
+            dist/dsh-fold-context.tgz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: fold-context-${{ github.sha }}
+          path: dist
+      - name: Verify package checksum
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Publish package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            fold_context_release_flags=(--draft --verify-tag --generate-notes --title "Fold Context $GITHUB_REF_NAME")
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              fold_context_release_flags+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" "${fold_context_release_flags[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/dsh-fold-context.tgz dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
