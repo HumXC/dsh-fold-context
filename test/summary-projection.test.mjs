@@ -115,7 +115,7 @@ test("preserve encodes reasoning as historical data without native signatures", 
     assert.equal(source.data.message.source.replayState.response.private, "opaque-signature");
 });
 
-test("legacy marked signed explanation can be excluded without masquerading as its original response", async (t) => {
+test("obsolete release receipt keeps signed explanation in historical data and preserves the original response", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -128,10 +128,8 @@ test("legacy marked signed explanation can be excluded without masquerading as i
     recordLegacyRelease(f, [id], "consumed");
     await compact(f);
     assert.equal(
-        records(f.calls[0].messages).some((record) =>
-            ["Discard explanation.", "Old thought"].includes(record.text),
-        ),
-        false,
+        records(f.calls[0].messages).some((record) => record.text === "Discard explanation."),
+        true,
     );
     assert.equal(
         records(f.calls[0].messages).some(
@@ -139,11 +137,20 @@ test("legacy marked signed explanation can be excluded without masquerading as i
         ),
         true,
     );
-    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, [id]);
+    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, []);
     assert.equal(f.engine.state(f.session).lastSummary.projection.omittedReasoning[0].id, id);
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+        "summarized",
+    );
+    assert.equal(source.data.message.source.replayState.response.private, "opaque-signature");
+    assert.deepEqual(source.data.message.content, [
+        { type: "text", text: "Discard explanation." },
+        { type: "reasoning", text: "Old thought" },
+    ]);
 });
 
-test("legacy attachment references stay native beside history records; failed target does not settle marks", async (t) => {
+test("attachment references stay native; failed summary does not revive an obsolete release intent", async (t) => {
     const f = await fixture({
         onStream: () => {
             throw new Error("image target unsupported");
@@ -193,7 +200,7 @@ test("legacy attachment references stay native beside history records; failed ta
     assert.equal(f.engine.state(f.session).lastSummary, null);
     assert.equal(
         f.engine.state(f.session).entries.find((entry) => entry.id === f.idFor(source)).status,
-        "queued",
+        "available",
     );
 });
 
@@ -209,7 +216,7 @@ test("historical omission report is independently bounded and exact-ID discovera
             version: 1,
             reasoning: "omit-from-summary",
             omittedReasoning: Array.from({ length: 5000 }, (_, i) => ({
-                id: `§A${i + 1}§`,
+                id: String(i + 1),
                 sourceSeq: i,
                 currentSeq: i,
                 blockIndex: 0,
@@ -223,9 +230,8 @@ test("historical omission report is independently bounded and exact-ID discovera
     assert.equal(view.lastSummary.projection.omittedReasoningCharacters, 15000);
     assert.equal(JSON.stringify(view).length < 1800, true);
     assert.equal(
-        catalog(state, { catalogLimit: 1 }, 1, ["§A1§"]).lastSummary.projection.omittedReasoning[0]
-            .id,
-        "§A1§",
+        catalog(state, { catalogLimit: 1 }, 1, ["1"]).lastSummary.projection.omittedReasoning[0].id,
+        "1",
     );
 });
 

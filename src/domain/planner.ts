@@ -1,8 +1,8 @@
 import type { LedgerState } from "./ledger.js";
 import { selectedExclusions } from "./exclusion.js";
 import { resolveSummaryPolicy, type SummaryPolicy } from "./summary-policy.js";
-import { normalizeId, displayId } from "./protocol.js";
-import { pendingReleaseReason, hasInlinePlaceholder } from "./release.js";
+import { normalizeId } from "./protocol.js";
+import { pendingReleaseReason } from "./release.js";
 
 export interface ReleasePolicy {
     catalogLimit: number;
@@ -65,7 +65,6 @@ export function catalog(
     );
     const entries = targets.slice(-limit).map((entry) => ({
         ...entry,
-        displayId: displayId(entry.id, hasInlinePlaceholder(entry)),
         pendingReason: pendingReleaseReason(state, entry, selectable),
     }));
     const matching = (values: readonly string[]) =>
@@ -140,10 +139,7 @@ export function catalog(
     );
     const numbers = numbered.slice(-limit).map(({ summaryShape: _shape, ...slot }) => ({
         ...slot,
-        displayId: displayId(
-            slot.id,
-            hasInlinePlaceholder(state.entries.find((entry) => entry.id === slot.id)),
-        ),
+        releaseStatus: state.entries.find((entry) => entry.id === slot.id)?.status ?? null,
         releasable: releasable.has(slot.id),
     }));
     return {
@@ -155,10 +151,6 @@ export function catalog(
             .slice(-limit)
             .map(({ block, ...item }) => ({
                 ...item,
-                displayId: displayId(
-                    item.id,
-                    hasInlinePlaceholder(state.entries.find((entry) => entry.id === item.id)),
-                ),
                 attachment: {
                     attachmentId: block.attachment.attachmentId,
                     name:

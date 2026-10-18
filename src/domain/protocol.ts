@@ -1,4 +1,5 @@
-import type { ContentBlock, Message } from "@deepseek-ai/dsh-llm";
+import type { Message } from "@deepseek-ai/dsh-llm";
+import { z } from "zod";
 
 /** Ordinals identify allocations, never event positions. */
 export const RECEIPT_KEY = "dshContextCompression";
@@ -14,33 +15,23 @@ export const CONTROL_TOOLS = new Set([
     EXPAND_TOOL,
     SEARCH_TOOL,
 ]);
+export const SUMMARY_CONTROL_TOOLS = new Set([RELEASE_TOOL, COMPACT_TOOL, STATUS_TOOL]);
 export type EntryStatus = "available" | "queued" | "released" | "summarized";
 export type EntryRole = "user" | "assistant" | "tool";
-export const ID_PATTERN = /^§[UATIF][1-9]\d*§$/;
-/** Released labels are aliases; durable resource identities never change. */
-export const ID_INPUT_PATTERN = /^§[UATIF][1-9]\d*R?§$/;
+export const ID_PATTERN = /^[1-9]\d*$/;
+export const idArgumentSchema = z.number().int().positive().safe().transform(String);
 export function normalizeId(id: string): string {
-    if (!ID_INPUT_PATTERN.test(id)) throw new Error("fold-context: invalid context ID");
-    return id.replace(/R§$/, "§");
-}
-export function displayId(id: string, released: boolean): string {
-    const canonical = normalizeId(id);
-    return released ? canonical.replace(/§$/, "R§") : canonical;
+    if (!ID_PATTERN.test(id) || !Number.isSafeInteger(Number(id)))
+        throw new Error("fold-context: invalid context ID");
+    return id;
 }
 export function inlineReleaseContent(id: string): { type: "text"; text: string }[] {
     return [
         {
             type: "text",
-            text: `[${displayId(id, true)} body released; original recoverable with context_expand.]`,
+            text: `[released ${normalizeId(id)}]`,
         },
     ];
-}
-export function isReleasedContent(content: readonly ContentBlock[], id: string): boolean {
-    const legacy = releaseContent(id)[0]!.text;
-    const inline = ID_INPUT_PATTERN.test(id) ? inlineReleaseContent(id)[0]!.text : null;
-    return content.some(
-        (block) => block.type === "text" && (block.text === legacy || block.text === inline),
-    );
 }
 export interface ContextEntry {
     id: string;
@@ -58,31 +49,18 @@ export interface ContextEntry {
     reason: string | null;
 }
 export interface Intent {
-    version: 4;
+    version: 8;
     kind: "release" | "summary";
     sessionId: string;
     ids: string[];
     reason: string;
 }
-export function entryId(role: EntryRole, number: number): string {
+export function entryId(number: number): string {
     if (!Number.isSafeInteger(number) || number < 1)
         throw new Error("fold-context: invalid allocation ordinal");
-    const type = { user: "U", assistant: "A", tool: "T" }[role];
-    return `§${type}${number}§`;
+    return String(number);
 }
-export function legacyId(id: string): string {
-    return id.replace(/^§[UAT]/, "§");
-}
-/** Recognizes already committed legacy tool-body releases without creating new replacements. */
-export function releaseContent(id: string): { type: "text"; text: string }[] {
-    return [
-        {
-            type: "text",
-            text: `[Context ${id} released by model request; original retained in session log.]`,
-        },
-    ];
-}
-export function previewContent(content: readonly ContentBlock[], limit = 100): string {
+export function previewContent(content: Message["content"], limit = 100): string {
     const text = content
         .filter((block) => block.type === "text")
         .map((block) => block.text)

@@ -1,149 +1,166 @@
 # 架构与状态协议
 
-## 目标与层次
+## 职责边界
 
-模型选择稳定编号，插件记录释放意图，在安全步骤边界独立替换工具结果正文或单次附件。官方 compaction engine 另行生成摘要并替换平衡历史选区。用户文字、助手原记录与签名不原位改写，不引入 DSH 核心补丁；官方 tool-result-pruner 可共存，记忆提炼仍是独立适配契约。
+模型判断证据是否仍有用，并通过 `context_release` 标记工具结果正文或单个附件。Host 保存意图，在安全步骤边界决定何时合批释放；释放后重新测量压力，必要时调用 DSH 官方摘要事务。Client 展示工具状态与已经提交的释放回执。
 
-```text
-模型工具 / PTC trace → 版本化意图 → Session 日志 → 纯 ledger
-                                      │             │
-                                      │             ├─ 安全步骤边界 → prune + 同身份替换 → R 占位
-                                      │             ├─ 业务步计数 + 提醒状态 → 既有准入通知
-                                      │             └─ 官方摘要选区 → 过滤 / fresh evidence → checkpoint
-                                      └─ sessionQuery → 原文搜索与附件恢复
+实现分为三层：
 
-可选记忆：来源引用 + checkpoint → 独立提炼与保存回执
-```
+- `src/domain`：纯数字 ID、归档索引、释放账本、提醒、合批计划、摘要选区、预算和经济估算。
+- `src/integration`：工具注册、每请求控制消息、会话事件、官方压缩事务、原文恢复与附件校验。
+- [client.js](../src/client.js)：DSH 原生工具行与释放完成行，独立于 Host 的摘要和释放决策。
 
-`domain` 处理编号、纯选择、日志折叠和有界目录。`integration` 注册 Cordis 服务与模型工具，继承官方引擎。`memory` 不引用压缩引擎，也不把摘要成功解释为记忆保存成功。
+压缩事务由官方 `compaction` 服务提交。插件保留工具调用与结果配对、当前任务和安全尾部，通过 `sessionQuery` 恢复原始事件。会话持久化依赖官方 checkpoint policy；插件内部的释放意图、完成回执和摘要 checkpoint 各自承担不同职责。
 
-## 稳定身份与预分配
+## 会话 ID 与原始内容
 
-`§U17§`、`§A18§`、`§T19§`、`§I20§`、`§F21§` 共用正整数 ordinal；seq 定位日志。U/A 是对话检索身份，新的释放请求只接受 T/I/F。原位 T 仅替换结果正文，I/F 仅替换单次附件；相同引用重复出现分别编号。`R` 是当前占位的显示后缀，输入时归一到原 ID，不生成新身份。摘要覆盖后移除逐项占位；旧版通过摘要排除的条目不生成 R。surface 顺序由节点数组决定，不能按 seq 大小推断。
+每会话使用同一个递增序列，为用户消息、助手消息、工具结果及每次图片、文件出现分配稳定 ID。ID 在内部为正整数的十进制字符串，在工具参数 `id` 和 `ids` 中为 JSON number，数值须处于安全整数范围。工具响应和归档索引保留数字字符串，条目类型由字段说明。
 
-[allocation.ts](../src/integration/allocation.ts) 在 `agent/pre-step` 先 `await next()`，按实际 accepted messages 追加一次 user-role notice。它在后续中间件与官方压缩完成后读取 ledger，因此第一条摘要后请求能收到新的提交回执。保留原消息对象和 decision 字段，不把声明当 runtime snapshot。空首步骤与被过滤为空的输入保持空，合法工具继续步骤仍能预留。
+释放与摘要覆盖只改变状态，ID 不变。工具结果正文有自己的身份，附件通过 `ownerId` 关联所属消息，并保存附件顺序。同一附件出现在不同消息时，各次出现分别编号，释放范围按出现位置判断。
 
-预览纯粹。只有声明被提交后才绑定输入并预留 A；同 turn/step 的 assistant/message 绑定它，assistant/attempt 不绑定。重试沿用预留，可见中断仍绑定。step/end、turn/end 或 session/end-seed 使未绑定编号 abandoned，永不复用。
+用户、助手和工具原始正文保持原样。助手的 reasoning、签名与 `replayState` 完整保留，分配信息不写入业务正文。业务中出现的 `prev:`、`next:` 或 `try_release:` 文字仍属于业务内容。
 
-助手提交时，从 tool-call 块按模型顺序预留 T。在任何工具执行前已有编号；tool/call 记录 callSeq，tool/result 通过来源引用及 owning assistant/turn/step 绑定。重复 callId 不串号，结果不占第二个编号。PTC 内部分发不另占模型消息编号。控制工具仍有调用绑定，但不进入释放及恢复证据集合。
+协议版本为 8。持久意图与释放回执通过准确的版本、类型和字段验证后参与处理。档案与回执仅支持当前协议，读取异常须以显式状态或错误呈现。
 
-普通 slot 保存当前块类型、调用身份、reasoning 字符数和 replayState 标记；attachment slot 保存 ownerId、原始 sourceSeq/blockIndex、完整 ContentBlock，以及当前 seq/blockIndex。原始引用永不因 offload 或摘要变动。日志 image/offload 的 imageIndexes 是图片序号而非 content 下标，单独折叠到当前 summaryShape.offloaded；因此原图仍可恢复。
+## 每次模型请求的控制消息
 
-准入 version 3 先接纳实际输入及其附件，再预留 A。旧 version 1/2 重放不分配新 I/F，维持已有 ordinal；首次新声明才启用附件协议并接纳存量出现。助手及工具的新附件在消息提交时绑定，控制工具结果和附件恢复 notice 不重新建立证据编号。单节点同身份替换匹配完整引用、按出现顺序保留已有附件身份；新出现立刻建立条目，移除或 checkpoint 后保持 settled 状态，不能晚到地复活 available。
-
-新的释放意图为 version 6，`releaseMode: inline`；旧 version 2/3/4 保持 `summary` 模式。projection stateVersion 为 13，新增业务步、释放进展和提醒状态。调度启用的新摘要请求使用 version 5、标记 retryable；禁用时保留 version 4。旧 failed 请求不会因升级自动重试。原位替换沿用公开 `compaction/prune` 与 `surfaceOp: replace`，原始事件继续保留，不需要核心补丁。
-
-## 动态提醒
-
-`domain/reminder.ts` 是确定性的纯计划器：候选默认至少放置两个后续业务步；积累 16000 token、4000 token 停留 8 步，或输入达到官方有效阈值的 80% 且有 4000 token 候选时提醒。8000-token 大项只影响排序。普通间隔 6 步、压力间隔 4 步；连续忽略退避到 12/24 步，新的有效释放进展或 8000-token 积累增长可解除退避，但不绕过最小间隔。无候选、关闭提醒或正在摘要时不发送。
-
-业务时钟只在已提交业务回复的 step/end 推进。纯管理调用即使附带解释文字也不推进，混合业务调用只计一步。候选计量使用当前 surface 的工具结果，pruner 产生的可见缩短立即反映，queued/released 不再计入。压力沿用官方容量、输出预留、headroom 和精确模型覆盖；容量未知或无效时不触发压力提醒。
-
-allocation 在既有准入 notice 追加最多 5 条候选，预览截短为 80 字符；不增加模型请求。计划预览不写状态，只有被接纳的 `source.releaseReminderState` 才进入纯投影，因此拒绝、取消和未提交预览不会消耗冷却。提醒状态与候选年龄随日志冷重放和 fork 保留。
-
-## 排队、原位替换与摘要配对
-
-context_release 归一 R 别名、去重并验证整批编号；unknown 或 unsupported 使整批拒绝。只有意图真正进入日志才从 available 变为 queued。`commitInlineReleases` 在官方压力/调度路径前批量处理，auto 和 scheduling 均关闭时仍可生效，摘要锁存在时等待。每次同步先规划再追加 prune/replace；替换保留消息 ID、工具调用 ID 与来源引用，完成后 flush。个别附件用编号占位替换当前原生块，其他内容保持；编号重绑跳过已标记出现，防止相同附件的兄弟条目串号。
-
-助手原记录保持完整，助手附件或已 offload 的受保护出现等待覆盖摘要。`released` 只表示真实替换或真实摘要排除；R 占位指向当前 marker 节点，后续摘要覆盖能移除它。原位释放之后的 context_expand 是新证据，不撤销替换。
-
-成功控制回执在已有改写内清理：只删除目标全部结算、无签名且没有普通文字/其他工具的完整 release 调用与结果组，保留最近两组。清理不另发起改写，也不把最早变化点移到本次原位目标之前；受保护或更早的旧组可以继续保留。失败/拒绝和原始日志不删，替换通知不创建新的业务编号。
-
-官方引擎选择原始平衡连续范围。`summarize()` 取得该范围及官方可能保留的头部 system 输入，用 `projectSummaryInput(state, input.messages, startSeq, summaryPolicy)` 新建历史数据请求，再交给 `super.summarize()`。保留原有最前面的 system；后续历史各块编码为包含 id、role、blockIndex、type 的 JSON 记录，明确它们是证据而非新指令。
-
-文本和工具参数作为历史数据；原生 assistant/tool 消息、replayState、签名和 usage 不转发。投影先省略本插件的编号/释放管理通知，再进行身份检查；U/A/T 来源编号不交给摘要模型，普通记录使用 id:null。附件保留 I/F 归档引用但不携带 ownerId；完整身份与覆盖关系继续留在 ledger/projection 回执中。摘要指令明确区分来源标签和任务内容，禁止复制或编造来源前缀，业务文本/代码中真正讨论的编号字符串保持原样。旧 checkpoint 正文不以正则全局删号，避免损坏业务内容。工具结果保留 callId、isError，空结果或附件全被标记后仍保留 outcome 记录。未知块和含糊身份显式失败。
-
-普通压力尝试按实际 surface 切片检查业务证据：旧 checkpoint、编号/释放通知和纯状态/释放控制调用不构成新证据。agent-instructions baseline 与 MCP snapshot 使用每类最近的内容/identity 指纹识别重复注入；相同快照不构成证据，实际内容或 workspace identity 变化仍构成证据，首个带真实 changes 的 baseline 也不会被一概排除。指纹随 projection 重放和缓存恢复，不保存额外正文。这些 baseline 仍保留在主请求中，覆盖真实业务的摘要也可读取它们；只改变自动摘要触发判断。没有业务证据时，在 compaction/start 和辅助请求之前停止。显式 checkpoint 请求的首个提交、手动 compactNow 和真实 context-overflow 路径保留兜底。
-
-`domain/pressure.ts` 注册独立、可重放的 `contextCompressionPressure` 投影，只存当前 surface 的轻量成本与最近主请求采样，不存签名正文。同一路由的原生回放成本取可见估算与该回复 outputTokens 的较大值；它是保守选区估计，不是精确的回放计费。主请求锚点使用 input + cacheRead + cacheWrite，不把各回复完整 input 相加，不按 encrypted signature 长度计算。模型路由改变后，旧路由回放成本与输入锚点不再用于校准。选区保留路由图片定价和官方工具配对检查，提交继续调用官方 compactRegion，`shadowedTokenCount` 继续由 SDK 的原始估算产生。
-
-原生回放额外成本的扣减锚点独立跟随 SDK 已提交的 assistant/message，assistant/attempt 只更新主请求校准与效果，不能复活已移除的回放成本。规划同时受当前有效 surface 成本下限约束，不修改 DSH 的原生 contextPressure 或其 footer。摘要后记录 before/after 估计并等待下一次主请求 usage；compaction 的辅助 usage 不参与。观察值扣除摘要后新增内容的估算变化，独立报告实际主请求输入是否低于当前阈值。未观察到改善时逐步降低保留预算；确认主请求仍超阈值时，下一轮采用最大合法前缀，保留当前新用户任务、最新业务尾部与完整工具配对。同次压力处理每次有预计改善才继续，最多 compactionRetries + 1 次；业务证据检查阻止 checkpoint 自循环，模型切换立即将旧 effect 标为 route_changed。
-
-允许排除的条目必须同时满足：queued、queuedAt 严格小于 compaction/start.seq、当前节点属于选区、消息身份及调用配对仍成立。范围外或摘要开始后的标记不进入本次过滤。
-
-旧 U/A 排除意图只作用于普通 text，不控制相邻附件或 tool-call；新请求不接受 U/A。尚未原位处理而进入摘要的 T 要求调用和结果均在选区、callId 唯一，才从临时历史输入同时排除。I/F 只过滤当前绑定的出现；范围外和受保护条目继续等待。已原位移除的内容不伪造成新的摘要排除回执。
-
-`summary.reasoning` 为 `preserve` 或默认 `omit-from-summary`。preserve 将助手 reasoning 按原文字节编码为普通历史记录，omit 仅在新摘要请求中省略并独立记录原始编号、sourceSeq/currentSeq、blockIndex 和 Unicode 码点数。原文和签名仍保留在日志。签名历史不作为原生回复转发，因此 transcript 模式不需要旧 native 模式的 replayState／仅剩 reasoning 保护；旧摘要重放仍使用旧规则。
-
-`summary.images: auto` 解析与官方相同的实际摘要路由：会话 header 或 agent options → 精确 modelPolicies override → summary provider/model 默认值 → 会话路由。仅明确声明 image inputModalities 才传原生 ImageBlock；能力未知、文本模型、references 配置或 logged offload 均保留引用证据。FileBlock 由 DSH 转成确定性文件句柄，不代表模型读取了文件内容。
-
-官方继续负责 tools、摘要指令、路由、stream、usage/rawOutput、取消、选区平衡、稳定性及缩短验证。summary 增加事务关联的 `[fold-context-projection:2 …]` 标记，保存 reasoning 与已选定 native/references 图像策略；version 1 历史标记仍沿用旧规则。标记计入缩短验证，不绕过官方提交。
-
-## 真实提交与可重放回执
-
-ledger 与临时请求共用 selectedExclusions，模式和 reasoning 策略来自持久标记，不能根据当前配置重新解释历史。
-
-1. compaction/start 保存 compactionId 和授权截止 seq。
-2. 匹配的 compaction/summary 验证首块策略标记；当前协议按 transcript 计算 excludedIds 和独立 projection 回执；无标记的历史摘要按旧 native 规则重放。无效标记或事务身份不符不能伪造处理回执。此时仍不结算 released。
-3. 立即相邻的 user/message checkpoint 必须匹配 compactionId，引用该 summary，实际移除的 surface 位置切片必须逐项等于 shadowedSeqs。
-4. 只有这个真实提交才将 pending excludedIds 设为 released，其他覆盖条目设为 summarized；范围外条目保持 queued。
-5. 最后 end 清理 pending 事务。session/end-seed 清理中断锁，旧主动摘要请求成为 failed/interrupted。
-
-单独 summary 记录、checkpoint source 标记或某个引用不足以证明过滤已应用。失败／取消发生在 replacement 之前不改变原 surface 与标记；replacement 已提交后，即使 end 或 flush 随后失败，也不能倒置已发生的提交。
-
-released 表示该编号被排除于此次摘要输入，不保证别处没有相同内容。lastSummary.ids 是完整覆盖，excludedIds 是标记排除，projection.omittedReasoning 是独立 reasoning 策略，projection.attachments 是附件投影动作：native-image、reference-only、file-handle、marked-excluded、tool-pair-excluded。列表分别有界、有 omitted 计数，可按 ID 定位，完整回执由日志重建。
-
-附件动作描述插件构造的摘要输入；native-image 表示转交原生图片投影，file-handle 表示转交句柄，均不是供应商已理解内容的证明。下游图片缩放与预算继续由 DSH adapter 管理。
-
-## 代码调度、失败与安全路径
-
-[调度器](../src/domain/scheduler.ts) 是纯选区建议和经济门槛；[引擎](../src/integration/engine.ts) 提供真实计量、路由、工具配对边界，并交由官方事务执行。候选选区按 surface 位置保持官方尾部保留语义，保留最前面的 system；缺少合法工具配对边界则不选。真正替换仍需通过官方选区、稳定性及缩短验证。
-
-低压力下 `context_compact` 的显式模型请求与 queued-release backlog 共用门槛，context_release 仅提交排队意图。默认 `enabled: true`、`proactive: true`；backlog 需在候选范围内有实际可过滤的标记，显式请求不要求标记。默认需距最近摘要至少 8 个已提交助手步骤，净节省至少 2048 tokens、占当前总请求至少 0.2，预计在未来 24 次主请求内回本。默认周期面向长会话；显式较短周期仍可拒绝同一候选。间隔从已提交 assistant slot 的 sourceSeq 推导，不是进程内调用次数。选区范围包含未标记历史，收益不能只算被标记条目。
-
-所有成本标记 **HEURISTIC**，以归一化未缓存 token 为单位。`expectedSummaryRatio` 默认 0.2；`cacheReadRatio` 默认 0.1；`summaryInputRatio`、`summaryOutputRatio` 默认 1。令 S 为整个选区 token，I 为过滤后辅助摘要请求估算，P 为预计摘要 token，T 为保留尾部 token，H 为请求开销，r 为有效缓存读取比例，则主要估算为：
+在每次主模型请求前追加一条独立 `user` 消息：
 
 ```text
-P = ceil(I × expectedSummaryRatio)
-netSavingTokens = max(0, S − P)
-savingsRatio = netSavingTokens / currentTotalTokens
-rebuiltSuffixTokens = P + T + H
-initialRebuildPenalty = cachedPrefixAssumed ? rebuiltSuffixTokens × (1 − r) : 0
-summaryCost = I × summaryInputRatio + P × summaryOutputRatio
-perTurnSaving = netSavingTokens × r
-breakEvenTurns = ceil((initialRebuildPenalty + summaryCost) / perTurnSaving)
+prev: 101 102
+next: 103
+attachments:
+102 101 1
+try_release: 12 18
 ```
 
-I 使用实际摘要投影的估算，包含保留 system、过滤后的历史、请求开销及 256 tokens 固定 framing 余量；P、成本和回本均是预测。每回合无正收益或无法表示有限回本时，breakEvenTurns 返回 null；当前请求 token 为 0 时 savingsRatio 为 0。最近 usage 未提供 cacheReadTokens 时保守假定前缀已缓存，使用配置 r；明确未缓存时 r 默认 1、无首次重建惩罚。路由签名只记录估算来源，既不证明后续供应商命中，也不推断 TTL 或真实费用。
+- `prev`：上次请求分配的 ID。
+- `next`：本次请求预留的 ID。
+- `attachments`：有附件时才出现，每行是附件 ID、owner ID、附件在 owner 中的序号，序号从 1 开始。
+- `try_release`：触发提醒时才出现，只列候选 ID。
 
-普通压力在经济/冷却检查前执行，实际 `context-overflow` 直接交回基础引擎；两条安全路径绕过经济门槛。用户 `/compact` 直接使用继承的 `compactNow`。内部基础引擎以 `auto: true` 保留官方溢出监听器，插件另记用户 `compaction.auto`：false 关闭普通压力与 backlog，仍允许实际溢出和显式模型请求。`proactive: false` 只关闭低压力 backlog；`enabled: false` 关闭经济调度，显式请求沿旧的强制摘要路径。
+控制消息以 `source.kind = 'fold-context-allocation'` 识别。消费端根据 source 元数据处理，不用正则匹配正文来判断消息类型。source 同时承载持久化所需的分配和提醒状态。
 
-普通压力、调度预览与释放提醒共用 `planPressureBudget`：任意正安全整数窗口 C 的阈值为 `max(1, floor(C × thresholdRatio))`，尾部目标为显式 `retainTokens` 或 `floor(C × retainRatio)`，限制在 `0..threshold−1`。模型专属保留参数优先于全局参数；主请求输出上限和原生摘要输出预算不参与该阈值计算。缺少窗口返回 missing_capacity，无效窗口返回 invalid_capacity，非取消的模型配置读取错误返回 metadata_unavailable 并停用压力紧迫度；释放 backlog 仍可预览。取消始终向上传播。保护尾部和固定请求开销仍可能使实际输入超过预算，需以后续主请求 usage 验证效果。
+控制消息参与实际主请求，其 token 计入压力。摘要输入、图片能力判断和辅助摘要预算从按来源过滤后的历史投影构建，因此控制消息本身不会进入摘要。纯 release 清理通知和内部状态记录也按各自来源元数据过滤。
 
-失败的 version 5 摘要请求保留 retryable。最近一次摘要后的 `compaction/end` 错误与错误后已提交的助手 slot 推导冷却步数 `max(1, min(8, minIntervalSteps))`；新的 queued 释放或摘要意图可令剩余等待为 0。失败不创建额外重试事件或运行期重试计数器；恢复和 fork 继续依据各自日志。历史 version 4 failed 请求不参与自动重试。官方提交后，之前 queued 及 failed/retryable 请求才成为 applied。
+## 释放账本
 
-`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure、plan、pressure、limits、summaryInput 和 diagnostic；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。diagnostic 给出首个调度门槛的短解释及下一步动作；经济比较包含摘要与重建总成本、允许的未来主请求次数、预计收益和回本次数，并区分主请求 usage 与未知缓存保守假设。回本是对候选未来收益的预测，stepsSinceSummary 增长不抵扣该预测。limits 公开固定 system、请求开销、当前受保护尾部及它们合计的 HEURISTIC 下限；超过阈值时附 fixed_overhead 或 protected_input 约束。它们用于解释能力边界，不放宽选区保护，也不阻止仍有净收益的安全摘要。summaryInput 拆分历史、保留 system、tools 和固定 framing，合计严格等于 plan.filterInputTokens；excludedTokens 为 null 仅表示未单独估算，不等于没有过滤。
+`context_release` 每次接受 1–128 个数字 ID。请求记录意图后返回排队、已结算、未知或不支持的目标。用户与助手文字可搜索和恢复，释放目标为工具结果正文和单个附件。
 
-pressure 返回选择用的预计总量、回放额外成本、最近主请求输入、当前阈值、预计是否低于阈值以及最近摘要的 effect/verification，不返回逐节点成本表。verification 区分 awaiting_replacement、awaiting_usage、below_threshold、above_threshold、unknown_target 和 route_changed；observedSavingsTokens 是移除新增内容估算后的观测值，不代表精确供应商账单。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 no_business_evidence、ineffective_compaction、active_compaction、no_route、missing_capacity、invalid_capacity、metadata_unavailable、state_changed、failed_cooldown 等。查询只预览，不消耗稳定编号、不追加日志或修改 surface；详细诊断仅按需返回，不注入常驻提示或每次释放提醒。
+状态独立于 ID：
 
-## 准入 ledger、目录与恢复
+| 状态         | 含义                                       |
+| ------------ | ------------------------------------------ |
+| `available`  | 未标记，且未被摘要覆盖。                   |
+| `queued`     | 已接收意图，等待合批条件或安全的覆盖摘要。 |
+| `released`   | 目标正文或附件已实际替换。                 |
+| `summarized` | 目标正文或释放占位已被覆盖摘要吸收。       |
 
-不再注册自动完整 ledger 的 systemPrompt runtime 快照；静态策略仍提供工具用法。普通消息正文和前缀不变。有界 ledger 变化追加到已有 allocation version 3 notice：最多 `min(8, catalogLimit)` 条，优先交付已知行的语义变化，再交付其他发生变化的非 available 行和新的 available 行。变化依据来源、当前绑定、排队事件及最近摘要覆盖；指纹淘汰不构成新变化。指纹仅为状态与 pendingReason；已准入的 U/I/F 和新预留 A 已由同 notice 声明，不重复列为 ledger 行。lastSummary 水位变化单独报告有界覆盖与排除 ID，省略行显示 omitted 并留在 context_status 的按需目录，不在后续准入中反复广播。
+工具结果释放只替换结果正文，保留调用和助手原始记录；附件释放只替换对应出现。受原生回放保护的助手附件等待覆盖摘要，避免单独修改签名消息。
 
-source 的 `ledgerView` version 1 只持久化最近交付的有界 `{id, fingerprint}` 和 `summaryWatermark`，不保存完整目录、正文预览或 token 计数。前视图只扫描当前 surface 末尾最多 64 个节点；最新 notice 缺少有效元数据、属于旧协议或未找到时发 bootstrap，不从更旧 notice 冒认最新视图。元数据与 notice 一同由核心提交，预览或准备失败不改变已交付水位。插件不单独删除旧 notice；官方 checkpoint 可以覆盖选区内的 notice，下一次准入按当前 surface 重新建立交付依据。
+意图和实际替换分别提交。失败或取消时，未完成项目继续排队；账本只在观察到相应提交后结算。覆盖摘要选区内可安全排除的排队目标进入摘要过滤，范围外目标继续保留。
 
-ledger 的状态始终由会话日志投影重建；resume/fork 不依赖进程内通知缓存。完整目录在 `context_status` 按需查询，返回列表仍有界，省略项可按 ID 定位。编号和正文目录各默认 32、最高 128 条，预览最多 100 个 Unicode 码点。pendingReason 区分 awaiting_covering_summary、summary_in_progress、outside_selection、summary_failed 与 protocol_protection。目录包含当前 summaryPolicy；历史摘要 projection 保留当时的策略及独立省略统计。
+## 合批调度
 
-U/A/T 的 context_expand 经 sessionQuery.readEvent 读取 sourceSeq，单 text 原样返回，其他内容以可逆 JSON 返回；码点分页默认 4000、最高 16000。I/F 的 offset 必须是 0，逐项验证调用 agent 会话、sourceSeq、原角色、owner messageId、原始 blockIndex 与完整引用，调用方不能指定 ref、路径或 sessionId。
+释放请求先排队。低压力且当前缓存仍热时，调度等待合适的重建机会。安全步骤边界检查以下信号：
 
-I 要求当前会话路由明确支持 image，readImage 验证存储，纯 render 返回元数据和新的原生 ImageBlock，去除旧 offloaded 状态。F 完整流式消费 readFileStream、等待末尾完整性检查、验证字节数，fs 把 host path 映射到工具命名空间；无映射只报告已验证引用，不冒充可读宿主句柄。不得收集文件全量正文进内存。
+- 本来就要发生的独立缓存重建机会。
+- 可信主请求 usage 对应的空闲 TTL 已到期。
+- 普通压力、供应商 overflow 或用户 `/compact`。
+- 达到释放积压门槛或最长等待步骤。
 
-attachments 与 fs 是可选服务；缺失、未知图片能力或不可映射路径有明确状态，存储损坏和缺失成为工具错误。PTC image-rich 子调用由核心 auto-defer，文件子调用使用自有 notice defer 已验证结果；notice 不再编号。不能宣称完整 PTC runtime 已实测，当前测试覆盖公开 nested ToolRuntime 边界。
+默认配置：
 
-context_search 用 observeSession immutable lease，只检索当前会话原始证据，字面匹配保留空白并排除控制参数与输出。默认 8、最多 20 个命中；每个命中最多列出 8 个 I/F。cursor 绑定会话、条件及首轮 throughSeq。租约由 finally 释放。无文本线索的附件按 owner 目录定位，不提供图片语义搜索或二进制全文搜索。
+```yaml
+scheduling:
+    releaseMinTokens: 2048
+    releaseMaxWaitSteps: 16
+    releaseBacklogRatio: 0.15
+    cacheTtlMs: 300000
+```
 
-查询不会把旧原文插回历史，恢复输出作为新工具结果进入上下文。原文保留依赖 DSH 日志和编号可重建；插件不另存数据库。
+`releaseMinTokens` 是独立释放的最低预计净节省；`releaseMaxWaitSteps` 限制排队等待；`releaseBacklogRatio` 控制积压比例门槛；`cacheTtlMs` 为可信 usage 对应的空闲缓存 TTL，0 关闭该触发条件。强制处理路径与低压力路径分别判断收益和紧迫程度，`context_status` 返回当前计划和阻断原因。
 
-## 可选记忆与接入
+历史 cache miss 仅说明当次请求的缓存情况。后续调度根据最新 usage、时间和当前输入重新判断，避免把历史 miss 固定解释为未来持续冷缓存。缺少可信 usage 时，TTL 不能凭空构造缓存到期证据。
 
-ContextMemoryAdapter 服务的 extract(batch, signal?) 接收版本、sessionId、sourceSeqs、checkpoint、idempotencyKey；回执为 stored/duplicate/skipped/failed。未来调用必须独立安排提炼和保存，遵守目标记忆插件的 API 与授权，不能编辑生成的记忆文件或回滚已提交压缩。
+独立释放不调用摘要模型，也不使用低压力摘要回本门槛。`compaction.auto` 控制自动摘要，`scheduling.enabled` 控制摘要经济调度；释放仍检查自身的缓存机会、积压和最大等待条件。
 
-每个 Cordis scope 只有一个 compaction provider。公共 bundle 的 `cordis.patch.yml` 只在 profile 根层注册配置为 `uiOnly: true` 的 fold-context-ui，加载 Client 展示，不创建引擎，也不覆盖任何 preset。压缩引擎由用户在所选 preset 的 `config.plugins` 中接入：在启用的 compaction 组内用 fold-context 替换 compaction-basic，保留该组原有的 `compaction: true`、`toolResultPruner: true` isolation realm 及其他插件配置。根层引擎无法替换 preset 内的隔离服务。
+## 压力处理与摘要
 
-Loader 补丁仅递归遍历 `group: true` 且 `config` 为数组的分组，不会进入 preset 的 `config.plugins`，也不深合并 `config`。因此 bundle 不再携带内置 preset 的完整快照；用户需要覆盖内置 preset 时，从当前版本导出完整声明，在自己的 profile 覆盖层保留全部字段、其他插件及 `!!js` 表达式，仅修改 compaction 组。具体安装、导出和配置步骤见 [README](../README.md#安装与启用)。既有会话保留启动时的 preset revision，应在新会话验证。
+处理顺序为：
 
-command-compact 可保留用于手动 `/compact`，tool-result-pruner 可选共存，但不能同时挂载第二个 compaction provider。DSH 提供官方运行包，pruner 仅作为本包的开发依赖支持隔离共存回归；示例参数为 `thresholdChars: 8192`、`headChars: 4096`、`tailChars: 1024`。普通 pruner 在官方条件满足时可以先截短正文，再决定是否摘要；本插件原位释放则在步骤边界独立运行，使用独立语义意图及实际占位结算。两者均保存原始事件；普通 pruner 截短本身不构成语义 released。恢复需要可见 sessionQuery。
+```text
+pressure -> release -> remeasure -> summary if still needed
+```
 
-Session 提交不等于磁盘成功。官方 session-checkpoint-policy 实际启用且 flush 成功时，才保证模型分发／工具执行前的来源先落盘。插件不在同步提示回调或事件观察者里追加日志。
+先基于实际输入与最新可信主请求 usage 测量压力，再处理安全可释放内容，按替换后的历史重新测量。释放已经足够时，本轮继续主请求。仍有压力时才进入摘要规划。实际 overflow 与用户 `/compact` 使用对应强制路径，优先处理可释放内容，并保护最新任务和合法的工具配对。
 
-验证使用公开 RAM 服务、官方 AgentLoop、本地 mock adapter、真实 LocalAttachmentStore 和临时 JSONL。独立进程验证冷恢复与 fork，包括原始 I/F、二进制校验和子会话私有附件隔离；公共 imageOffloadProjection 验证 derived 图像与 live/cold 回执一致。业务时钟、提醒持久化、拒绝/取消纯预览、可见 token 计量、原位释放及控制回执清理有独立回归；历史 summary-only 测试显式构造旧意图，不伪称当前工具仍接受 U/A。真实模型视觉理解、供应商缓存和实际节费、完整 PTC runtime 及异常断电仍需另行验证。安装替换现有包后依照 plugin_manager 的 application 结果判断是否需要重启；既有会话仍使用原 preset revision。
+普通压力阈值为 `max(1, floor(contextWindow × thresholdRatio))`。窗口必须是正安全整数。保留目标按 `retainTokens` 或 `floor(contextWindow × retainRatio)` 计算，并限制在 0 至阈值减 1 之间。`headroomTokens` 为摘要默认输出预算，显式 `compaction.maxTokens` 可覆盖它。
+
+摘要覆盖较旧的连续历史前缀，保留开头的 system 与近期安全尾部。切点须保持工具调用与结果完整；原生 assistant 回放的规划成本参考同一 provider/model 的 output usage。最新主请求 input usage 校准总压力，历史请求的完整 input usage 不累加到选区成本。
+
+摘要投影先剔除带来源元数据的控制消息和管理通知，再处理 reasoning 策略和图片策略。默认 `summary.reasoning: omit-from-summary`；`preserve` 可保留 reasoning 文字。`summary.images: auto` 只向明确支持图片的摘要路由传原图，`references` 固定保留引用。普通历史来源 ID 设为 null，附件保留归档引用。
+
+辅助请求预算包括过滤后的历史、保留的 system、工具定义和 framing。固定输入、受保护尾部或摘要输出仍可能超过很小的模型窗口；预算规划只能预测，真实主请求 usage 验证结果。
+
+摘要后记录预计降幅，等待后续主请求 input usage 验证。辅助摘要模型的 usage 不参与主请求效果确认。仍超阈值时逐步缩小保留预算，必要时采用最大合法前缀；同次处理遵守官方重试上限。无预计改善，或普通压力选区只含 checkpoint、控制消息、baseline、MCP snapshot 等内部材料时，停止重复摘要。
+
+## 低压力摘要经济模型
+
+只有低压力摘要使用回本门槛。计划需满足最小间隔、预计净节省量、节省比例和未来请求内的回本要求。默认 `paybackTurns` 为 24，未知缓存按已缓存前缀保守估算。
+
+总成本为：
+
+```text
+upfrontCost = summaryCost + incrementalRebuildCost
+```
+
+`summaryCost` 使用摘要输入和预计输出的相对权重。`incrementalRebuildCost` 只计算本次决策额外造成的缓存重建成本。同批释放与摘要共用的重建只计算一次；已发生或独立机会本来就需要的重建不重复计入。摘要净收益扣除可直接释放的选区内容，比例门槛使用释放后的预计输入，避免待释放标记自己制造重建许可。独立重建许可只覆盖其原有失效点之后的释放目标；本插件自己的释放及清理改写不能提供这项许可。未来节省与当前缓存证据共同决定预计回本请求数，等待几个步骤本身不会累计收益。
+
+主要默认值如下，其余配置见 [README](../README.md)：
+
+```yaml
+scheduling:
+    enabled: true
+    proactive: true
+    minIntervalSteps: 8
+    minSavingsTokens: 2048
+    minSavingsRatio: 0.2
+    expectedSummaryRatio: 0.2
+    paybackTurns: 24
+    cacheReadRatio: 0.1
+    summaryInputRatio: 1
+    summaryOutputRatio: 1
+```
+
+成本字段均为 HEURISTIC 估算，不保证供应商缓存命中或实际节费。`context_status` 按需给出调度原因、辅助请求预算拆分、受保护尾部和固定输入下限、压力效果与验证状态。
+
+## 提醒与管理调用清理
+
+候选需要仍在当前上下文中且经过 `minAgeSteps`。默认至少 16000 候选 tokens，或 4000 tokens 停留 8 个业务步骤，或总压力达到有效阈值 80% 且候选至少 4000 tokens 时提醒。单个 8000 tokens 大结果优先排列。
+
+提醒只包含 ID，默认最多 5 个；这只限制展示，模型可以主动标记其他合法 ID。普通间隔 6 步、压力间隔 4 步，忽略后退避到 12、24 步，新增候选与实际释放进展可使提醒重新就绪。纯管理调用不推动业务年龄和提醒冷却。排队与已释放目标离开候选池。
+
+目标实际结算后，成功的纯 `context_release` 调用及结果可在后续模型请求前成对清理。包含业务文字、其他工具、日志、自定义值或未完成目标的调用继续保留。可准确证明为纯释放的 PTC 包装采用同样规则。清理依据结构与来源信息，避免从任意正文中推断调用性质。
+
+## 归档与恢复
+
+`context_search` 对会话内原始正文做字面子串搜索，支持角色与工具名过滤、分页和 continuation cursor。`context_expand` 按稳定 ID 分页恢复文字，返回 `nextOffset` 供继续读取。恢复进入新的上下文，不改变原目标的释放或摘要状态。
+
+图片恢复校验原始存储并确认当前模型支持图片后传入原图。文件恢复校验完整内容并返回可读句柄；句柄交付与模型已读取文件正文分别表示。缺少服务、存储丢失、校验失败、能力不足或文件路径映射失败须显式报告。
+
+归档是原始证据源，当前上下文的轻量占位与摘要只是投影。重启和 fork 需沿会话事件重建数字 ID、意图和状态，保留相同源记录的身份边界。
+
+## Client 回执与行展示
+
+最终释放 prune 在 `data.foldContextRelease` 写入 v8 回执。Client 验证版本、数字字符串 ID 及数组结构，并要求紧随的替换事件引用同一 prune 目标，才展示完成行。仅有排队意图、普通 pruner 截短或未完成的替换均不足以宣称释放完成。
+
+回执按 `released`、`pending` 分组，条目保留 `id`、类型、owner、预览、原因和等待原因等字段。展示直接使用稳定 `id`，释放状态读取独立字段或所属分组。预计 token 变化按本批消息替换差值计算，整条工具结果与所含附件只计一次，并扣除占位开销。
+
+工具与完成行沿用 DSH 原生样式：结果紧跟标题，悬停或聚焦时左侧图标切换为箭头，保持图标尺度；数字使用未分隔的十进制文本。页面文案支持中英切换，结构异常回退为可查看的原始输出。
+
+## 验证边界
+
+直接 Client 测试为 [client.test.mjs](../test/client.test.mjs)，覆盖工具状态、数字参数与响应、释放状态、语言切换、回执与替换配对、旧协议拒绝和展开内容。Host 调度、编号与摘要由对应隔离测试验证，Client 测试不证明真实浏览器布局或供应商缓存收益。
+
+完整测试使用隔离临时构建，安装与打包构建更新仓库 `lib`。并行编辑时可仅把当前 Client 源码和直接测试复制到临时目录运行，避免覆盖其他代理的构建产物。

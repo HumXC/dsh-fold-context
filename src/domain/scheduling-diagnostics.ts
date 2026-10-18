@@ -1,4 +1,4 @@
-import type { ScheduledCompactionPlan, SchedulingPolicy } from "./scheduler.js";
+import type { ReleaseBatchPlan, ScheduledCompactionPlan, SchedulingPolicy } from "./scheduler.js";
 
 export interface SchedulingLimits {
     readonly heuristic: "HEURISTIC";
@@ -157,6 +157,10 @@ export function describeScheduling(input: DiagnosticInput, policy: Readonly<Sche
                       cacheBasis:
                           plan.cacheState === "unknown" ? "assumed_cached" : "primary_usage",
                       cacheReadRatio: plan.effectiveCacheReadRatio,
+                      cacheExpiredAssumed: plan.cacheExpired,
+                      independentRebuildTokens: plan.independentRebuildTokens,
+                      summaryCost: plan.summaryCost,
+                      incrementalRebuildPenalty: plan.initialRebuildPenalty,
                       upfrontCost: plan.summaryCost + plan.initialRebuildPenalty,
                       expectedFutureRequests: policy.paybackTurns,
                       expectedSaving,
@@ -169,5 +173,28 @@ export function describeScheduling(input: DiagnosticInput, policy: Readonly<Sche
                                 ),
                       breakEvenRequests: plan.breakEvenTurns,
                   },
+    };
+}
+
+/** Release permission and summary economics are independent gates. */
+export function describeReleaseBatch(plan: ReleaseBatchPlan) {
+    const explanations: Partial<Record<ReleaseBatchPlan["reason"], string>> = {
+        no_releases: "No eligible native replacements are queued.",
+        active_compaction: "A summary transaction is active; releases remain queued.",
+        hot_cache: "The queued batch waits for an independent rebuild or cache expiry opportunity.",
+        min_release: "The batch is below the minimum positive savings target.",
+        max_wait: "The oldest queued release reached the maximum business-step wait.",
+        backlog_watermark: "Queued net savings reached the configured prompt fraction.",
+        cache_expired:
+            "Same-route primary cache-hit usage exceeds the configured TTL; expiry is assumed.",
+    };
+    return {
+        summary:
+            explanations[plan.reason] ??
+            "An independently authorized summary, rebuild, or safety path grants this release batch.",
+        nextAction:
+            plan.decision === "execute"
+                ? "Commit once at the same session revision, then remeasure before selecting a summary."
+                : "Keep marks queued; reconsider at a later stable boundary.",
     };
 }

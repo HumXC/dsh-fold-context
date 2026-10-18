@@ -41,7 +41,7 @@ test("optional official pruner mounts beside fold-context and leaves below-press
 });
 
 for (const auto of [false, true]) {
-    test(`v6 semantic release precedes optional pressure pruning with auto=${auto}`, async (t) => {
+    test(`v8 semantic release precedes optional pressure pruning with auto=${auto}`, async (t) => {
         const f = await fixture({
             pruner: {},
             compaction: { auto },
@@ -51,11 +51,13 @@ for (const auto of [false, true]) {
         const original = originalText();
         const event = f.toolRound("read", original);
         const id = f.idFor(event);
-        const alias = id.replace(/§$/, "R§");
         const originalEvents = f.session.snapshotEvents();
-        const receipt = await f.invoke("context_release", { ids: [id], reason: "Consumed" });
+        const receipt = await f.invoke("context_release", {
+            ids: [Number(id)],
+            reason: "Consumed",
+        });
         assert.equal(decode(receipt).accepted, true);
-        assert.equal(receipt.meta.dshContextCompression.version, 6);
+        assert.equal(receipt.meta.dshContextCompression.version, 8);
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
             "queued",
@@ -88,7 +90,7 @@ for (const auto of [false, true]) {
         const trimmed = replacement.data.message.content
             .map((block) => (block.type === "text" ? block.text : ""))
             .join("");
-        assert.match(trimmed, new RegExp(alias));
+        assert.ok(trimmed.includes(`[released ${id}]`));
         assert.doesNotMatch(trimmed, /tool result middle pruned|ORIGINAL_MIDDLE_EVIDENCE/);
         assert.ok(Array.from(trimmed).length <= 8192);
         assert.deepEqual(
@@ -101,7 +103,7 @@ for (const auto of [false, true]) {
         const replay = Session.create(f.session.id, f.session.snapshotEvents(), f.session.header);
         assert.deepEqual(f.engine.state(replay), f.engine.state(f.session));
         const surface = [...f.session.surface.nodes];
-        assert.equal(await recover(f, alias), original);
+        assert.equal(await recover(f, Number(id)), original);
         assert.equal(
             f.engine.state(f.session).entries.find((item) => item.id === id).status,
             "released",
@@ -133,5 +135,5 @@ test("an official-pruned tool pair without release is summarized normally and re
     assert.ok(state.lastSummary.ids.includes(id));
     assert.equal(state.lastSummary.excludedIds.includes(id), false);
     assert.equal(JSON.stringify(f.calls[0].messages).includes("tool result middle pruned"), true);
-    assert.equal(await recover(f, id), original);
+    assert.equal(await recover(f, Number(id)), original);
 });

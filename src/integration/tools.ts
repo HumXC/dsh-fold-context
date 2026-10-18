@@ -8,14 +8,25 @@ import {
     RECEIPT_KEY,
     RELEASE_TOOL,
     STATUS_TOOL,
-    ID_INPUT_PATTERN,
-    normalizeId,
+    idArgumentSchema,
 } from "../domain/protocol.js";
 
-const idsSchema = z
-    .array(z.string().max(20).regex(ID_INPUT_PATTERN).transform(normalizeId))
-    .min(1)
-    .max(128);
+const idsSchema = z.array(idArgumentSchema).min(1).max(128);
+function intentMetadata(args: unknown, value: unknown) {
+    const result = z.record(z.string(), z.json()).parse(value);
+    const receipt = result[RECEIPT_KEY];
+    return {
+        ...result,
+        [RECEIPT_KEY]:
+            receipt == null
+                ? null
+                : {
+                      ...z.record(z.string(), z.json()).parse(receipt),
+                      reason: z.object({ reason: z.string().trim().min(1).max(1000) }).parse(args)
+                          .reason,
+                  },
+    };
+}
 function actor(exec: ToolRunContext) {
     if (exec.agent === undefined) throw new Error("fold-context tools require an owning agent");
     exec.signal.throwIfAborted();
@@ -26,14 +37,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: RELEASE_TOOL,
             description:
-                "Release consumed tool-result bodies or individual attachments without a summary. Returns queued/settled IDs; applied releases leave recoverable numbered placeholders. User and assistant conversation text is preserved.",
+                "Queue consumed tool-result bodies or individual attachments for batch release. Returns queued/settled IDs; applied releases leave recoverable placeholders.",
             parameters: {
                 ids: {
                     type: "array",
-                    items: { type: "string" },
+                    items: { type: "integer" },
                     required: true,
                     description:
-                        "1–128 session IDs: §T9§ for a result body, §I10§ or §F11§ for one attachment. An R suffix before the closing delimiter means already released; both forms are accepted.",
+                        "1–128 positive safe-integer session numbers, for example [9, 10]. Use a tool-result number for its body or an attachment number for that occurrence.",
                 },
                 reason: {
                     type: "string",
@@ -44,12 +55,12 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             output: {
                 schema: { type: "json" },
                 render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
-                presentationMeta: (_args, value) => value,
+                presentationMeta: intentMetadata,
             },
             execute: async (args, exec) => {
                 const agent = actor(exec);
                 const ids = idsSchema.parse(args.ids);
-                const reason = z.string().trim().min(1).max(1000).parse(args.reason);
+                z.string().trim().min(1).max(1000).parse(args.reason);
                 const plan = planRelease(engine.state(agent.session), ids);
                 return {
                     ...plan,
@@ -61,11 +72,10 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                                     ?.status === "available",
                         )
                             ? {
-                                  version: 6,
+                                  version: 8,
                                   kind: "release",
                                   sessionId: agent.session.id,
                                   ids: plan.queued,
-                                  reason,
                               }
                             : null,
                 };
@@ -87,11 +97,11 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             output: {
                 schema: { type: "json" },
                 render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
-                presentationMeta: (_args, value) => value,
+                presentationMeta: intentMetadata,
             },
             execute: async (args, exec) => {
                 const agent = actor(exec);
-                const reason = z.string().trim().min(1).max(1000).parse(args.reason);
+                z.string().trim().min(1).max(1000).parse(args.reason);
                 const pending = engine.hasSummaryRequest(agent.session);
                 return {
                     status: pending ? "already_queued" : "queued",
@@ -99,11 +109,10 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                     [RECEIPT_KEY]: pending
                         ? null
                         : {
-                              version: engine.schedulingPolicy.enabled ? 5 : 4,
+                              version: 8,
                               kind: "summary",
                               sessionId: agent.session.id,
                               ids: [],
-                              reason,
                           },
                 };
             },
@@ -117,9 +126,9 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             parameters: {
                 ids: {
                     type: "array",
-                    items: { type: "string" },
+                    items: { type: "integer" },
                     description:
-                        "Optional 1–128 session IDs; ordinary IDs and released R aliases are accepted.",
+                        "Optional 1–128 positive session numbers. Omit to inspect the bounded catalog.",
                 },
                 limit: {
                     type: "integer",

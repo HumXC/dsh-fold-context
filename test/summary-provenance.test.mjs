@@ -30,7 +30,7 @@ async function admit(f, input) {
     return decision.messages;
 }
 
-test("summary input hides real U/A/T provenance without changing task text, arguments or original events", async (t) => {
+test("summary input hides numeric message provenance without changing task text, arguments or original events", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -74,10 +74,7 @@ test("summary input hides real U/A/T provenance without changing task text, argu
     f.session.append("step/end", { turn: 1, step: 1 });
     const state = f.engine.state(f.session);
     const sourceIds = state.numbering.slots.map((slot) => slot.id);
-    assert.deepEqual(
-        sourceIds.map((id) => id.slice(1, 2)),
-        ["U", "A", "T"],
-    );
+    assert.deepEqual(sourceIds, ["1", "2", "3"]);
     const messages = [user.data, assistant, result];
     const before = JSON.stringify({ events: f.session.snapshotEvents(), state, messages });
     const projected = projectSummaryInput(state, messages, f.session.seq, resolveSummaryPolicy());
@@ -87,7 +84,10 @@ test("summary input hides real U/A/T provenance without changing task text, argu
         records.every((record) => record.id === null && !("ownerId" in record)),
         true,
     );
-    for (const id of sourceIds) assert.equal(JSON.stringify(projected).includes(id), false);
+    assert.equal(
+        records.some((record) => sourceIds.includes(record.id)),
+        false,
+    );
     assert.equal(records.find((record) => record.role === "user").text, userText);
     assert.equal(
         records.find((record) => record.role === "assistant" && record.type === "text").text,
@@ -107,7 +107,7 @@ test("summary input hides real U/A/T provenance without changing task text, argu
     assert.equal(JSON.stringify({ events: f.session.snapshotEvents(), state, messages }), before);
 });
 
-test("summary input retains I/F archive references but not attachment owner IDs or numbering notices", async (t) => {
+test("summary input retains attachment archive IDs while hiding owner IDs and allocation notices", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -134,8 +134,12 @@ test("summary input retains I/F archive references but not attachment owner IDs 
         ],
     });
     const messages = await admit(f, input);
-    const notice = messages.find((message) => message.source.kind === ALLOCATION_SOURCE);
-    assert.ok(notice);
+    assert.equal(
+        messages.some((message) => message.source.kind === ALLOCATION_SOURCE),
+        true,
+    );
+    const label = messages.find((message) => message.source.kind === ALLOCATION_SOURCE).content[0]
+        .text;
     const state = f.engine.state(f.session);
     const owner = state.numbering.slots.find((slot) => slot.messageId === input.id);
     const attachments = state.numbering.attachments.filter((item) => item.ownerId === owner.id);
@@ -157,15 +161,18 @@ test("summary input retains I/F archive references but not attachment owner IDs 
                 .map((record) => record.id),
             attachments.map((item) => item.id),
         );
-        assert.match(records.find((record) => record.type === "image").id, /^§I[1-9]\d*§$/);
-        assert.match(records.find((record) => record.type === "file").id, /^§F[1-9]\d*§$/);
+        assert.match(records.find((record) => record.type === "image").id, /^[1-9]\d*$/);
+        assert.match(records.find((record) => record.type === "file").id, /^[1-9]\d*$/);
         assert.equal(
             records.every((record) => !("ownerId" in record)),
             true,
         );
-        assert.equal(JSON.stringify(projected).includes(owner.id), false);
         assert.equal(
-            records.some((record) => record.text === notice.content[0].text),
+            records.some((record) => record.id === owner.id),
+            false,
+        );
+        assert.equal(
+            records.some((record) => record.text === label),
             false,
         );
         assert.deepEqual(
@@ -202,8 +209,14 @@ test("summary input omits allocation and release cleanup notices while preservin
         ],
     });
     const admitted = await admit(f, input);
-    const allocation = admitted.find((message) => message.source.kind === ALLOCATION_SOURCE);
-    assert.ok(allocation);
+    assert.equal(
+        admitted.some((message) => message.source.kind === ALLOCATION_SOURCE),
+        true,
+    );
+    const allocation = createUserMessage({
+        source: { kind: ALLOCATION_SOURCE, form: "notice" },
+        content: [{ type: "text", text: "Legacy context numbering notice must be omitted." }],
+    });
     const cleanup = createUserMessage({
         source: { kind: "fold-context-release-cleanup", form: "notice" },
         content: [

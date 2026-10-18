@@ -50,26 +50,32 @@ test("real AgentLoop declares IDs before stream and reserves tool results before
         },
         onStream: (request, world, ordinary) => {
             if (!ordinary || checkedRequest) return;
-            const declaration = request.messages.find(
+            assert.equal(
+                request.messages.some(
+                    (message) => message.source.kind === "fold-context-allocation",
+                ),
+                true,
+            );
+            const input = request.messages.find((message) => message.source.kind === "user");
+            assert.equal(input.content[0].text, "A real-loop test input without an ID prefix.");
+            const notice = request.messages.find(
                 (message) => message.source.kind === "fold-context-allocation",
             );
-            assert.ok(declaration);
+            assert.equal(notice.content[0].text, "prev: 1\nnext: 2");
             const agentSession = world.sessions.list()[0];
-            const durableDeclaration = agentSession
-                .snapshotEvents()
-                .find((event) => event.type === "user/message" && event.data.id === declaration.id);
             assert.ok(
-                durableDeclaration,
-                "declaration is committed before the adapter sees the request",
+                agentSession
+                    .snapshotEvents()
+                    .some(
+                        (event) =>
+                            event.type === "user/message" &&
+                            event.data.source.kind === "fold-context-allocation",
+                    ),
             );
             assert.ok(
                 world.engine
                     .state(agentSession)
-                    .numbering.slots.some(
-                        (slot) =>
-                            slot.id === declaration.source.allocation.assistantId &&
-                            slot.status === "reserved",
-                    ),
+                    .numbering.slots.some((slot) => slot.id === "2" && slot.status === "reserved"),
             );
             checkedRequest = true;
         },
@@ -136,7 +142,7 @@ test("real inline release replaces only the tool body before recovery without an
                             event.data.callId === originalEvent.data.message.toolCallId,
                     );
                 beforeRelease = JSON.parse(JSON.stringify(request.messages));
-                return call("context_release", { ids: [entry.id], reason: "Consumed" });
+                return call("context_release", { ids: [Number(entry.id)], reason: "Consumed" });
             },
             (request, world) => {
                 const session = world.sessions.list()[0];
@@ -153,7 +159,7 @@ test("real inline release replaces only the tool body before recovery without an
                 assert.ok(replacement);
                 assert.equal(replacement.role, "tool");
                 assert.equal(replacement.toolCallId, originalEvent.data.message.toolCallId);
-                assert.match(replacement.content[0].text, new RegExp(entry.id.replace(/§$/, "R§")));
+                assert.equal(replacement.content[0].text, `[released ${entry.id}]`);
                 assert.equal(JSON.stringify(request.messages).includes(original), false);
                 const expectedPrefix = structuredClone(beforeRelease);
                 expectedPrefix.find((message) => message.id === replacement.id).content =
@@ -167,7 +173,7 @@ test("real inline release replaces only the tool body before recovery without an
                         JSON.stringify(event),
                     );
                 }
-                return call("context_expand", { id: entry.id.replace(/§$/, "R§"), limit: 64 });
+                return call("context_expand", { id: Number(entry.id), limit: 64 });
             },
         ],
     });

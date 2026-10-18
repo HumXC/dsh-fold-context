@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAssistantMessage } from "@deepseek-ai/dsh-llm";
 import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { fixture } from "./fixture.mjs";
+import { ledgerProjection } from "../lib/domain/ledger.js";
 
 const data = (outcome) => {
     assert.equal(outcome.isError, false, JSON.stringify(outcome));
@@ -49,16 +50,16 @@ test("assistant control arguments cannot self-match when reasoning or text accom
         useful.hits.map((hit) => hit.id),
         [f.idFor(assistant)],
     );
-    const expanded = data(await f.invoke("context_expand", { id: f.idFor(assistant) }));
+    const expanded = data(await f.invoke("context_expand", { id: Number(f.idFor(assistant)) }));
     assert.deepEqual(JSON.parse(expanded.text), content);
 });
 
-test("old release marker bytes and old projection-version fallback reconstruct released state", async (t) => {
+test("literal old marker text cannot settle a queued release and obsolete projection snapshots rebuild from the log", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const original = f.toolRound("read", "LEGACY_RELEASE_ORIGINAL ".repeat(600));
     const id = f.idFor(original);
-    await f.invoke("context_release", { ids: [id], reason: "Consumed" });
+    await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed" });
     // Reconstruct an already committed legacy tool prune without requiring a prune API.
     f.session.append("compaction/prune", {
         shadowedRange: { start: original.seq, end: original.seq },
@@ -74,7 +75,7 @@ test("old release marker bytes and old projection-version fallback reconstruct r
                 content: [
                     {
                         type: "text",
-                        text: `[Context ${id} released by model request; original retained in session log.]`,
+                        text: `[released ${id}]`,
                     },
                 ],
             },
@@ -84,10 +85,7 @@ test("old release marker bytes and old projection-version fallback reconstruct r
             sourceEventSeqs: [original.seq],
         },
     );
-    assert.equal(
-        replacement.data.message.content[0].text,
-        `[Context ${id} released by model request; original retained in session log.]`,
-    );
+    assert.equal(replacement.data.message.content[0].text, `[released ${id}]`);
     const checkpoint = f.ctx.sessionProjections.checkpoint(f.session);
     checkpoint.contextCompression.ver = 4;
     assert.equal(f.ctx.sessionProjections.restoreFloor(checkpoint), 0);
@@ -98,11 +96,11 @@ test("old release marker bytes and old projection-version fallback reconstruct r
         f.session.header,
         f.session.inheritedEventCount,
     );
-    assert.equal(restored.checkpoint.contextCompression.ver, 13);
+    assert.equal(restored.checkpoint.contextCompression.ver, ledgerProjection.stateVersion);
     const restoredEntry = restored.checkpoint.contextCompression.val.entries.find(
         (entry) => entry.id === id,
     );
-    assert.equal(restoredEntry.status, "released");
+    assert.equal(restoredEntry.status, "queued");
     assert.equal(restoredEntry.sourceSeq, original.seq);
 });
 

@@ -8,7 +8,7 @@ import {
 import * as sessionRuntime from "@deepseek-ai/dsh-session";
 import * as meterRuntime from "@deepseek-ai/dsh-token-meter";
 import { fixture } from "./fixture.mjs";
-import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
+import { commitForcedReleases } from "./release-batch-fixture.mjs";
 import { entryId } from "../lib/domain/protocol.js";
 import { summaryRecords } from "./summary-records.mjs";
 
@@ -70,28 +70,30 @@ async function compactSurface(f) {
     return f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
 }
 
-test("role prefixes share one monotonic ordinal independently of event sequences", async (t) => {
+test("messages share one monotonic numeric ordinal independently of roles and event sequences", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     const user = f.appendUser("User evidence.");
     const tool = f.toolRound("read", "tool evidence");
-    assert.equal(f.idFor(user), "§U1§");
-    assert.equal(f.idFor(tool), "§T3§");
+    assert.equal(f.idFor(user), "1");
+    assert.equal(f.idFor(tool), "3");
     assert.deepEqual(
         f.engine.state(f.session).numbering.slots.map((slot) => slot.id),
-        ["§U1§", "§A2§", "§T3§"],
+        ["1", "2", "3"],
     );
-    assert.equal(entryId("assistant", 17), "§A17§");
-    assert.throws(() => entryId("user", 0));
+    assert.equal(entryId(17), "17");
+    assert.throws(() => entryId(0));
+    assert.throws(() => entryId(Number.MAX_SAFE_INTEGER + 1));
     assert.equal(
-        value(await f.invoke("context_release", { ids: ["§A1§"], reason: "wrong role" })).accepted,
-        false,
+        (await f.invoke("context_release", { ids: ["§A1§"], reason: "Invalid string argument" }))
+            .isError,
+        true,
     );
 });
 
 for (const schedulingEnabled of [false, true]) {
-    test(`current v6 tool release settles at the next boundary with scheduling ${schedulingEnabled ? "enabled" : "disabled"}`, async (t) => {
+    test(`v8 tool release uses an explicit batch permit with scheduling ${schedulingEnabled ? "enabled" : "disabled"}`, async (t) => {
         const f = await fixture({
             scheduling: {
                 enabled: schedulingEnabled,
@@ -112,7 +114,7 @@ for (const schedulingEnabled of [false, true]) {
         const ids = [f.idFor(user), f.idFor(assistant)];
         const rejected = value(
             await f.invoke("context_release", {
-                ids: [...ids, tool.id],
+                ids: [...ids, tool.id].map(Number),
                 reason: "conversation text must reject the entire mixed request",
             }),
         );
@@ -126,12 +128,12 @@ for (const schedulingEnabled of [false, true]) {
         }
         const accepted = value(
             await f.invoke("context_release", {
-                ids: [tool.id],
+                ids: [Number(tool.id)],
                 reason: "the result body is consumed",
             }),
         );
         assert.equal(accepted.accepted, true);
-        assert.equal(accepted.dshContextCompression.version, 6);
+        assert.equal(accepted.dshContextCompression.version, 8);
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === tool.id).releaseMode,
             "inline",
@@ -140,7 +142,7 @@ for (const schedulingEnabled of [false, true]) {
             f.engine.state(f.session).entries.find((entry) => entry.id === tool.id).status,
             "queued",
         );
-        await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
+        commitForcedReleases(f);
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === tool.id).status,
             "released",
@@ -151,7 +153,7 @@ for (const schedulingEnabled of [false, true]) {
         assert.deepEqual(f.session.deriveEventMessage(assistant), assistant.data.message);
         assert.deepEqual(assistant.data.message.source.replayState, replayState);
         assert.equal(
-            value(await f.invoke("context_expand", { id: tool.id })).text,
+            value(await f.invoke("context_expand", { id: Number(tool.id) })).text,
             "result retained",
         );
         const restored = sessionRuntime.Session.create(f.session.id, f.session.snapshotEvents());
@@ -159,7 +161,7 @@ for (const schedulingEnabled of [false, true]) {
     });
 }
 
-test("legacy queued user text changes only the summary input and keeps original structured content recoverable", async (t) => {
+test("refused user-text release leaves summary evidence and structured originals recoverable", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -174,7 +176,15 @@ test("legacy queued user text changes only the summary input and keeps original 
         { surfaceOp: "append" },
     );
     const id = f.idFor(original);
-    recordLegacyRelease(f, [id], "requirements represented");
+    assert.equal(
+        value(
+            await f.invoke("context_release", {
+                ids: [Number(id)],
+                reason: "Requirements represented",
+            }),
+        ).accepted,
+        false,
+    );
     const before = {
         nodes: [...f.session.surface.nodes],
         replaceGeneration: f.session.surface.replaceGeneration,
@@ -195,15 +205,16 @@ test("legacy queued user text changes only the summary input and keeps original 
     assert.deepEqual(original.data.content, content);
     await compactSurface(f);
     const supplied = summaryRecords(f.calls[0].messages).filter((record) => record.role === "user");
-    assert.deepEqual(
-        supplied.map(({ type, text }) => ({ type, text })),
-        [content[1]],
-    );
+    for (const block of [content[0], content[2]]) {
+        assert.ok(
+            supplied.some((record) => record.type === block.type && record.text === block.text),
+        );
+    }
     const entry = f.engine.state(f.session).entries.find((entry) => entry.id === id);
-    assert.equal(entry.status, "released");
+    assert.equal(entry.status, "summarized");
     assert.equal(entry.currentSeq, null);
-    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, [id]);
-    const expanded = value(await f.invoke("context_expand", { id, limit: 16000 }));
+    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, []);
+    const expanded = value(await f.invoke("context_expand", { id: Number(id), limit: 16000 }));
     assert.deepEqual(JSON.parse(expanded.text), content);
     const restored = sessionRuntime.Session.create(f.session.id, f.session.snapshotEvents());
     assert.deepEqual(
@@ -217,7 +228,7 @@ test("legacy queued user text changes only the summary input and keeps original 
     );
 });
 
-test("legacy assistant text exclusion omits old reasoning independently and retains unmarked calls without rewrites", async (t) => {
+test("refused assistant-text release preserves explanations while reasoning policy and unmarked calls remain independent", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -232,11 +243,21 @@ test("legacy assistant text exclusion omits old reasoning independently and reta
     const stream = [{ type: "chunk", time: 1, chunk: { type: "usage", usage } }];
     const original = appendAssistant(f, content, { stream, usage });
     const id = f.idFor(original);
-    recordLegacyRelease(f, [id], "explanation consumed");
+    assert.equal(
+        value(
+            await f.invoke("context_release", {
+                ids: [Number(id)],
+                reason: "Explanation consumed",
+            }),
+        ).accepted,
+        false,
+    );
     await compactSurface(f);
     const supplied = summaryRecords(f.calls[0].messages);
+    assert.ok(supplied.some((record) => record.text === content[0].text));
+    assert.ok(supplied.some((record) => record.text === content[3].text));
     assert.equal(
-        supplied.some((record) => [content[0].text, content[1].text].includes(record.text)),
+        supplied.some((record) => record.text === content[1].text),
         false,
     );
     assert.equal(
@@ -260,12 +281,12 @@ test("legacy assistant text exclusion omits old reasoning independently and reta
             .length,
         0,
     );
-    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, [id]);
-    const expanded = value(await f.invoke("context_expand", { id, limit: 16000 }));
+    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, []);
+    const expanded = value(await f.invoke("context_expand", { id: Number(id), limit: 16000 }));
     assert.deepEqual(JSON.parse(expanded.text), content);
 });
 
-test("legacy signed assistant and paired result are excluded from fresh evidence while original signatures remain intact", async (t) => {
+test("releasing a signed assistant's result retains conversation evidence and exact original signatures", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -281,28 +302,46 @@ test("legacy signed assistant and paired result are excluded from fresh evidence
     const assistant = appendAssistant(f, content, { replayState });
     const tool = f.engine.state(f.session).entries.find((entry) => entry.role === "tool");
     const ids = [f.idFor(user), f.idFor(assistant), tool.id];
-    recordLegacyRelease(f, ids, "consumed");
+    assert.equal(
+        value(
+            await f.invoke("context_release", {
+                ids: ids.map(Number),
+                reason: "Consumed mixed batch",
+            }),
+        ).accepted,
+        false,
+    );
+    assert.equal(
+        value(
+            await f.invoke("context_release", {
+                ids: [Number(tool.id)],
+                reason: "Result consumed",
+            }),
+        ).accepted,
+        true,
+    );
+    commitForcedReleases(f);
     await compactSurface(f);
     const supplied = summaryRecords(f.calls[0].messages);
+    for (const text of [user.data.content[0].text, content[0].text]) {
+        assert.ok(supplied.some((record) => record.text === text));
+    }
     assert.equal(
-        supplied.some(
-            (record) =>
-                [user.data.content[0].text, content[0].text].includes(record.text) ||
-                record.callId === "signed-call",
-        ),
+        supplied.some((record) => record.callId === "signed-call"),
         false,
     );
     assert.equal(JSON.stringify(f.calls[0].messages).includes("opaque"), false);
     assert.deepEqual(assistant.data.message.source.replayState, replayState);
-    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, ids);
-    for (const id of ids)
+    assert.ok(f.engine.state(f.session).lastSummary.excludedIds.every((id) => id === tool.id));
+    for (const id of ids) {
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
-            "released",
+            id === tool.id ? "released" : "summarized",
         );
+    }
 });
 
-test("legacy summary-only release runs on original rc.2 dependencies without assistant rewrite capabilities", async (t) => {
+test("ordinary summarization needs no assistant rewrite capabilities in the original runtime dependencies", async (t) => {
     const f = await fixture();
     t.after(f.close);
     assert.equal("ASSISTANT_CONTENT_REWRITE_VERSION" in sessionRuntime, false);
@@ -312,10 +351,18 @@ test("legacy summary-only release runs on original rc.2 dependencies without ass
     f.appendUser("Keep the ongoing task objective. ".repeat(200));
     const original = appendAssistant(f, [{ type: "text", text: "Long body. ".repeat(200) }]);
     const id = f.idFor(original);
-    recordLegacyRelease(f, [id], "consumed");
+    assert.equal(
+        value(
+            await f.invoke("context_release", {
+                ids: [Number(id)],
+                reason: "Consumed explanation",
+            }),
+        ).accepted,
+        false,
+    );
     await compactSurface(f);
     assert.equal(
         f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
-        "released",
+        "summarized",
     );
 });

@@ -20,17 +20,10 @@ import {
     originalMessage,
     type ArchiveRole,
 } from "../domain/archive.js";
-import {
-    EXPAND_TOOL,
-    SEARCH_TOOL,
-    ID_INPUT_PATTERN,
-    normalizeId,
-    displayId,
-} from "../domain/protocol.js";
-import { hasInlinePlaceholder } from "../domain/release.js";
+import { EXPAND_TOOL, SEARCH_TOOL, idArgumentSchema } from "../domain/protocol.js";
 import "@deepseek-ai/dsh-session-query";
 import { expandAttachment, renderRecovered } from "./attachment-recovery.js";
-const idSchema = z.string().max(20).regex(ID_INPUT_PATTERN).transform(normalizeId);
+const idSchema = idArgumentSchema;
 const rolesSchema = z
     .array(z.enum(["user", "assistant", "tool"]))
     .min(1)
@@ -55,10 +48,6 @@ function metadata(state: LedgerState, slot: NumberSlot) {
     const tool = slot.tool === null ? null : characterPage(slot.tool, 0, 128);
     return {
         id: slot.id,
-        displayId: displayId(
-            slot.id,
-            hasInlinePlaceholder(state.entries.find((entry) => entry.id === slot.id)),
-        ),
         role: slot.role,
         status: slot.status,
         releaseStatus: state.entries.find((entry) => entry.id === slot.id)?.status ?? null,
@@ -80,13 +69,13 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
         defineTool({
             name: EXPAND_TOOL,
             description:
-                "Read archived originals from this session. U/A/T IDs return bounded exact text/content-json pages. I IDs verify and restore an image for an explicitly image-capable route; F IDs verify the complete stored file and return a readable handle. Recovery does not undo release. Search forgotten IDs first.",
+                "Read bounded exact originals from this session. Attachment numbers restore verified images on image-capable routes or return verified file handles. Recovery does not undo release. Search forgotten numbers first.",
             parameters: {
                 id: {
-                    type: "string",
+                    type: "integer",
                     required: true,
                     description:
-                        "Session-local ID, such as §T9§ or its released alias §T9R§; U/A/I/F IDs are also accepted.",
+                        "A positive session number from a declaration, search result, or context_status.",
                 },
                 offset: {
                     type: "integer",

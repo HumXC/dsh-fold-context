@@ -21,8 +21,10 @@ test("logged image offload produces a reference receipt in live state and cold r
     const original = await admit(f, [evidence, { type: "image", attachment: ref }]);
     f.session.append("image/offload", { targets: [{ seq: original.seq, imageIndexes: [0] }] });
     assert.equal(
-        f.session.deriveMessages().find((message) => message.id === original.data.id).content[1]
-            .offloaded,
+        f.session
+            .deriveMessages()
+            .find((message) => message.id === original.data.id)
+            .content.find((block) => block.type === "image").offloaded,
         true,
     );
     await f.engine.compactNow(f.agent, signal());
@@ -35,13 +37,17 @@ test("logged image offload produces a reference receipt in live state and cold r
     const state = f.engine.state(f.session);
     assert.equal(state.lastSummary.projection.attachments[0].action, "reference-only");
     assert.deepEqual(folded(f.session), state);
-    const outcome = await f.invoke("context_expand", { id: "§I2§" });
+    const outcome = await f.invoke("context_expand", { id: 2 });
     assert.equal(outcome.isError, false);
     assert.deepEqual(
         outcome.content.find((block) => block.type === "image"),
         { type: "image", attachment: ref },
     );
-    assert.equal(f.session.eventAt(original.seq).data.content[1].offloaded, undefined);
+    assert.equal(
+        f.session.eventAt(original.seq).data.content.find((block) => block.type === "image")
+            .offloaded,
+        undefined,
+    );
 });
 
 test("same-owner replacement exposes its new attachment immediately and cannot resurrect it after a checkpoint", async (t) => {

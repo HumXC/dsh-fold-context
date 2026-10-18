@@ -4,8 +4,8 @@ import type { LedgerState } from "./ledger.js";
 import type { ReleasePolicy } from "./planner.js";
 import { selectedExclusions } from "./exclusion.js";
 import { ALLOCATION_SOURCE } from "./numbering.js";
-import { ID_PATTERN, displayId } from "./protocol.js";
-import { pendingReleaseReason, hasInlinePlaceholder } from "./release.js";
+import { ID_PATTERN } from "./protocol.js";
+import { pendingReleaseReason } from "./release.js";
 
 const MAX_ROWS = 8;
 const MAX_LOOKUP_NODES = 64;
@@ -114,7 +114,7 @@ export function admissionLedger(
             shown
                 .map(
                     (row) =>
-                        `${displayId(row.id, hasInlinePlaceholder(state.entries.find((entry) => entry.id === row.id)))} ${row.status}${row.pending === null ? "" : ` (${row.pending})`}`,
+                        `${row.id} ${row.status}${row.pending === null ? "" : ` (${row.pending})`}`,
                 )
                 .join("; "),
         );

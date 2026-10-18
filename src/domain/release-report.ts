@@ -1,10 +1,10 @@
 import type { LedgerState } from "./ledger.js";
-import { displayId } from "./protocol.js";
 import { pendingReleaseReason } from "./release.js";
 
 /** Presentation metadata on the final prune; Client waits for its paired replacement. */
 export const RELEASE_REPORT_KEY = "foldContextRelease";
-export const RELEASE_REPORT_VERSION = 1;
+export const RELEASE_REPORT_VERSION = 8;
+export const RELEASE_TARGET_KEY = "foldContextReleaseTarget";
 
 export function releaseReport(
     state: LedgerState,
@@ -13,7 +13,6 @@ export function releaseReport(
 ) {
     const item = (entry: LedgerState["entries"][number], released: boolean) => ({
         id: entry.id,
-        displayId: displayId(entry.id, released),
         tool: entry.tool,
         kind: entry.role,
         ownerId: entry.ownerId,

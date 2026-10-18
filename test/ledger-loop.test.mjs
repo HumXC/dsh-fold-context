@@ -33,7 +33,7 @@ function assertPrefix(previous, next) {
     );
 }
 
-test("inline release changes only the T body before a covering checkpoint, with stable intervening prefixes", async (t) => {
+test("batched release changes only the tool body before a checkpoint while ordinary prefixes remain stable", async (t) => {
     const original = "LEDGER_RELEASE_ORIGINAL ".repeat(900);
     let target;
     let source;
@@ -51,7 +51,10 @@ test("inline release changes only the T body before a covering checkpoint, with 
                     .entries.find((item) => item.role === "tool");
                 target = entry.id;
                 source = session.snapshotEvents().find((event) => event.seq === entry.sourceSeq);
-                return call("context_release", { ids: [target], reason: "Consumed evidence" });
+                return call("context_release", {
+                    ids: [Number(target)],
+                    reason: "Consumed evidence",
+                });
             },
             (request, world) => {
                 assert.equal(world.summaries.length, 0);
@@ -66,17 +69,15 @@ test("inline release changes only the T body before a covering checkpoint, with 
                     (message) => message.id === priorResult.id,
                 );
                 assert.deepEqual(priorResult.content, [{ type: "text", text: original }]);
-                assert.match(textOf(currentResult), new RegExp(target.replace(/§$/, "R§")));
+                assert.ok(textOf(currentResult).includes(`[released ${target}]`));
                 priorResult.content = currentResult.content;
                 assert.deepEqual(
                     request.messages.slice(0, expected.length),
                     expected,
-                    "only the deliberately released T body changes in the prior request",
+                    "only the deliberately released tool body changes in the prior request",
                 );
-                const notice = latestNotice(request);
-                assert.match(textOf(notice), new RegExp(`${target.replace(/§$/, "R§")} released`));
-                assert.ok(notice.source.ledgerView.rows.length <= 8);
-                return call("context_status", { ids: [target] });
+                assert.equal(notices(request).length, notices(world.requests.at(-2)).length + 1);
+                return call("context_status", { ids: [Number(target)] });
             },
             (request, world) => {
                 assert.equal(world.summaries.length, 0);
@@ -87,33 +88,21 @@ test("inline release changes only the T body before a covering checkpoint, with 
                 assert.equal(world.summaries.length, 1);
                 const session = world.sessions.list()[0];
                 const state = world.engine.state(session);
-                assert.equal(
-                    state.entries.find((entry) => entry.id === target).status,
-                    "summarized",
-                );
+                assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
                 assert.ok(state.lastSummary.ids.includes(target));
                 assert.equal(
                     state.lastSummary.excludedIds.includes(target),
-                    false,
-                    "the covering summary cannot exclude an original body already released inline",
+                    true,
+                    "a covering summary excludes original evidence already released before measurement",
                 );
-                const notice = latestNotice(request);
-                const text = textOf(notice);
-                assert.match(text, new RegExp(`${target} summarized`));
-                assert.match(text, /lastSummary: coverage/);
-                assert.equal(notice.source.ledgerView.summaryWatermark, state.lastSummary.seq);
-                assert.doesNotMatch(text, new RegExp(`${target} queued`));
-                assert.ok(notice.source.ledgerView.rows.length <= 8);
+                assert.ok(latestNotice(request));
                 assert.equal(
                     session
                         .deriveMessages()
                         .some((message) =>
                             message.content.some(
                                 (block) =>
-                                    block.type === "text" &&
-                                    block.text.startsWith(
-                                        `[${target.replace(/§$/, "R§")} body released;`,
-                                    ),
+                                    block.type === "text" && block.text === `[released ${target}]`,
                             ),
                         ),
                     false,
@@ -124,10 +113,7 @@ test("inline release changes only the T body before a covering checkpoint, with 
                     ),
                     JSON.stringify(source),
                 );
-                const durable = session
-                    .snapshotEvents()
-                    .find((event) => event.type === "user/message" && event.data.id === notice.id);
-                assert.deepEqual(durable.data.source.ledgerView, notice.source.ledgerView);
+                assert.equal(previousAdmissionLedger(session), null);
                 checked = true;
                 return { blocks: [{ type: "text", text: "Continue from the current summary." }] };
             },
@@ -153,7 +139,7 @@ test("inline release changes only the T body before a covering checkpoint, with 
     );
 });
 
-test("ordinary request prefixes and unrelated runtime context survive concise ledger admission", async (t) => {
+test("ordinary prefixes and unrelated runtime context survive concise notice admission", async (t) => {
     const f = await setup(t, {});
     f.ctx.systemPrompt.context({
         name: "unrelated-test-provider",
@@ -174,10 +160,7 @@ test("ordinary request prefixes and unrelated runtime context survive concise le
                     textOf(message).includes("Unrelated runtime provider remains discoverable."),
             ),
         );
-        const notice = latestNotice(request);
-        assert.equal(notice.source.allocation.version, 3);
-        assert.ok(notice.source.ledgerView.rows.length <= 8);
-        assert.deepEqual(JSON.parse(JSON.stringify(notice.source)), notice.source);
+        assert.equal(notices(request).length, f.requests.indexOf(request) + 1);
     }
     const noticeCharacters = f.requests.reduce(
         (total, request) =>
@@ -196,35 +179,30 @@ test("ordinary request prefixes and unrelated runtime context survive concise le
     assert.ok(!assembly.contexts.some((item) => item.name === "fold-context:ledger"));
 });
 
-test("cold resume reuses committed source view while legacy fork bootstraps", async (t) => {
+test("cold resume and fork retain numbering without bootstrapping visible ledgers", async (t) => {
     const f = await setup(t, {});
     const parent = await f.create();
     await f.followup(parent, "Keep the original objective.");
     const sessionId = parent.agent.session.id;
-    const before = previousAdmissionLedger(parent.agent.session);
+    const before = f.engine.state(parent.agent.session).numbering;
     await f.flush(parent);
     await parent.dispose();
     const resumed = await f.resume(sessionId);
-    assert.deepEqual(previousAdmissionLedger(resumed.agent.session), before);
+    assert.deepEqual(f.engine.state(resumed.agent.session).numbering, before);
     await f.followup(resumed, "Continue after cold resume.");
-    const resumedNotice = latestNotice(f.requests.at(-1));
-    assert.doesNotMatch(textOf(resumedNotice), /ledger bootstrap/);
+    assert.equal(notices(f.requests.at(-1)).length, 2);
     const seed = JSON.parse(JSON.stringify(resumed.agent.session.snapshotEvents()));
-    for (const event of seed)
-        if (event.type === "user/message" && event.data.source.kind === "fold-context-allocation")
-            delete event.data.source.ledgerView;
     const fork = await f.create({
         seed,
         inheritedEventCount: SessionLogOffset(seed.length),
         meta: { cwd: f.root, parentSession: sessionId, isSeeded: true },
     });
     assert.equal(previousAdmissionLedger(fork.agent.session), null);
-    await f.followup(fork, "Continue the legacy fork.");
-    const bootstrap = latestNotice(f.requests.at(-1));
-    assert.match(textOf(bootstrap), /Release ledger bootstrap \(bounded\)/);
-    assert.ok(bootstrap.source.ledgerView.rows.length <= 8);
-    assert.deepEqual(
-        JSON.parse(JSON.stringify(bootstrap.source.ledgerView)),
-        bootstrap.source.ledgerView,
-    );
+    await f.followup(fork, "Continue the fork.");
+    assert.equal(notices(f.requests.at(-1)).length, 3);
+    const numbered = f.requests
+        .at(-1)
+        .messages.findLast((message) => message.source.kind === "user");
+    assert.equal(numbered.content[0].text, "Continue the fork.");
+    assert.match(textOf(latestNotice(f.requests.at(-1))), /^prev: [1-9]\d*\nnext: [1-9]\d*$/);
 });

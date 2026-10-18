@@ -2,56 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
-const boundary = (f) => f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
+const signal = () => new AbortController().signal;
 const visible = (f, event) => f.session.surface.nodes.includes(event.seq);
-const notices = (f) =>
-    f.session.surface.nodes
-        .map((seq) => f.session.eventAt(seq))
-        .filter(
-            (event) =>
-                event.type === "user/message" &&
-                event.data.source.kind === "fold-context-release-cleanup",
-        );
-const controls = (f) =>
-    f.session
-        .snapshotEvents()
-        .filter(
-            (event) =>
-                event.type === "assistant/message" &&
-                event.data.message.content.some(
-                    (block) => block.type === "tool-call" && block.name === "context_release",
-                ),
-        );
-
-async function release(f, id, ids = [id]) {
-    const outcome = await f.invoke("context_release", {
-        ids,
-        reason: "Evidence retained in conclusions",
-    });
-    assert.equal(outcome.isError, false);
-    const assistant = controls(f).at(-1);
-    const call = assistant.data.message.content.find((block) => block.type === "tool-call");
-    const result = f.session
-        .snapshotEvents()
-        .findLast(
-            (event) => event.type === "tool/result" && event.data.message.source.callId === call.id,
-        );
-    return { assistant, result, value: JSON.parse(outcome.content[0].text) };
-}
-
-function protectedControl(f, id, signed) {
-    const step =
-        1 +
-        Math.max(
-            0,
-            ...f.session
-                .snapshotEvents()
-                .filter((event) => event.type === "step/start")
-                .map((event) => event.data.step),
-        );
+const nextStep = (f) =>
+    1 +
+    Math.max(
+        0,
+        ...f.session
+            .snapshotEvents()
+            .filter((event) => event.type === "step/start")
+            .map((event) => event.data.step),
+    );
+const releaseCall = (ids, id = "release-test") => ({
+    type: "tool-call",
+    id,
+    name: "context_release",
+    arguments: JSON.stringify({ ids, reason: "Evidence retained in conclusions" }),
+});
+async function invoke(f, blocks, replayState) {
+    const step = nextStep(f);
     f.advanceSteps(step);
-    const callId = `protected-release-${step}`;
     f.session.append("step/start", { turn: 1, step });
     const assistant = f.session.append(
         "assistant/message",
@@ -63,168 +35,296 @@ function protectedControl(f, id, signed) {
                 source: {
                     provider: "test",
                     model: "fixture",
-                    ...(signed ? { replayState: { opaque: "retain signed control bytes" } } : {}),
+                    ...(replayState === undefined ? {} : { replayState }),
                 },
-                content: [
-                    ...(!signed
-                        ? [{ type: "text", text: "A preserved explanation beside management." }]
-                        : []),
-                    {
-                        type: "tool-call",
-                        id: callId,
-                        name: "context_release",
-                        arguments: JSON.stringify({ ids: [id], reason: "Already consumed" }),
-                    },
-                ],
+                content: blocks,
             }),
         },
         { surfaceOp: "append" },
     );
-    const call = f.session.append("tool/call", {
-        turn: 1,
-        step,
-        callId,
-        name: "context_release",
-        arguments: JSON.stringify({ ids: [id], reason: "Already consumed" }),
-    });
-    const value = {
-        accepted: true,
-        unknown: [],
-        unsupported: [],
-        queued: [],
-        settled: [id],
-        dshContextCompression: null,
-    };
-    const result = f.session.append(
-        "tool/result",
-        {
+    const results = [];
+    for (const block of blocks.filter((block) => block.type === "tool-call")) {
+        f.session.append("tool/call", {
             turn: 1,
             step,
-            meta: value,
-            message: createToolResultMessage({
-                callId,
-                content: [{ type: "text", text: JSON.stringify(value) }],
-                isError: false,
-            }),
-        },
-        { surfaceOp: "append", sourceEventSeqs: [call.seq] },
+            callId: block.id,
+            name: block.name,
+            arguments: block.arguments,
+        });
+        const outcome = await f.ctx.tools.execute({
+            name: block.name,
+            arguments: JSON.parse(block.arguments),
+            callId: block.id,
+            agent: f.agent,
+            signal: signal(),
+        });
+        const result = f.session.append(
+            "tool/result",
+            {
+                turn: 1,
+                step,
+                message: createToolResultMessage({
+                    callId: block.id,
+                    content: outcome.content,
+                    isError: outcome.isError,
+                }),
+                ...(outcome.meta === undefined ? {} : { meta: outcome.meta }),
+            },
+            { surfaceOp: "append" },
+        );
+        results.push({ result, outcome });
+    }
+    f.session.append("step/end", { turn: 1, step });
+    return { assistant, results };
+}
+async function requestBoundary(f, apply = true) {
+    if (apply) {
+        commitForcedReleases(f);
+        await f.engine.compactIfNeeded(f.agent, "pressure", signal());
+    }
+    const step = nextStep(f);
+    f.advanceSteps(step);
+    f.session.append("step/start", { turn: 1, step });
+    await f.ctx.waterfall(
+        "agent/request",
+        { agent: f.agent, turn: 1, step, signal: signal() },
+        async () => ({ provider: "test", model: "fixture" }),
     );
     f.session.append("step/end", { turn: 1, step });
-    return { assistant, result };
 }
-
-test("an existing inline rewrite cleans older completed release pairs and retains the latest two", async (t) => {
-    const f = await fixture();
-    t.after(f.close);
-    const goal = f.appendUser("Preserve this user objective and all substantive replies.");
-    const targets = Array.from({ length: 4 }, (_, index) =>
-        f.toolRound("read", `EVIDENCE_${index} `.repeat(300)),
-    );
-    const rounds = [];
-    for (const target of targets) {
-        rounds.push(await release(f, f.idFor(target)));
-        await boundary(f);
-    }
-    for (const round of rounds.slice(0, -2)) {
-        assert.equal(visible(f, round.assistant), false);
-        assert.equal(visible(f, round.result), false);
-    }
-    for (const round of rounds.slice(-2)) {
-        assert.equal(visible(f, round.assistant), true);
-        assert.equal(visible(f, round.result), true);
-    }
-    assert.equal(notices(f).length, 2);
-    assert.ok(notices(f).every((event) => JSON.stringify(event.data.content).length < 256));
-    assert.ok(visible(f, goal));
-    assert.deepEqual(f.session.eventAt(goal.seq).data.content, goal.data.content);
-    for (const round of rounds) {
-        assert.deepEqual(f.session.eventAt(round.assistant.seq), round.assistant);
-        assert.deepEqual(f.session.eventAt(round.result.seq), round.result);
-    }
-    const live = f.session.deriveMessages();
-    const calls = live.flatMap((message) =>
+function assertBalanced(f) {
+    const messages = f.session.deriveMessages();
+    const calls = messages.flatMap((message) =>
         message.content.filter((block) => block.type === "tool-call").map((block) => block.id),
     );
-    const results = live
+    const results = messages
         .filter((message) => message.role === "tool")
         .map((message) => message.source.callId);
-    assert.deepEqual(
-        [...calls].sort(),
-        [...results].sort(),
-        "remaining native call/result pairs stay balanced",
+    assert.deepEqual(calls.sort(), results.sort());
+    assert.equal(
+        messages.some((message) => message.source.kind === "fold-context-release-cleanup"),
+        false,
     );
-    const seq = f.session.seq;
-    await boundary(f);
-    assert.equal(f.session.seq, seq, "cleanup alone cannot trigger a second rewrite");
-    assert.equal(f.calls.length, 0);
-});
+}
 
-test("cleanup never moves the first changed prefix before the newly released evidence", async (t) => {
-    const f = await fixture();
-    t.after(f.close);
-    const old = f.toolRound("read", "OLD_EVIDENCE ".repeat(300));
-    const oldId = f.idFor(old);
-    await release(f, oldId);
-    await boundary(f);
-    for (let index = 0; index < 3; index++) await release(f, oldId);
-    const prefix = [...f.session.surface.nodes];
-    const before = f.session.seq;
-    await boundary(f);
-    assert.equal(f.session.seq, before, "settled receipts do not initiate rewrites");
-    const target = f.toolRound("read", "NEW_EVIDENCE ".repeat(300));
-    await release(f, f.idFor(target));
-    await boundary(f);
-    assert.deepEqual(f.session.surface.nodes.slice(0, prefix.length), prefix);
-    assert.equal(notices(f).length, 0);
-    assert.ok(controls(f).every((event) => visible(f, event)));
-});
-
-test("a rejected release remains visible while eligible older success pairs are cleaned", async (t) => {
-    const f = await fixture();
-    t.after(f.close);
-    const targets = Array.from({ length: 3 }, (_, index) =>
-        f.toolRound("read", `FACT_${index} `.repeat(300)),
-    );
-    for (const target of targets.slice(0, 2)) {
-        await release(f, f.idFor(target));
-        await boundary(f);
-    }
-    const rejected = await release(f, f.idFor(targets[2]), [f.idFor(targets[2]), "§T999999§"]);
-    assert.equal(rejected.value.accepted, false);
-    await release(f, f.idFor(targets[2]));
-    await boundary(f);
-    assert.ok(notices(f).length > 0);
-    assert.ok(visible(f, rejected.assistant));
-    assert.ok(visible(f, rejected.result));
-    assert.deepEqual(f.session.eventAt(rejected.result.seq), rejected.result);
-});
-
-for (const signed of [true, false]) {
-    test(`${signed ? "signed provider" : "explanatory"} release records survive otherwise eligible receipt cleanup`, async (t) => {
+for (const signed of [false, true])
+    test(`successful ${signed ? "opaque replay" : "plain"} release disappears before the next request`, async (t) => {
         const f = await fixture();
         t.after(f.close);
-        const targets = [
-            f.toolRound("read", "FIRST ".repeat(300)),
-            f.toolRound("read", "SECOND ".repeat(300)),
-        ];
-        const id = f.idFor(targets[0]);
-        await release(f, id);
-        await boundary(f);
-        const protectedRound = protectedControl(f, id, signed);
-        const bytes = JSON.stringify(protectedRound);
-        for (let index = 0; index < 3; index++) await release(f, id);
-        await release(f, f.idFor(targets[1]));
-        await boundary(f);
-        assert.ok(notices(f).length > 0);
-        assert.ok(visible(f, protectedRound.assistant));
-        assert.ok(visible(f, protectedRound.result));
-        assert.equal(
-            JSON.stringify({
-                assistant: f.session.eventAt(protectedRound.assistant.seq),
-                result: f.session.eventAt(protectedRound.result.seq),
-            }),
-            bytes,
+        const goal = f.appendUser("A: preserve this business objective.");
+        const evidence = f.toolRound("read", "Consumed facts. ".repeat(300));
+        const id = f.idFor(evidence);
+        const round = await invoke(
+            f,
+            [releaseCall([Number(id)])],
+            signed ? { opaque: "original replay bytes" } : undefined,
         );
+        const bytes = JSON.stringify(round.assistant);
+        assert.ok(visible(f, round.assistant));
+        assert.ok(visible(f, round.results[0].result));
+        const outcome = round.results[0].outcome;
+        assert.equal(JSON.stringify(outcome.value).includes("reason"), false);
+        assert.equal(outcome.content[0].text.includes("reason"), false);
+        assert.equal(outcome.meta.dshContextCompression.reason, "Evidence retained in conclusions");
+        await requestBoundary(f);
+        assert.equal(visible(f, round.assistant), false);
+        assert.equal(visible(f, round.results[0].result), false);
+        assert.ok(visible(f, goal));
+        assert.equal(JSON.stringify(f.session.eventAt(round.assistant.seq)), bytes);
+        assert.equal(
+            f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+            "released",
+        );
+        assertBalanced(f);
+        const replay = f.sessions.create("cleanup-replay", { seed: f.session.snapshotEvents() });
+        assert.deepEqual(replay.deriveMessages(), f.session.deriveMessages());
+        assert.deepEqual(f.engine.state(replay), f.engine.state(f.session));
         assert.equal(f.calls.length, 0);
     });
-}
+
+test("an already settled release disappears without another body rewrite", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const id = f.idFor(f.toolRound("read", "Evidence"));
+    await invoke(f, [releaseCall([Number(id)], "first")]);
+    await requestBoundary(f);
+    const round = await invoke(f, [releaseCall([Number(id)], "settled")]);
+    assert.deepEqual(round.results[0].outcome.value.settled, [id]);
+    await requestBoundary(f);
+    assert.equal(visible(f, round.assistant), false);
+    assert.equal(visible(f, round.results[0].result), false);
+    assertBalanced(f);
+});
+
+test("pending and rejected releases keep their feedback", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const id = f.idFor(f.toolRound("read", "Evidence"));
+    const pending = await invoke(f, [releaseCall([Number(id)], "pending")]);
+    await requestBoundary(f, false);
+    assert.ok(visible(f, pending.assistant));
+    const rejected = await invoke(f, [releaseCall([999999], "rejected")]);
+    await requestBoundary(f);
+    assert.equal(visible(f, pending.assistant), false);
+    assert.ok(visible(f, rejected.assistant));
+    assert.ok(visible(f, rejected.results[0].result));
+    assertBalanced(f);
+});
+
+for (const kind of ["text", "reasoning", "mixed-call"])
+    test(`${kind} beside release remains intact`, async (t) => {
+        const f = await fixture();
+        t.after(f.close);
+        const id = f.idFor(f.toolRound("read", "Evidence"));
+        const extra =
+            kind === "mixed-call"
+                ? { type: "tool-call", id: "status", name: "context_status", arguments: "{}" }
+                : kind === "reasoning"
+                  ? { type: "reasoning", text: "Preserve this substantive analysis." }
+                  : { type: "text", text: "Preserve this substantive finding." };
+        const round = await invoke(f, [extra, releaseCall([Number(id)])]);
+        await requestBoundary(f);
+        assert.ok(visible(f, round.assistant));
+        assert.ok(round.results.every(({ result }) => visible(f, result)));
+        assertBalanced(f);
+    });
+
+test("an interleaved business message prevents range cleanup", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const id = f.idFor(f.toolRound("read", "Evidence"));
+    const unhook = f.ctx.on("tools/result", (exec) => {
+        if (exec.name === "context_release") f.appendUser("Interleaved business context.");
+    });
+    const round = await invoke(f, [releaseCall([Number(id)])]);
+    unhook();
+    await requestBoundary(f);
+    assert.ok(visible(f, round.assistant));
+    assert.ok(
+        f.session
+            .deriveMessages()
+            .some((message) =>
+                message.content.some(
+                    (block) =>
+                        block.type === "text" && block.text === "Interleaved business context.",
+                ),
+            ),
+    );
+    assertBalanced(f);
+});
+
+for (const mode of ["void", "return", "array", "settled"])
+    test(`pure PTC ${mode} wrapper disappears and preserves the exact reason on replay`, async (t) => {
+        let ids;
+        let inner;
+        const f = await fixture({
+            ptc: async (tools) => {
+                inner = await tools.context_release({
+                    ids,
+                    reason: "PTC reason retained privately",
+                });
+                return mode === "void" ? {} : { value: mode === "array" ? [inner] : inner };
+            },
+        });
+        t.after(f.close);
+        const id = f.idFor(f.toolRound("read", "Evidence"));
+        ids = [Number(id)];
+        if (mode === "settled") {
+            await invoke(f, [releaseCall(ids)]);
+            await requestBoundary(f);
+        }
+        const round = await invoke(f, [
+            {
+                type: "tool-call",
+                id: "ptc-root",
+                name: "run_code",
+                arguments: JSON.stringify({
+                    code: "deterministic isolated program",
+                    description: "Release consumed evidence",
+                }),
+            },
+        ]);
+        assert.equal(
+            round.results[0].outcome.isError,
+            false,
+            JSON.stringify(round.results[0].outcome),
+        );
+        assert.equal(JSON.stringify(inner).includes("reason"), false);
+        assert.equal(round.results[0].outcome.content[0].text.includes("PTC reason"), false);
+        const dispatches = f.session
+            .snapshotEvents()
+            .filter((event) => event.type === "tool/ptc-dispatch");
+        assert.equal(dispatches.length, 1);
+        assert.equal(dispatches[0].data.rootCallId, "ptc-root");
+        assert.equal("meta" in dispatches[0].data, false);
+        if (mode !== "settled")
+            assert.equal(
+                f.engine.state(f.session).entries.find((entry) => entry.id === id).reason,
+                "PTC reason retained privately",
+            );
+        await requestBoundary(f);
+        assert.equal(visible(f, round.assistant), false);
+        assert.equal(visible(f, round.results[0].result), false);
+        assertBalanced(f);
+        const replay = f.sessions.create("ptc-cleanup-replay", {
+            seed: f.session.snapshotEvents(),
+        });
+        assert.deepEqual(replay.deriveMessages(), f.session.deriveMessages());
+        assert.deepEqual(f.engine.state(replay), f.engine.state(f.session));
+    });
+
+for (const mode of ["business-call", "logs", "custom-result", "sandbox", "policy-content"])
+    test(`PTC ${mode} preserves its outer call and output`, async (t) => {
+        let ids;
+        const f = await fixture({
+            ptc: async (tools) => {
+                const receipt = await tools.context_release({ ids, reason: "Consumed" });
+                if (mode === "business-call") await tools.context_status({});
+                if (mode === "logs")
+                    return { value: receipt, logs: ["Keep this business finding."] };
+                if (mode === "custom-result")
+                    return { value: { important: "Keep this custom output." } };
+                if (mode === "sandbox")
+                    return {
+                        value: receipt,
+                        sandbox: { mode: "workspace-write", denied: false, enforcement: "partial" },
+                    };
+                return { value: receipt };
+            },
+        });
+        t.after(f.close);
+        ids = [Number(f.idFor(f.toolRound("read", "Evidence")))];
+        if (mode === "policy-content")
+            f.ctx.on("tools/post-execute", async (exec, result, next) => {
+                const decision = await next();
+                return exec.name === "run_code"
+                    ? {
+                          kind: "accept",
+                          content: [
+                              ...result.content,
+                              { type: "text", text: "Keep policy feedback." },
+                          ],
+                      }
+                    : decision;
+            });
+        const round = await invoke(f, [
+            {
+                type: "tool-call",
+                id: "ptc-root",
+                name: "run_code",
+                arguments: JSON.stringify({
+                    code: "deterministic isolated program",
+                    description: "Release with business output",
+                }),
+            },
+        ]);
+        assert.equal(
+            round.results[0].outcome.isError,
+            false,
+            JSON.stringify(round.results[0].outcome),
+        );
+        await requestBoundary(f);
+        assert.ok(visible(f, round.assistant));
+        assert.ok(visible(f, round.results[0].result));
+        assertBalanced(f);
+    });

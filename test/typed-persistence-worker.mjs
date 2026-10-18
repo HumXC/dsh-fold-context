@@ -37,13 +37,12 @@ try {
                     const state = current.engine.state(handle.agent.session);
                     targetIds = state.entries
                         .filter(
-                            (entry) =>
-                                entry.sourceSeq !== null && ["§U1§", "§A2§"].includes(entry.id),
+                            (entry) => entry.sourceSeq !== null && ["1", "2"].includes(entry.id),
                         )
                         .map((entry) => entry.id);
-                    assert.deepEqual(targetIds, ["§U1§", "§A2§"]);
+                    assert.deepEqual(targetIds, ["1", "2"]);
                     return call("context_release", {
-                        ids: targetIds,
+                        ids: targetIds.map(Number),
                         reason: "request release of earlier conversation bodies",
                     });
                 },
@@ -72,7 +71,7 @@ try {
                                 .entries.find((entry) => entry.id === id).status,
                             "summarized",
                         );
-                    return call("context_expand", { id: "§A2§", limit: 16000 });
+                    return call("context_expand", { id: 2, limit: 16000 });
                 },
                 { blocks: [{ type: "text", text: "Finished isolated summary and recovery." }] },
             ],
@@ -92,15 +91,15 @@ try {
         ]);
         const state = world.engine.state(session);
         assert.equal(result(session, "context_release").accepted, false);
-        assert.equal(state.entries.find((entry) => entry.id === "§U1§").status, "summarized");
-        assert.equal(state.entries.find((entry) => entry.id === "§A2§").status, "summarized");
+        assert.equal(state.entries.find((entry) => entry.id === "1").status, "summarized");
+        assert.equal(state.entries.find((entry) => entry.id === "2").status, "summarized");
         assert.equal(world.summaries.length, 1);
         assert.deepEqual(state.lastSummary.excludedIds, []);
         const summaryInput = JSON.stringify(world.summaries[0].messages);
         assert.ok(summaryInput.includes("USER_COLD_ORIGINAL"));
         assert.ok(summaryInput.includes("ASSISTANT_COLD_ORIGINAL"));
         assert.equal(state.lastSummary.projection.reasoning, "omit-from-summary");
-        assert.equal(state.lastSummary.projection.omittedReasoning[0].id, "§A2§");
+        assert.equal(state.lastSummary.projection.omittedReasoning[0].id, "2");
         const usage = world.ctx.sessionProjections.stateOf(session, "tokenUsage");
         const settlements = session
             .snapshotEvents()
@@ -124,8 +123,8 @@ try {
             reasoning: "preserve",
             responses: [
                 call("context_search", { query: "ASSISTANT_COLD_ORIGINAL", roles: ["assistant"] }),
-                call("context_expand", { id: "§A2§", limit: 16000 }),
-                call("context_expand", { id: "§U1§", limit: 16000 }),
+                call("context_expand", { id: 2, limit: 16000 }),
+                call("context_expand", { id: 1, limit: 16000 }),
                 {
                     blocks: [
                         { type: "text", text: "Recovered exact originals after process restart." },
@@ -144,18 +143,18 @@ try {
             world.ctx.sessionProjections.stateOf(session, "tokenUsage"),
             expected.usage,
         );
-        for (const id of ["§U1§", "§A2§"])
+        for (const id of ["1", "2"])
             assert.equal(state.entries.find((entry) => entry.id === id).status, "summarized");
         assert.equal(result(session, "context_release").accepted, false);
         assert.deepEqual(state.lastSummary.excludedIds, []);
         await world.followup(handle, "Discover and recover both earlier originals.");
-        assert.ok(result(session, "context_search").hits.some((hit) => hit.id === "§A2§"));
+        assert.ok(result(session, "context_search").hits.some((hit) => hit.id === "2"));
         const expanded = namedResults(session, "context_expand");
-        assert.deepEqual(JSON.parse(expanded.findLast((page) => page.id === "§A2§").text), [
+        assert.deepEqual(JSON.parse(expanded.findLast((page) => page.id === "2").text), [
             { type: "reasoning", text: "THOUGHT_COLD_ORIGINAL 🧠é\n" },
             { type: "text", text: assistantText },
         ]);
-        assert.equal(expanded.findLast((page) => page.id === "§U1§").text, userText);
+        assert.equal(expanded.findLast((page) => page.id === "1").text, userText);
         console.log(JSON.stringify({ restored: true, pid: process.pid }));
     } else {
         throw new Error("unknown isolated typed persistence mode");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-/** Replay a real historical v4 intent; this does not invoke the current release tool. */
+/** Append an obsolete v4 intent and prove replay ignores its release request. */
 export function recordLegacyRelease(f, ids, reason) {
     assert.ok(Array.isArray(ids) && ids.length > 0, "legacy release needs known IDs");
     assert.equal(new Set(ids).size, ids.length, "legacy release IDs must be unique");
@@ -32,5 +32,8 @@ export function recordLegacyRelease(f, ids, reason) {
         isError: false,
         content: [{ type: "text", text: JSON.stringify(receipt) }],
     });
+    const after = f.engine.state(f.session);
+    assert.deepEqual(after.entries, state.entries, "obsolete receipts cannot queue evidence");
+    assert.deepEqual(after.summaryRequests, state.summaryRequests);
     return receipt;
 }

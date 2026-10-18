@@ -14,7 +14,7 @@ const user = (text) =>
     });
 const textOf = (message) => message.content.map((block) => block.text ?? "").join("");
 const entry = (number, status = "available") => ({
-    id: `§A${number}§`,
+    id: String(number),
     role: "assistant",
     ownerId: null,
     blockIndex: null,
@@ -42,9 +42,14 @@ async function propose(f, messages, step = 1, base = { kind: "enter", messages }
         async () => base,
     );
 }
-function commit(f, decision, step = 1) {
+async function commit(f, decision, step = 1) {
     f.advanceSteps(step);
     f.session.append("step/start", { turn: 1, step });
+    await f.ctx.waterfall(
+        "agent/request",
+        { agent: f.agent, turn: 1, step, signal: new AbortController().signal },
+        async () => ({ provider: "test", model: "fixture" }),
+    );
     for (const message of decision.messages)
         f.session.append("user/message", message, { surfaceOp: "append" });
     f.session.append("step/end", { turn: 1, step });
@@ -89,23 +94,23 @@ test("admission previews are pure, bounded and carry only displayed fingerprints
     }
     state.entries.push(entry(200));
     const fresh = admissionLedger(state, policy, previous);
-    assert.match(fresh.text, /§A200§ available/);
-    assert.doesNotMatch(fresh.text, /§A(?:[1-9]|1\d|20)§ released/);
+    assert.match(fresh.text, /200 available/);
+    assert.doesNotMatch(fresh.text, /(?:^|; )(?:[1-9]|1\d|20) released/);
     assert.doesNotMatch(next.text, /lastSummary/);
     assert.equal(admissionLedger(state, { catalogLimit: 2 }, null).view.rows.length, 2);
 });
 
 test("semantic deltas suppress stable rows and declaration duplication", () => {
     const state = stateWith([entry(1), entry(2), entry(3)]);
-    const first = admissionLedger(state, policy, null, ["§A3§"]);
-    assert.doesNotMatch(first.text, /§A3§/);
+    const first = admissionLedger(state, policy, null, ["3"]);
+    assert.doesNotMatch(first.text, /(?:^|; )3 available/);
     const previous = { seq: 5, view: first.view };
     assert.equal(admissionLedger(state, policy, previous).text, "");
     state.entries[0] = { ...state.entries[0], status: "released", currentSeq: null };
-    state.lastSummary = { seq: 20, ids: ["§A1§"], excludedIds: ["§A1§"], projection: null };
+    state.lastSummary = { seq: 20, ids: ["1"], excludedIds: ["1"], projection: null };
     const changed = admissionLedger(state, policy, previous);
-    assert.match(changed.text, /§A1§ released/);
-    assert.match(changed.text, /lastSummary: coverage §A1§; excluded §A1§/);
+    assert.match(changed.text, /1 released/);
+    assert.match(changed.text, /lastSummary: coverage 1; excluded 1/);
     assert.doesNotMatch(changed.text, /message-1|currentSeq|reservation/);
 });
 
@@ -144,7 +149,7 @@ test("previous view lookup is bounded to current surface and newest relevant not
                 kind: "fold-context-allocation",
                 ledgerView: {
                     ...valid,
-                    rows: Array(9).fill({ id: "§A1§", fingerprint: "available:" }),
+                    rows: Array(9).fill({ id: "1", fingerprint: "available:" }),
                 },
             },
         },
@@ -152,32 +157,31 @@ test("previous view lookup is bounded to current surface and newest relevant not
     assert.equal(previousAdmissionLedger(fake), null);
 });
 
-test("notice source is lossless JSON and cold/fork replay retains the same bounded view", async (t) => {
+test("one plain notice preserves raw input and cold/fork replay without a runtime ledger", async (t) => {
     const f = await fixture();
     t.after(f.close);
-    const input = user("Persist the declaration");
-    const stateBefore = JSON.stringify(f.engine.state(f.session));
+    const input = user("Persist the numbering");
     const decision = await propose(f, [input], 1, {
         kind: "enter",
         messages: [input],
         startsRequestSeries: true,
     });
-    assert.equal(decision.messages[0], input);
     assert.equal(decision.startsRequestSeries, true);
-    assert.equal(JSON.stringify(f.engine.state(f.session)), stateBefore);
-    const notice = decision.messages.at(-1);
-    assert.equal(notice.source.allocation.version, 3);
-    assert.deepEqual(JSON.parse(JSON.stringify(notice.source)), notice.source);
-    commit(f, decision);
-    const previous = previousAdmissionLedger(f.session);
+    assert.equal(decision.messages.length, 2);
+    assert.equal(decision.messages[0], input);
+    assert.equal(textOf(decision.messages[0]), "Persist the numbering");
+    const notice = decision.messages[1];
+    assert.equal(notice.source.kind, "fold-context-allocation");
+    assert.equal(textOf(notice), "prev: 1\nnext: 2");
+    assert.equal(notice.source.allocation.assistantId, "2");
+    await commit(f, decision);
     const seed = JSON.parse(JSON.stringify(f.session.snapshotEvents()));
     const cold = Session.create(f.session.id, seed, f.session.header);
     const fork = f.sessions.fork(f.session);
-    assert.deepEqual(previousAdmissionLedger(cold), previous);
-    assert.deepEqual(previousAdmissionLedger(fork), previous);
+    assert.equal(previousAdmissionLedger(cold), null);
+    assert.equal(previousAdmissionLedger(fork), null);
+    assert.deepEqual(f.engine.state(cold).numbering, f.engine.state(fork).numbering);
     assert.deepEqual(f.engine.state(fork).numbering, f.engine.state(f.session).numbering);
-    assert.equal(notice.source.ledgerView.rows.length, 0, "incoming user already declared");
-    assert.match(textOf(notice), /lastSummary: none/);
 });
 
 test("rejected, empty and cancelled admissions commit no ledger or numbering", async (t) => {

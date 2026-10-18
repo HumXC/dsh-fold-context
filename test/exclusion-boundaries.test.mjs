@@ -17,7 +17,7 @@ async function compactSurface(f) {
     return f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
 }
 
-test("legacy ambiguous call IDs within one assistant preserve both calls and results", async (t) => {
+test("ambiguous native call IDs stay paired through modern release intent and summary filtering", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -61,13 +61,27 @@ test("legacy ambiguous call IDs within one assistant preserve both calls and res
     f.advanceSteps(1);
     const tools = f.engine.state(f.session).entries.filter((entry) => entry.role === "tool");
     assert.equal(tools.length, 2);
-    recordLegacyRelease(f, [tools[0].id], "consumed first call");
+    recordLegacyRelease(
+        f,
+        tools.map((entry) => entry.id),
+        "obsolete receipt",
+    );
+    assert.equal(
+        parsed(
+            await f.invoke("context_release", {
+                ids: tools.map((entry) => Number(entry.id)),
+                reason: "completed ambiguous tools",
+            }),
+        ).accepted,
+        true,
+    );
     const state = f.engine.state(f.session);
     assert.deepEqual(selectedExclusions(state, new Set(state.surface), f.session.seq), []);
     const messages = f.session.deriveMessages();
     assert.deepEqual(summaryInput(state, messages, f.session.seq), messages);
-    const status = parsed(await f.invoke("context_status", { ids: [tools[0].id] }));
-    assert.equal(status.entries[0].pendingReason, "protocol_protection");
+    const status = parsed(await f.invoke("context_status", { ids: [Number(tools[0].id)] }));
+    assert.equal(status.entries[0].status, "queued");
+    assert.equal(status.entries[0].pendingReason, "awaiting_step_boundary");
     await compactSurface(f);
     const supplied = summaryRecords(f.calls[0].messages);
     assert.equal(
@@ -92,13 +106,22 @@ test("legacy ambiguous call IDs within one assistant preserve both calls and res
     );
 });
 
-test("legacy same-identity replacement removing user text cannot produce a false exclusion receipt", async (t) => {
+test("obsolete user release receipt and same-identity replacement cannot create a false exclusion", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     const original = f.appendUser("Text originally marked for exclusion. ".repeat(200));
     const id = f.idFor(original);
-    recordLegacyRelease(f, [id], "consumed text");
+    recordLegacyRelease(f, [id], "obsolete user receipt");
+    assert.equal(
+        parsed(
+            await f.invoke("context_release", {
+                ids: [Number(id)],
+                reason: "unsupported user release",
+            }),
+        ).accepted,
+        false,
+    );
     const replacement = f.session.append(
         "user/message",
         {
@@ -118,8 +141,9 @@ test("legacy same-identity replacement removing user text cannot produce a false
     assert.deepEqual(selectedExclusions(state, new Set(state.surface), f.session.seq), []);
     const messages = f.session.deriveMessages();
     assert.deepEqual(summaryInput(state, messages, f.session.seq), messages);
-    const status = parsed(await f.invoke("context_status", { ids: [id] }));
-    assert.equal(status.entries[0].pendingReason, "protocol_protection");
+    const status = parsed(await f.invoke("context_status", { ids: [Number(id)] }));
+    assert.equal(status.entries[0].status, "available");
+    assert.equal(status.entries[0].pendingReason, null);
     await compactSurface(f);
     assert.deepEqual(
         summaryRecords(f.calls[0].messages)
@@ -138,7 +162,7 @@ test("legacy same-identity replacement removing user text cannot produce a false
     assert.deepEqual(replayed, f.engine.state(f.session));
 });
 
-test("legacy foreign compaction end cannot clear pending proof in a pure replay fold", async (t) => {
+test("foreign compaction end cannot clear pending summary proof after an ignored obsolete receipt", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -163,6 +187,6 @@ test("legacy foreign compaction end cannot clear pending proof in a pure replay 
     });
     assert.equal(ignored, before);
     const after = ledgerProjection.apply(ignored, events[checkpointIndex]);
-    assert.equal(after.entries.find((entry) => entry.id === id).status, "released");
-    assert.deepEqual(after.lastSummary.excludedIds, [id]);
+    assert.equal(after.entries.find((entry) => entry.id === id).status, "summarized");
+    assert.deepEqual(after.lastSummary.excludedIds, []);
 });

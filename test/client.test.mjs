@@ -97,7 +97,7 @@ const outcome = (toolName, args, value, extra = {}) => ({
         ...extra,
     },
 });
-const queued = { accepted: true, queued: ["§T2§"], settled: [], unknown: [], unsupported: [] };
+const queued = { accepted: true, queued: ["2"], settled: [], unknown: [], unsupported: [] };
 const normalize = (value) => JSON.parse(JSON.stringify(value));
 
 test("five tool seats and the release node mount without private Client imports", () => {
@@ -116,10 +116,10 @@ test("five tool seats and the release node mount without private Client imports"
 
 test("real wire argument and result shapes retain queued versus applied semantics", () => {
     const { plugin } = client();
-    const request = outcome("context_release", { ids: ["§T2§"], reason: "Evidence used" }, queued);
+    const request = outcome("context_release", { ids: [2], reason: "Evidence used" }, queued);
     assert.equal(plugin.toolModel(request).label, "queued");
-    assert.equal(plugin.toolModel(request).summary, "T2");
-    assert.deepEqual(normalize(plugin.toolModel(request).args.ids), ["§T2§"]);
+    assert.equal(plugin.toolModel(request).summary, "2");
+    assert.deepEqual(normalize(plugin.toolModel(request).args.ids), [2]);
     const orphan = plugin.toolModel({ ...request, block: { ...request.block, call: null } });
     assert.equal(orphan.state, "result");
     assert.equal(orphan.summary, "");
@@ -131,7 +131,7 @@ test("real wire argument and result shapes retain queued versus applied semantic
         plugin.toolModel({
             ...request,
             phase: "start",
-            block: { argsRaw: JSON.stringify({ ids: ["§T2§"] }) },
+            block: { argsRaw: JSON.stringify({ ids: [2] }) },
         }).label,
         "running",
     );
@@ -145,7 +145,7 @@ test("valid presentation metadata wins; unrecognized metadata falls back to reco
     const { plugin } = client();
     const props = outcome("context_release", {}, queued, { meta: { unrelated: true } });
     assert.equal(plugin.toolModel(props).state, "result");
-    props.block.meta = { ...queued, queued: [], settled: ["§T2§"] };
+    props.block.meta = { ...queued, queued: [], settled: ["2"] };
     assert.equal(plugin.toolModel(props).label, "settled");
     props.block.isError = true;
     props.block.error = { reason: "Recorded failure" };
@@ -157,8 +157,8 @@ test("release cards explain individual outcomes, reason and preview in both loca
     const c = client();
     const props = outcome(
         "context_release",
-        { ids: ["§T2§"], reason: "Evidence used" },
-        { ...queued, unknown: ["§T999§"] },
+        { ids: [2], reason: "Evidence used" },
+        { ...queued, unknown: ["999"] },
     );
     const view = c.views.get("context_release");
     const zh = c.visibleText(c.render({ type: view, props }));
@@ -167,9 +167,9 @@ test("release cards explain individual outcomes, reason and preview in both loca
     assert.match(zh, /编号不存在/);
     assert.match(zh, /Evidence used/);
     assert.doesNotMatch(zh, /"accepted"/);
-    assert.match(zh, /T2/);
-    assert.match(zh, /T999/);
-    assert.doesNotMatch(zh, /§[UATIF]\d+R?§/);
+    assert.match(zh, /\b2\b/);
+    assert.match(zh, /999/);
+    assert.doesNotMatch(zh, /§|\b[UATIF]\d+R?\b/);
     c.setLanguage("en");
     assert.match(c.visibleText(c.render({ type: view, props })), /Mark context for release/);
 });
@@ -178,12 +178,11 @@ test("text, image and file recovery keep released status and original paging", (
     const c = client();
     const textProps = outcome(
         "context_expand",
-        { id: "§T2R§" },
+        { id: 2 },
         {
-            id: "§T2§",
-            displayId: "§T2R§",
+            id: "2",
             status: "found",
-            text: "original 🧠 §T99§",
+            text: "original 🧠 prev: 99 next: 100",
             offset: 0,
             totalCharacters: 20,
             nextOffset: 10,
@@ -193,17 +192,17 @@ test("text, image and file recovery keep released status and original paging", (
     const rendered = c.visibleText(
         c.render({ type: c.views.get("context_expand"), props: textProps }),
     );
-    assert.match(rendered, /original 🧠 §T99§/);
-    assert.equal(c.plugin.toolModel(textProps).summary, "T2R");
-    assert.equal(c.plugin.toolModel(textProps).args.id, "§T2R§");
+    assert.match(rendered, /original 🧠 prev: 99 next: 100/);
+    assert.equal(c.plugin.toolModel(textProps).summary, "2");
+    assert.equal(c.plugin.toolModel(textProps).args.id, 2);
     assert.match(rendered, /已释放/);
     assert.match(rendered, /下一页偏移 10/);
     assert.match(rendered, /不会撤销释放状态/);
     const attachment = { attachmentId: "one", mediaType: "image/png", bytes: 1 };
     const imageProps = outcome(
         "context_expand",
-        { id: "§I3§" },
-        { id: "§I3§", status: "found", representation: "native-image" },
+        { id: 3 },
+        { id: "3", status: "found", representation: "native-image" },
     );
     imageProps.block.content.push({ type: "image", attachment });
     assert.deepEqual(normalize(c.plugin.toolModel(imageProps).images), [
@@ -213,9 +212,9 @@ test("text, image and file recovery keep released status and original paging", (
     const fileProps = {
         ...outcome(
             "context_expand",
-            { id: "§F4§" },
+            { id: 4 },
             {
-                id: "§F4§",
+                id: "4",
                 status: "found",
                 representation: "file-handle",
                 path: "/evidence.txt",
@@ -245,7 +244,7 @@ test("search/status use structured lists and unknown old results remain inspecta
             "context_search",
             {
                 query: "needle",
-                hits: [{ id: "§T2§", tool: "read", snippet: "needle evidence", attachments: [] }],
+                hits: [{ id: "2", tool: "read", snippet: "needle evidence", attachments: [] }],
                 hasMore: true,
             },
             /needle evidence/,
@@ -255,7 +254,7 @@ test("search/status use structured lists and unknown old results remain inspecta
             {
                 entries: [
                     {
-                        id: "§T2§",
+                        id: "2",
                         status: "queued",
                         pendingReason: "awaiting_step_boundary",
                         preview: "evidence",
@@ -307,8 +306,9 @@ test("status cards explain payback, cache assumptions and protected constraints 
             }),
         );
         assert.match(text, /17 \/ 8/);
-        assert.match(text, /10,980/);
-        assert.match(text, /1,900/);
+        assert.match(text, /10980/);
+        assert.match(text, /1900/);
+        assert.doesNotMatch(text, /10,980|1,900/);
         assert.match(text, language === "zh" ? /保守假定已缓存/ : /conservatively assumed cached/);
         assert.match(
             text,
@@ -329,7 +329,7 @@ test("release savings stay visible when collapsed, localize, and preserve increa
                 props: {
                     node: {
                         data: {
-                            released: [{ id: "§T2§", displayId: "§T2R§" }],
+                            released: [{ id: "2", status: "released" }],
                             pending: [],
                             tokenEstimate,
                         },
@@ -339,13 +339,13 @@ test("release savings stay visible when collapsed, localize, and preserve increa
             }),
         );
     const saving = { beforeTokens: 2000, afterTokens: 766 };
-    assert.match(render(saving), /预计减少 1,234 tokens/);
+    assert.match(render(saving), /预计减少 1234 tokens/);
     assert.doesNotMatch(render(saving), /估算/);
     assert.match(render(saving), /1 项/);
     assert.match(render({ beforeTokens: 10, afterTokens: 10 }), /预计减少 0 tokens/);
     assert.match(render({ beforeTokens: 10, afterTokens: 15 }), /预计增加 5 tokens/);
     c.setLanguage("en");
-    assert.match(render(saving), /Estimated reduction: 1,234 tokens/);
+    assert.match(render(saving), /Estimated reduction: 1234 tokens/);
     assert.match(render({ beforeTokens: 10, afterTokens: 15 }), /Estimated increase: 5 tokens/);
     for (const value of [
         undefined,
@@ -366,21 +366,21 @@ test("release savings stay visible when collapsed, localize, and preserve increa
 test("only paired, completed replacements produce replayable standalone release nodes", () => {
     const c = client();
     const receipt = {
-        version: 1,
+        version: 8,
         batchId: "session:42",
         completionSeq: 43,
         targetSeq: 2,
         released: [
             {
-                id: "§T2§",
-                displayId: "§T2R§",
+                id: "2",
+                status: "released",
                 tool: "read",
                 preview: "prior evidence",
                 reason: "Used",
             },
         ],
         pending: [
-            { id: "§I3§", displayId: "§I3§", kind: "image", pendingReason: "protocol_protection" },
+            { id: "3", kind: "image", status: "queued", pendingReason: "protocol_protection" },
         ],
     };
     const prune = { seq: 42, type: "compaction/prune", data: { foldContextRelease: receipt } };
@@ -429,8 +429,52 @@ test("only paired, completed replacements produce replayable standalone release 
     assert.match(rendered, /已释放上下文/);
     assert.match(rendered, /prior evidence/);
     assert.match(rendered, /受协议保护/);
-    assert.match(rendered, /T2R/);
-    assert.doesNotMatch(rendered, /§[UATIF]\d+R?§/);
-    assert.equal(receipt.released[0].displayId, "§T2R§");
+    assert.match(rendered, /\b2\b/);
+    assert.doesNotMatch(rendered, /§|\b[UATIF]\d+R?\b/);
+    assert.equal(receipt.released[0].id, "2");
+    assert.equal(receipt.released[0].status, "released");
     assert.equal(def.match({ ...event, type: "user/message" }).id, "43");
+    for (const version of [1, 6, 7])
+        assert.equal(
+            c.plugin.reportOf({
+                ...prune,
+                data: { foldContextRelease: { ...receipt, version } },
+            }),
+            null,
+        );
+    assert.equal(
+        c.plugin.reportOf({
+            ...prune,
+            data: { foldContextRelease: { ...receipt, released: [{ id: "§T2R§" }] } },
+        }),
+        null,
+    );
+});
+
+test("numeric tool arguments and digit receipts use stable IDs independent of release status", () => {
+    const c = client();
+    const value = { id: "1234567", status: "found", releaseStatus: "released", text: "evidence" };
+    const props = outcome("context_expand", { id: 1234567 }, value);
+    assert.equal(c.plugin.toolModel(props).summary, "1234567");
+    assert.equal(c.plugin.toolModel(props).state, "result");
+    for (const id of ["1234567", "§T2§", "T2", "§T2R§", 0, -1, 1.5, 9007199254740992]) {
+        const model = c.plugin.toolModel(outcome("context_expand", { id }, value));
+        assert.equal(model.summary, "", `invalid argument ID: ${id}`);
+    }
+    for (const id of ["§T2§", "T2", "2R", "02", "0", "-1", "1.5", "9007199254740992", 2]) {
+        assert.equal(
+            c.plugin.toolModel(outcome("context_expand", { id: 2 }, { ...value, id })).state,
+            "fallback",
+        );
+        assert.equal(
+            c.plugin.toolModel(
+                outcome("context_release", { ids: [2] }, { ...queued, queued: [id] }),
+            ).state,
+            "fallback",
+        );
+    }
+    const rendered = c.visibleText(c.render({ type: c.views.get("context_expand"), props }));
+    assert.match(rendered, /1234567/);
+    assert.match(rendered, /已释放/);
+    assert.doesNotMatch(rendered, /1,234,567|1234567R/);
 });

@@ -9,9 +9,55 @@ import {
     planningPressure,
     pressureStateSchema,
 } from "../lib/domain/pressure.js";
+import { ledgerProjection } from "../lib/domain/ledger.js";
+import { releaseControlProjection } from "../lib/domain/release-controls.js";
 
 const signal = () => new AbortController().signal;
 const stateOf = (f) => f.ctx.sessionProjections.stateOf(f.session, "contextCompressionPressure");
+
+test("shared projections replay and accept new events after the registering engine unloads", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const evidence = f.appendUser("Preserve this evidence across plugin instance replacement.");
+    const projections = f.ctx.sessionProjections;
+    const remaining = f.ctx.plugin({
+        name: "remaining-projection-consumer",
+        inject: ["sessionProjections"],
+        apply(ctx) {
+            ctx.sessionProjections.register(ledgerProjection);
+            ctx.sessionProjections.register(releaseControlProjection);
+            ctx.sessionProjections.register(
+                createPressureProjection((message) => f.meter.estimateMessage(message)),
+            );
+        },
+    });
+    await remaining.await();
+    const replay = () =>
+        projections.restore({}, f.session.snapshotEvents(), 0, f.session.header, 0).checkpoint;
+    const before = replay();
+    assert.ok(
+        before.contextCompressionPressure.val.nodes.some((node) => node.seq === evidence.seq),
+    );
+
+    await f.pluginFiber.dispose();
+
+    const after = replay();
+    for (const key of [
+        "contextCompression",
+        "contextReleaseControls",
+        "contextCompressionPressure",
+    ])
+        assert.deepEqual(
+            after[key],
+            before[key],
+            `${key} survives its first registrant's disposal`,
+        );
+
+    const followup = f.appendUser("Continue processing after the original engine has unloaded.");
+    const live = stateOf(f);
+    assert.ok(live.nodes.some((node) => node.seq === followup.seq));
+    assert.deepEqual(replay().contextCompressionPressure.val, live);
+});
 function snapshot(f, kind, source, text = "Current configuration. ".repeat(80)) {
     return f.session.append(
         "user/message",

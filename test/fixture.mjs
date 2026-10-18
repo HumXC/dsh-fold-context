@@ -13,6 +13,7 @@ import {
 } from "@deepseek-ai/dsh-llm";
 import foldContext from "../lib/index.js";
 import { LocalSessionQuery } from "./query-fixture.mjs";
+import { installPtcStub } from "./ptc-fixture.mjs";
 
 /** Fresh Cordis world, RAM sessions and mock stream only: no network, storage backend, profile or Web. */
 export async function fixture(options = {}) {
@@ -57,7 +58,8 @@ export async function fixture(options = {}) {
     new InvariantRegistry(ctx);
     await installCompactionInvariants(ctx);
     new SystemPrompt(ctx, {});
-    new ToolRuntime(ctx);
+    if (options.ptc !== undefined) installPtcStub(ctx, options.ptc);
+    new ToolRuntime(ctx, options.ptc === undefined ? {} : { mode: "both" });
     if (options.pruner !== undefined) {
         const { ToolResultPruner } = await import("@deepseek-ai/dsh-compaction-tool-result-pruner");
         new ToolResultPruner(ctx, options.pruner);
@@ -186,6 +188,7 @@ export async function fixture(options = {}) {
     return {
         ctx,
         engine,
+        pluginFiber: fiber,
         sessions,
         session,
         agent,

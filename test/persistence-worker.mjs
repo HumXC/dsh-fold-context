@@ -3,6 +3,7 @@ import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { SessionId, SessionSeq, SessionLogOffset, buildForkSeed } from "@deepseek-ai/dsh-session";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
+import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 const root = process.env.FOLD_CONTEXT_TEST_ROOT;
 await assertTestRoot(root);
@@ -41,9 +42,11 @@ if (mode === "write") {
             (_request, world) =>
                 call("context_release", {
                     ids: [
-                        world.engine
-                            .state(world.sessions.list()[0])
-                            .entries.find((entry) => entry.role === "tool").id,
+                        Number(
+                            world.engine
+                                .state(world.sessions.list()[0])
+                                .entries.find((entry) => entry.role === "tool").id,
+                        ),
                     ],
                     reason: "Consumed before restart",
                 }),
@@ -57,7 +60,7 @@ if (mode === "write") {
                 assert.ok(session.surface.nodes.includes(inlineEntry.currentSeq));
                 assert.equal(session.surface.nodes.includes(inlineEntry.sourceSeq), false);
                 assert.ok(
-                    JSON.stringify(request.messages).includes(inlineEntry.id.replace(/§$/, "R§")),
+                    JSON.stringify(request.messages).includes(`[released ${inlineEntry.id}]`),
                 );
                 assert.equal(JSON.stringify(request.messages).includes(original), false);
                 return call("context_compact", {
@@ -66,26 +69,23 @@ if (mode === "write") {
             },
         ],
     });
+    installForcedReleaseBoundary(f);
     try {
         const handle = await f.create();
         await f.followup(handle, "Preserve the restart user objective. ".repeat(500));
         await f.flush(handle);
         const state = f.engine.state(handle.agent.session);
         const entry = state.entries.find((entry) => entry.role === "tool");
-        assert.equal(entry.status, "summarized");
+        assert.equal(entry.status, "released");
         assert.equal(f.summaries.length, 1);
         assert.ok(state.lastSummary.ids.includes(entry.id));
-        assert.equal(state.lastSummary.excludedIds.includes(entry.id), false);
+        assert.equal(state.lastSummary.excludedIds.includes(entry.id), true);
         assert.equal(
             handle.agent.session
                 .deriveMessages()
                 .some((message) =>
                     message.content.some(
-                        (block) =>
-                            block.type === "text" &&
-                            block.text.startsWith(
-                                `[${entry.id.replace(/§$/, "R§")} body released;`,
-                            ),
+                        (block) => block.type === "text" && block.text === `[released ${entry.id}]`,
                     ),
                 ),
             false,
@@ -137,23 +137,23 @@ if (mode === "write") {
         assert.equal(
             f.engine.state(session).entries.find((entry) => entry.id === expected.originalId)
                 .status,
-            "summarized",
+            "released",
         );
         const inlineReplacement = session
             .snapshotEvents()
             .find((event) => event.seq === expected.inlineEntry.currentSeq);
         assert.ok(
             JSON.stringify(inlineReplacement.data.message.content).includes(
-                expected.originalId.replace(/§$/, "R§"),
+                `[released ${expected.originalId}]`,
             ),
         );
         const recovered = await invoke(f, parent, "context_expand", {
-            id: expected.originalId.replace(/§$/, "R§"),
+            id: Number(expected.originalId),
             limit: 16000,
         });
         assert.equal(recovered.text, expected.original);
         assert.equal(recovered.sourceSeq, expected.originalSeq);
-        assert.equal(recovered.releaseStatus, "summarized");
+        assert.equal(recovered.releaseStatus, "released");
         assert.equal(recovered.restoresSurface, false);
         assert.deepEqual(session.surface.nodes, expected.surface);
         const found = await invoke(f, parent, "context_search", {
@@ -175,7 +175,7 @@ if (mode === "write") {
         assert.equal(
             (
                 await invoke(f, child, "context_expand", {
-                    id: expected.originalId.replace(/§$/, "R§"),
+                    id: Number(expected.originalId),
                     limit: 16000,
                 })
             ).text,
@@ -223,13 +223,13 @@ if (mode === "write") {
         const handle = await f.resume(SessionId(child.sessionId));
         assert.equal(f.engine.state(handle.agent.session).numbering.nextNumber, child.nextNumber);
         assert.equal(
-            (await invoke(f, handle, "context_expand", { id: child.privateId })).text,
+            (await invoke(f, handle, "context_expand", { id: Number(child.privateId) })).text,
             "FORK_CHILD_PRIVATE evidence.",
         );
         assert.equal(
             (
                 await invoke(f, handle, "context_expand", {
-                    id: expected.originalId.replace(/§$/, "R§"),
+                    id: Number(expected.originalId),
                     limit: 16000,
                 })
             ).text,

@@ -6,7 +6,7 @@ import { fixture } from "./fixture.mjs";
 for (const [cacheReadTokens, cacheState, ratio, basis] of [
     [undefined, "unknown", 0.1, "assumed_cached"],
     [100, "cached", 0.1, "primary_usage"],
-    [0, "uncached", 1, "primary_usage"],
+    [0, "uncached", 0.1, "primary_usage"],
 ]) {
     test(`primary usage maps ${cacheState} cache evidence into scheduling without guessing a hit`, async (t) => {
         const f = await fixture({ compaction: { retainTokens: 256 }, scheduling: {} });
@@ -43,8 +43,11 @@ for (const [cacheReadTokens, cacheState, ratio, basis] of [
         assert.equal(status.plan.cacheState, cacheState);
         assert.equal(status.plan.effectiveCacheReadRatio, ratio);
         assert.equal(status.diagnostic.economics.cacheBasis, basis);
-        assert.equal(status.plan.cachedPrefixAssumed, cacheState !== "uncached");
-        if (cacheState === "uncached") assert.equal(status.plan.initialRebuildPenalty, 0);
+        assert.equal(status.plan.cachedPrefixAssumed, true);
+        assert.ok(
+            status.plan.initialRebuildPenalty > 0,
+            "a historical cache miss grants no current rebuild credit",
+        );
         assert.equal(f.calls.length, 0);
     });
 }

@@ -1,53 +1,34 @@
 import { z } from "zod";
 import type { ContextFormed, Message, UserMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
-import { entryId, ID_PATTERN, CONTROL_TOOLS, isReleasedContent } from "./protocol.js";
+import { entryId, ID_PATTERN, CONTROL_TOOLS } from "./protocol.js";
 import { characterCount } from "./summary-policy.js";
 import {
     attachmentBlockSchema,
     attachmentSlotSchema,
-    attachmentLabel,
     isAttachmentBlock,
 } from "./attachment-numbering.js";
+import { unannouncedMessages, attachmentOrdinal } from "./message-labels.js";
 
 export const ALLOCATION_SOURCE = "fold-context-allocation";
-const legacyAllocationSchema = z.object({
-    version: z.literal(2),
+const idSchema = z.string().regex(ID_PATTERN);
+export const allocationSchema = z.object({
+    version: z.literal(1),
     turn: z.number().int().positive(),
     step: z.number().int().positive(),
-    inputs: z.array(z.object({ messageId: z.string(), id: z.string().regex(/^§U[1-9]\d*§$/) })),
-    assistantId: z.string().regex(/^§A[1-9]\d*§$/),
-});
-export const allocationSchema = legacyAllocationSchema.extend({
-    version: z.literal(3),
+    inputs: z.array(z.object({ messageId: z.string(), id: idSchema })),
+    announcedIds: z.array(idSchema),
+    assistantId: idSchema,
     attachments: z.array(
         z.object({
-            id: z.string().regex(/^§[IF][1-9]\d*§$/),
-            ownerId: z.string(),
+            id: idSchema,
+            ownerId: idSchema,
             blockIndex: z.number().int().nonnegative(),
+            ordinal: z.number().int().positive(),
         }),
     ),
 });
-const storedAllocationSchema = z.union([
-    allocationSchema,
-    legacyAllocationSchema,
-    legacyAllocationSchema
-        .extend({
-            version: z.literal(1),
-            inputs: z.array(
-                z.object({ messageId: z.string(), id: z.string().regex(/^§[1-9]\d*§$/) }),
-            ),
-            assistantId: z.string().regex(/^§[1-9]\d*§$/),
-        })
-        .transform((plan) => ({
-            ...plan,
-            version: 2 as const,
-            inputs: plan.inputs.map((input) => ({ ...input, id: input.id.replace("§", "§U") })),
-            assistantId: plan.assistantId.replace("§", "§A"),
-        })),
-]);
 export type AllocationPlan = z.infer<typeof allocationSchema>;
-/** Plugin-owned admission metadata; the numbering recipe stays version 3. */
 export interface AllocationNoticeExtras {}
 declare module "@deepseek-ai/dsh-llm" {
     interface MessageSourceMap {
@@ -59,7 +40,7 @@ declare module "@deepseek-ai/dsh-llm" {
     }
 }
 const slotSchema = z.object({
-    id: z.string().regex(ID_PATTERN),
+    id: idSchema,
     role: z.enum(["user", "assistant", "tool"]),
     status: z.enum(["reserved", "bound", "abandoned", "summarized"]),
     reservationSeq: z.number().int().nonnegative(),
@@ -73,23 +54,20 @@ const slotSchema = z.object({
     tool: z.string().nullable(),
     declared: z.boolean(),
     replayProtected: z.boolean(),
-    summaryShape: z
-        .array(
-            z.object({
-                type: z.string(),
-                callId: z.string().nullable(),
-                attachment: attachmentBlockSchema.nullable().default(null),
-                characters: z.number().int().nonnegative().default(0),
-                offloaded: z.boolean().default(false),
-            }),
-        )
-        .default([]),
+    summaryShape: z.array(
+        z.object({
+            type: z.string(),
+            callId: z.string().nullable(),
+            attachment: attachmentBlockSchema.nullable(),
+            characters: z.number().int().nonnegative(),
+            offloaded: z.boolean(),
+        }),
+    ),
 });
 export const numberingSchema = z.object({
     nextNumber: z.number().int().positive().safe(),
     slots: z.array(slotSchema),
-    attachments: z.array(attachmentSlotSchema).default([]),
-    attachmentProtocol: z.boolean().default(false),
+    attachments: z.array(attachmentSlotSchema),
 });
 export type NumberingState = z.infer<typeof numberingSchema>;
 export type NumberSlot = z.infer<typeof slotSchema>;
@@ -97,7 +75,6 @@ export const initialNumbering = (): NumberingState => ({
     nextNumber: 1,
     slots: [],
     attachments: [],
-    attachmentProtocol: false,
 });
 export function isNumberedInput(message: UserMessage): boolean {
     return ![
@@ -116,22 +93,43 @@ function shapeOf(message: Message): NumberSlot["summaryShape"] {
         offloaded: block.type === "image" && block.offloaded === true,
     }));
 }
-function pendingAttachments(state: NumberingState) {
-    return state.slots.flatMap((slot) => {
-        if (slot.currentSeq === null || CONTROL_TOOLS.has(slot.tool ?? "")) return [];
-        return slot.summaryShape.flatMap((shape, blockIndex) => {
+function bindAttachments(state: NumberingState): NumberingState {
+    let nextNumber = state.nextNumber;
+    const added = state.slots.flatMap((owner) => {
+        if (owner.currentSeq === null || CONTROL_TOOLS.has(owner.tool ?? "")) return [];
+        return owner.summaryShape.flatMap((shape, blockIndex) => {
             if (
-                shape.attachment == null ||
+                shape.attachment === null ||
                 state.attachments.some(
-                    (item) => item.ownerId === slot.id && item.currentBlockIndex === blockIndex,
+                    (item) => item.ownerId === owner.id && item.currentBlockIndex === blockIndex,
                 )
             )
                 return [];
-            return [{ ownerId: slot.id, blockIndex, block: shape.attachment }];
+            const id = entryId(nextNumber++);
+            if (!Number.isSafeInteger(nextNumber))
+                throw new Error("fold-context: numbering exhausted");
+            return [
+                {
+                    id,
+                    kind: shape.attachment.type,
+                    ownerId: owner.id,
+                    role: owner.role,
+                    sourceSeq: owner.currentSeq!,
+                    currentSeq: owner.currentSeq,
+                    blockIndex,
+                    currentBlockIndex: blockIndex,
+                    status: "bound" as const,
+                    block: shape.attachment,
+                    declared: false,
+                },
+            ];
         });
     });
+    return added.length === 0
+        ? state
+        : { ...state, nextNumber, attachments: [...state.attachments, ...added] };
 }
-/** Pure preview; only the committed declaration consumes IDs. */
+/** Preview consumes nothing; the independent committed notice reserves the assistant. */
 export function planAllocation(
     state: NumberingState,
     messages: readonly UserMessage[],
@@ -139,58 +137,39 @@ export function planAllocation(
     step: number,
 ): AllocationPlan {
     let number = state.nextNumber;
-    const incoming = messages.filter(isNumberedInput);
-    const inputs = incoming.map((message) => ({
-        messageId: message.id,
-        id: entryId("user", number++),
-    }));
-    const candidates = pendingAttachments(state);
-    incoming.forEach((message, index) =>
+    const inputs: AllocationPlan["inputs"] = [];
+    const attachments = state.attachments
+        .filter((item) => !item.declared && item.currentSeq !== null)
+        .map((item) => ({
+            id: item.id,
+            ownerId: item.ownerId,
+            blockIndex: item.currentBlockIndex!,
+            ordinal: attachmentOrdinal(state, item.ownerId, item.currentBlockIndex!),
+        }));
+    for (const message of messages.filter(isNumberedInput)) {
+        const id = entryId(number++);
+        inputs.push({ messageId: message.id, id });
         message.content.forEach((block, blockIndex) => {
             if (isAttachmentBlock(block))
-                candidates.push({
-                    ownerId: inputs[index]!.id,
+                attachments.push({
+                    id: entryId(number++),
+                    ownerId: id,
                     blockIndex,
-                    block: attachmentBlockSchema.parse(block),
+                    ordinal: message.content.slice(0, blockIndex + 1).filter(isAttachmentBlock)
+                        .length,
                 });
-        }),
-    );
-    const attachments = candidates.map((item) => ({
-        id: attachmentLabel(item.block.type, number++),
-        ownerId: item.ownerId,
-        blockIndex: item.blockIndex,
-    }));
+        });
+    }
+    const previous = unannouncedMessages(state);
     return {
-        version: 3,
+        version: 1,
         turn,
         step,
         inputs,
         attachments,
-        assistantId: entryId("assistant", number),
+        announcedIds: [...previous, ...inputs.map((item) => item.id)],
+        assistantId: entryId(number),
     };
-}
-function bindAttachments(state: NumberingState): NumberingState {
-    let nextNumber = state.nextNumber;
-    const added = pendingAttachments(state).map((item) => {
-        const owner = state.slots.find((slot) => slot.id === item.ownerId)!;
-        if (!Number.isSafeInteger(nextNumber + 1))
-            throw new Error("fold-context: numbering exhausted");
-        return {
-            id: attachmentLabel(item.block.type, nextNumber++),
-            kind: item.block.type,
-            ownerId: owner.id,
-            role: owner.role,
-            sourceSeq: owner.currentSeq!,
-            currentSeq: owner.currentSeq,
-            blockIndex: item.blockIndex,
-            currentBlockIndex: item.blockIndex,
-            status: "bound" as const,
-            block: item.block,
-        };
-    });
-    return added.length === 0
-        ? state
-        : { ...state, nextNumber, attachments: [...state.attachments, ...added] };
 }
 function reserve(
     state: NumberingState,
@@ -201,7 +180,7 @@ function reserve(
     if (!Number.isSafeInteger(state.nextNumber + 1))
         throw new Error("fold-context: numbering exhausted");
     const slot: NumberSlot = {
-        id: entryId(values.role, state.nextNumber),
+        id: entryId(state.nextNumber),
         status: "reserved",
         reservationSeq: event.seq,
         sourceSeq: null,
@@ -241,7 +220,6 @@ function abandon(state: NumberingState, matches: (slot: NumberSlot) => boolean):
         ),
     };
 }
-/** Allocation and binding use committed events only. Legacy declarations never gain new ordinals. */
 export function foldNumbering(state: NumberingState, event: SessionEvent): NumberingState {
     const candidate: { type: string; data: unknown } = event;
     if (candidate.type === "image/offload") {
@@ -288,53 +266,54 @@ export function foldNumbering(state: NumberingState, event: SessionEvent): Numbe
         );
     if (event.surfaceOp === "append" && event.type === "user/message") {
         if (event.data.source.kind === ALLOCATION_SOURCE) {
-            const plan = storedAllocationSchema.parse(event.data.source.allocation);
-            const admitted = state.slots.slice(state.slots.length - plan.inputs.length);
-            const inputsMatch = admitted.every(
-                (slot, index) =>
-                    slot.role === "user" &&
-                    slot.status === "bound" &&
-                    slot.id === plan.inputs[index]?.id &&
-                    slot.messageId === plan.inputs[index]?.messageId,
-            );
-            if (!inputsMatch || admitted.length !== plan.inputs.length)
-                throw new Error(
-                    "fold-context: allocation does not match the admitted input sequence",
-                );
-            if (plan.version === 3) {
-                const adopted = bindAttachments({ ...state, attachmentProtocol: true });
-                const added = adopted.attachments.slice(state.attachments.length);
-                if (
-                    added.length !== plan.attachments.length ||
-                    added.some(
-                        (item, index) =>
-                            item.id !== plan.attachments[index]?.id ||
-                            item.ownerId !== plan.attachments[index]?.ownerId ||
-                            item.currentBlockIndex !== plan.attachments[index]?.blockIndex,
-                    )
+            const plan = allocationSchema.parse(event.data.source.allocation);
+            if (
+                plan.inputs.some(
+                    (input) =>
+                        !state.slots.some(
+                            (slot) =>
+                                slot.messageId === input.messageId &&
+                                slot.id === input.id &&
+                                slot.role === "user",
+                        ),
                 )
-                    throw new Error(
-                        "fold-context: attachment allocation does not match admitted content",
-                    );
-                state = adopted;
-            }
-            if (plan.assistantId !== entryId("assistant", state.nextNumber))
-                throw new Error(
-                    "fold-context: allocation does not match the admitted input sequence",
-                );
-            return reserve(state, event, {
-                role: "assistant",
-                turn: plan.turn,
-                step: plan.step,
-                declared: true,
-            });
+            )
+                throw new Error("fold-context: allocation does not match admitted inputs");
+            if (
+                plan.assistantId !== entryId(state.nextNumber) ||
+                plan.attachments.some(
+                    (item) =>
+                        !state.attachments.some(
+                            (actual) =>
+                                actual.id === item.id &&
+                                actual.ownerId === item.ownerId &&
+                                actual.currentBlockIndex === item.blockIndex,
+                        ),
+                )
+            )
+                throw new Error("fold-context: allocation does not match admitted content");
+            const ids = new Set(plan.announcedIds);
+            const attachments = new Set(plan.attachments.map((item) => item.id));
+            return reserve(
+                {
+                    ...state,
+                    slots: state.slots.map((slot) =>
+                        ids.has(slot.id) ? { ...slot, declared: true } : slot,
+                    ),
+                    attachments: state.attachments.map((item) =>
+                        attachments.has(item.id) ? { ...item, declared: true } : item,
+                    ),
+                },
+                event,
+                { role: "assistant", turn: plan.turn, step: plan.step, declared: true },
+            );
         }
         if (!isNumberedInput(event.data)) return state;
         const next = reserve(state, event, { role: "user", turn: 0, step: 0 });
-        return {
+        return bindAttachments({
             ...next,
             slots: [...next.slots.slice(0, -1), bind(next.slots.at(-1)!, event, event.data)],
-        };
+        });
     }
     if (event.surfaceOp === "append" && event.type === "assistant/message") {
         const { turn, step, message } = event.data;
@@ -366,7 +345,7 @@ export function foldNumbering(state: NumberingState, event: SessionEvent): Numbe
                     tool: block.name,
                     replayProtected: message.source.replayState !== undefined,
                 });
-        return next.attachmentProtocol ? bindAttachments(next) : next;
+        return bindAttachments(next);
     }
     if (event.type === "tool/call") {
         const { turn, step, callId, name } = event.data;
@@ -404,21 +383,21 @@ export function foldNumbering(state: NumberingState, event: SessionEvent): Numbe
                     event.sourceEventSeqs.some((seq) => seq === slot.callSeq)),
         );
         if (index < 0) throw new Error("fold-context: tool result has no preceding allocation");
-        const next = {
+        return bindAttachments({
             ...state,
             slots: state.slots.map((slot, offset) =>
                 offset === index ? bind(slot, event, message) : slot,
             ),
-        };
-        return next.attachmentProtocol ? bindAttachments(next) : next;
+        });
     }
     return state;
 }
-/** Original attachment occurrence remains addressable after its owner's surface disappears. */
+/** Replacements keep original occurrence identity; content is never parsed for labels. */
 export function replaceNumberedSurface(
     state: NumberingState,
     event: SessionEvent,
     removed: readonly number[],
+    releasedIds: ReadonlySet<string> = new Set(),
 ): NumberingState {
     if (removed.length === 0) return state;
     const affected = state.slots.filter(
@@ -439,12 +418,15 @@ export function replaceNumberedSurface(
     const used = new Set<string>();
     const attachments = state.attachments.map((item) => {
         if (item.currentSeq === null || !removed.includes(item.currentSeq)) return item;
+        if (releasedIds.has(item.id) || releasedIds.has(item.ownerId))
+            return {
+                ...item,
+                currentSeq: null,
+                currentBlockIndex: null,
+                status: "summarized" as const,
+            };
         const owner = slots.find((slot) => slot.id === item.ownerId);
-        if (
-            owner?.currentSeq === event.seq &&
-            message !== null &&
-            !isReleasedContent(message.content, item.id)
-        ) {
+        if (owner?.currentSeq === event.seq && message !== null) {
             const matches = owner.summaryShape.flatMap((shape, index) =>
                 shape.attachment?.type === item.block.type &&
                 JSON.stringify(shape.attachment.attachment) ===
@@ -468,6 +450,5 @@ export function replaceNumberedSurface(
             status: "summarized" as const,
         };
     });
-    const next = { ...state, slots, attachments };
-    return next.attachmentProtocol ? bindAttachments(next) : next;
+    return bindAttachments({ ...state, slots, attachments });
 }

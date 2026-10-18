@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { Session } from "@deepseek-ai/dsh-session";
 import { createAssistantMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
-import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { assertTestRoot, call, loopFixture } from "./loop-fixture.mjs";
 
 const signal = () => new AbortController().signal;
@@ -24,7 +23,7 @@ const affordable = {
 
 async function candidate(
     t,
-    { scheduling = {}, compaction = {}, request = true, mark = true, ...options } = {},
+    { scheduling = {}, compaction = {}, request = true, mark = false, ...options } = {},
 ) {
     const f = await fixture({
         ...options,
@@ -34,8 +33,16 @@ async function candidate(
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     const original = f.appendUser("Historical evidence that can be released. ".repeat(600));
-    const id = f.idFor(original);
-    if (mark) recordLegacyRelease(f, [id], "Evidence extracted");
+    const marked = mark
+        ? f.toolRound("read", "Consumed output available for a release batch. ".repeat(600))
+        : null;
+    const id = f.idFor(marked ?? original);
+    if (mark)
+        assert.equal(
+            (await f.invoke("context_release", { ids: [Number(id)], reason: "Evidence extracted" }))
+                .value.accepted,
+            true,
+        );
     if (request)
         assert.equal(
             (await f.invoke("context_compact", { reason: "Checkpoint when economically ready" }))
@@ -73,7 +80,7 @@ function assistant(f, text = "A committed work step.") {
     f.session.append("step/end", { turn: 1, step });
 }
 
-test("legacy release model requests below pressure wait for interval and preserve intent", async (t) => {
+test("model checkpoint requests below pressure wait for the interval and preserve their intent", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
     const status = await f.engine.schedulingStatus(f.agent);
     assert.equal(status.reason, "min_interval");
@@ -83,11 +90,11 @@ test("legacy release model requests below pressure wait for interval and preserv
     assert.equal(f.engine.hasSummaryRequest(f.session), true);
     assert.equal(
         f.engine.state(f.session).entries.find((entry) => entry.id === f.id).status,
-        "queued",
+        "available",
     );
 });
 
-test("legacy release model requests below pressure pass through the savings gate", async (t) => {
+test("model checkpoint requests below pressure pass through the savings gate", async (t) => {
     const f = await candidate(t, { scheduling: { minSavingsTokens: 1000000 } });
     assert.equal((await f.engine.schedulingStatus(f.agent)).reason, "min_savings");
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
@@ -131,28 +138,33 @@ test("eligible requests summarize the full unmarked span through official transa
     );
 });
 
-test("legacy release backlog proactively summarizes only when auto and proactive are enabled", async (t) => {
-    const on = await candidate(t, { request: false, compaction: { auto: true } });
-    assert.equal((await on.engine.schedulingStatus(on.agent)).reason, "eligible");
-    assert.ok(await on.engine.compactIfNeeded(on.agent, "pressure", signal()));
-    assert.equal(on.calls.length, 1);
-    const off = await candidate(t, { request: false });
-    assert.equal((await off.engine.schedulingStatus(off.agent)).reason, "disabled");
-    assert.equal(await off.engine.compactIfNeeded(off.agent, "pressure", signal()), null);
-    assert.equal(off.calls.length, 0);
-    const noProactive = await candidate(t, {
-        request: false,
-        compaction: { auto: true },
-        scheduling: { proactive: false },
-    });
-    assert.equal((await noProactive.engine.schedulingStatus(noProactive.agent)).reason, "disabled");
-    assert.equal(
-        await noProactive.engine.compactIfNeeded(noProactive.agent, "pressure", signal()),
-        null,
-    );
+test("queued tool marks drain without summaries independently of automatic and proactive checkpointing", async (t) => {
+    for (const [auto, proactive] of [
+        [true, true],
+        [false, true],
+        [true, false],
+    ]) {
+        const f = await candidate(t, {
+            request: false,
+            mark: true,
+            compaction: { auto },
+            scheduling: { proactive },
+        });
+        assert.equal(
+            f.engine.state(f.session).entries.find((entry) => entry.id === f.id).status,
+            "queued",
+        );
+        assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
+        assert.equal(
+            f.engine.state(f.session).entries.find((entry) => entry.id === f.id).status,
+            "released",
+        );
+        assert.equal(f.engine.hasSummaryRequest(f.session), false);
+        assert.equal(f.calls.length, 0);
+    }
 });
 
-test("legacy release pressure and overflow bypass interval and savings gates", async (t) => {
+test("pressure and overflow bypass checkpoint interval and savings gates", async (t) => {
     const pressure = await candidate(t, {
         request: false,
         compaction: { auto: true, thresholdRatio: 0.5 },
@@ -176,27 +188,27 @@ test("legacy release pressure and overflow bypass interval and savings gates", a
     assert.equal(overflow.calls.length, 1);
 });
 
-test("legacy release disabled scheduling preserves forced model-request behavior", async (t) => {
+test("disabled scheduling preserves explicit model-request checkpoint behavior", async (t) => {
     const f = await candidate(t, {
         scheduling: { enabled: false, minIntervalSteps: 100, minSavingsTokens: 1000000 },
     });
-    assert.equal((await f.engine.schedulingStatus(f.agent)).reason, "legacy_request");
+    assert.equal((await f.engine.schedulingStatus(f.agent)).decision, "execute");
     assert.ok(await f.engine.compactIfNeeded(f.agent, "pressure", signal()));
     assert.equal(f.calls.length, 1);
 });
 
-test("legacy release direct user compactNow bypasses economics and has no scheduling override", async (t) => {
+test("direct user compactNow bypasses checkpoint economics without a queued model request", async (t) => {
     const f = await candidate(t, {
         request: false,
         scheduling: { minIntervalSteps: 100, minSavingsTokens: 1000000 },
     });
     f.session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
-    assert.equal(Object.hasOwn(Object.getPrototypeOf(f.engine), "compactNow"), false);
+    assert.equal(f.engine.hasSummaryRequest(f.session), false);
     assert.ok(await f.engine.compactNow(f.agent, signal()));
     assert.equal(f.calls.length, 1);
 });
 
-test("legacy release status plans are read-only, bounded, and include filtered transcript costs", async (t) => {
+test("checkpoint status plans are read-only, bounded and account for transcript costs", async (t) => {
     const f = await candidate(t);
     const before = {
         seq: f.session.seq,
@@ -207,7 +219,7 @@ test("legacy release status plans are read-only, bounded, and include filtered t
     const first = await f.engine.schedulingStatus(f.agent, undefined, 1);
     const second = await f.engine.schedulingStatus(f.agent, undefined, 1);
     assert.deepEqual(first, second);
-    assert.ok(first.plan.selectedTokens > first.plan.filterInputTokens);
+    assert.ok(first.plan.selectedTokens > 0);
     assert.ok(first.plan.filterInputTokens > 0);
     assert.ok(first.plan.rebuiltSuffixTokens > 0);
     assert.match(first.estimates, /HEURISTIC/);
@@ -233,7 +245,7 @@ test("legacy release status plans are read-only, bounded, and include filtered t
     );
 });
 
-test("legacy release interval counts committed assistant slots consistently across cold and fork replay", async (t) => {
+test("checkpoint intervals count committed assistant slots consistently across cold and fork replay", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
     assistant(f);
     const live = await f.engine.schedulingStatus(f.agent);
@@ -249,7 +261,7 @@ test("legacy release interval counts committed assistant slots consistently acro
     assert.equal(f.calls.length, 0);
 });
 
-test("legacy release failed scheduled transactions preserve marks and request and suppress unchanged retries", async (t) => {
+test("failed scheduled checkpoints preserve evidence and request and suppress unchanged retries", async (t) => {
     let failSummary = true;
     const f = await candidate(t, {
         onStream: () => {
@@ -264,7 +276,7 @@ test("legacy release failed scheduled transactions preserve marks and request an
                 event.type === "tool/result" &&
                 event.data.meta?.dshContextCompression?.kind === "summary",
         );
-    assert.equal(receipt.data.meta.dshContextCompression.version, 5);
+    assert.equal(receipt.data.meta.dshContextCompression.version, 8);
     await assert.rejects(
         f.engine.compactIfNeeded(f.agent, "pressure", signal()),
         /isolated scheduled summary failure/,
@@ -276,7 +288,7 @@ test("legacy release failed scheduled transactions preserve marks and request an
     assert.equal(f.engine.state(f.session).summaryRequests.at(-1).retryable, true);
     assert.equal(
         f.engine.state(f.session).entries.find((entry) => entry.id === f.id).status,
-        "queued",
+        "available",
     );
     const status = await f.engine.schedulingStatus(f.agent);
     assert.equal(status.reason, "failed_cooldown");
@@ -330,33 +342,28 @@ test("legacy release failed scheduled transactions preserve marks and request an
         assert.equal(f.engine.state(session).summaryRequests.at(-1).error, null);
         assert.equal(
             f.engine.state(session).entries.find((entry) => entry.id === f.id).status,
-            "released",
+            "summarized",
         );
         assert.equal(f.engine.hasSummaryRequest(session), false);
     }
     assert.equal(f.calls.length, 4);
 });
 
-test("legacy version-4 failed requests remain terminal after fresh work and replay", async (t) => {
-    const f = await candidate(t, {
-        scheduling: { enabled: false },
-        onStream: () => {
-            throw new Error("isolated legacy summary failure");
-        },
-    });
-    const receipt = f.session
-        .snapshotEvents()
-        .find(
-            (event) =>
-                event.type === "tool/result" &&
-                event.data.meta?.dshContextCompression?.kind === "summary",
-        );
-    assert.equal(receipt.data.meta.dshContextCompression.version, 4);
-    await assert.rejects(
-        f.engine.compactIfNeeded(f.agent, "pressure", signal()),
-        /isolated legacy summary failure/,
+test("obsolete version-4 checkpoint receipts cannot create or revive a request during replay", async (t) => {
+    const f = await candidate(t, { request: false, scheduling: { enabled: false } });
+    f.toolRound(
+        "context_compact",
+        JSON.stringify({
+            dshContextCompression: {
+                version: 4,
+                kind: "summary",
+                sessionId: f.session.id,
+                ids: [],
+                reason: "Obsolete request",
+            },
+        }),
     );
-    assistant(f, "Fresh work must not revive a terminal legacy request.");
+    assistant(f, "Fresh work cannot authorize an obsolete receipt.");
     const cold = Session.create(
         f.session.id,
         JSON.parse(JSON.stringify(f.session.snapshotEvents())),
@@ -364,20 +371,17 @@ test("legacy version-4 failed requests remain terminal after fresh work and repl
     );
     const fork = f.sessions.fork(f.session);
     for (const session of [f.session, cold, fork]) {
-        const request = f.engine.state(session).summaryRequests.at(-1);
-        assert.equal(request.status, "failed");
-        assert.equal(request.retryable, false);
-        assert.match(request.error, /isolated legacy summary failure/);
+        assert.equal(f.engine.state(session).summaryRequests.length, 0);
         assert.equal(f.engine.hasSummaryRequest(session), false);
         assert.equal(
             await f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
             null,
         );
     }
-    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls.length, 0);
 });
 
-test("legacy release scheduled interval follows the latest applied summary after replay", async (t) => {
+test("checkpoint intervals follow the latest applied summary after replay", async (t) => {
     const f = await candidate(t, { scheduling: { minIntervalSteps: 3 } });
     assistant(f);
     assistant(f, "A second committed work step completes the interval.");

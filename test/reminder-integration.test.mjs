@@ -108,10 +108,15 @@ function propose(f, messages = [], abortSignal = signal(), decision) {
     );
 }
 
-function commit(f, decision, reply = false) {
+async function commit(f, decision, reply = false) {
     const step = nextStep(f);
     f.advanceSteps(step);
     f.session.append("step/start", { turn: 1, step });
+    await f.ctx.waterfall(
+        "agent/request",
+        { agent: f.agent, turn: 1, step, signal: new AbortController().signal },
+        async () => ({ provider: "test", model: "fixture" }),
+    );
     for (const message of decision.messages) {
         f.session.append("user/message", message, { surfaceOp: "append" });
     }
@@ -183,12 +188,15 @@ test("status, expand and release management, including explanatory text, cannot 
     const event = f.toolRound("read", body());
     const id = f.idFor(event);
     for (let index = 0; index < 3; index += 1) {
-        valueOf(await f.invoke("context_status", { ids: [id] }));
-        assert.equal(valueOf(await f.invoke("context_expand", { id, limit: 30 })).status, "found");
+        valueOf(await f.invoke("context_status", { ids: [Number(id)] }));
+        assert.equal(
+            valueOf(await f.invoke("context_expand", { id: Number(id), limit: 30 })).status,
+            "found",
+        );
         assert.equal(
             valueOf(
                 await f.invoke("context_release", {
-                    ids: ["§T999999§"],
+                    ids: [999999],
                     reason: "No matching evidence to release.",
                 }),
             ).accepted,
@@ -250,13 +258,19 @@ test("repeated previews and proposals do not consume cooldown before allocation 
         assert.equal(decision.startsRequestSeries, true);
         const notice = noticeOf(decision);
         assert.deepEqual(notice.source.releaseReminderState, first.state);
-        assert.ok(notice.source.ledgerView);
+        assert.equal(
+            textOf(notice)
+                .split("\n")
+                .find((line) => line.startsWith("try_release:")),
+            `try_release: ${first.candidates.map((candidate) => candidate.id).join(" ")}`,
+        );
+        assert.equal(notice.source.ledgerView, undefined);
         assert.deepEqual(JSON.parse(JSON.stringify(notice.source)), notice.source);
         assert.equal(JSON.stringify(stateOf(f)), before);
         assert.equal(f.session.seq, seq);
         assert.deepEqual(f.session.surface.nodes, nodes);
     }
-    commit(f, decision);
+    await commit(f, decision);
     assert.deepEqual(stateOf(f).reminderState, first.state);
     const admitted = await preview(f);
     assert.equal(admitted.decision, "wait");
@@ -270,12 +284,12 @@ test("durable allocation metadata replays cooldown, ignored counter and business
     t.after(f.close);
     readyEvidence(f);
     const first = await propose(f);
-    commit(f, first, true);
+    await commit(f, first, true);
     businessSteps(f, 5);
     const second = await propose(f);
     const notice = noticeOf(second);
     assert.equal(notice.source.releaseReminderState.ignoredCount, 1);
-    commit(f, second);
+    await commit(f, second);
     const expected = stateOf(f);
     assert.equal(expected.businessSteps, 9);
     assert.equal(expected.reminderState.lastReminderStep, 9);
@@ -283,7 +297,7 @@ test("durable allocation metadata replays cooldown, ignored counter and business
         .snapshotEvents()
         .find((event) => event.type === "user/message" && event.data.id === notice.id);
     assert.deepEqual(durable.data.source.releaseReminderState, expected.reminderState);
-    assert.ok(durable.data.source.ledgerView);
+    assert.equal(durable.data.source.ledgerView, undefined);
 
     const fresh = await fixture({ reminders: lowered });
     t.after(fresh.close);
@@ -317,10 +331,10 @@ test("stale backlog waits eight business steps and control calls cannot advance 
     assert.equal(start.decision, "wait");
     assert.equal(start.reason, "below_threshold");
     assert.equal(start.state.backlogSinceStep, 3);
-    commit(f, await propose(f));
+    await commit(f, await propose(f));
     const persisted = JSON.stringify(stateOf(f).reminderState);
     for (let index = 0; index < 3; index += 1) {
-        const status = valueOf(await f.invoke("context_status", { ids: [id] }));
+        const status = valueOf(await f.invoke("context_status", { ids: [Number(id)] }));
         assert.equal(status.reminders.decision, "wait");
         assert.equal(status.reminders.state.backlogSinceStep, 3);
     }
@@ -338,7 +352,7 @@ test("a reminder and ordinary boundary never release or summarize available evid
     const f = await fixture({ reminders: lowered });
     t.after(f.close);
     const { event, id } = readyEvidence(f);
-    commit(f, await propose(f));
+    await commit(f, await propose(f));
     const seq = f.session.seq;
     const nodes = [...f.session.surface.nodes];
     const messages = f.session.deriveMessages();
@@ -368,7 +382,10 @@ test("queued and applied releases leave reminder candidates while unrelated evid
     );
     assert.equal(
         valueOf(
-            await f.invoke("context_release", { ids: [releasedId], reason: "Findings preserved." }),
+            await f.invoke("context_release", {
+                ids: [Number(releasedId)],
+                reason: "Findings preserved.",
+            }),
         ).accepted,
         true,
     );
@@ -386,7 +403,7 @@ test("queued and applied releases leave reminder candidates while unrelated evid
         [keptId],
     );
     assert.equal(
-        valueOf(await f.invoke("context_expand", { id: releasedId, limit: 30 })).status,
+        valueOf(await f.invoke("context_expand", { id: Number(releasedId), limit: 30 })).status,
         "found",
     );
     assert.deepEqual(
@@ -402,9 +419,9 @@ test("only newly accepted releases advance semantic progress; compact requests p
     const first = f.toolRound("read", body("First evidence"));
     f.toolRound("grep", body("Second evidence"));
     businessSteps(f, 2);
-    commit(f, await propose(f));
+    await commit(f, await propose(f));
     businessSteps(f, 6);
-    commit(f, await propose(f));
+    await commit(f, await propose(f));
     assert.equal(stateOf(f).reminderState.ignoredCount, 1);
     assert.equal(stateOf(f).lastReleaseProgressSeq, 0);
     valueOf(await f.invoke("context_compact", { reason: "Request a future checkpoint." }));
@@ -416,7 +433,7 @@ test("only newly accepted releases advance semantic progress; compact requests p
     assert.equal(
         valueOf(
             await f.invoke("context_release", {
-                ids: [firstId],
+                ids: [Number(firstId)],
                 reason: "Consumed first evidence.",
             }),
         ).accepted,
@@ -432,7 +449,7 @@ test("only newly accepted releases advance semantic progress; compact requests p
     assert.equal(stateOf(f).lastReleaseProgressSeq, progress);
     valueOf(
         await f.invoke("context_release", {
-            ids: [firstId],
+            ids: [Number(firstId)],
             reason: "Repeated release is a no-op.",
         }),
     );
@@ -440,7 +457,7 @@ test("only newly accepted releases advance semantic progress; compact requests p
     assert.equal(
         valueOf(
             await f.invoke("context_release", {
-                ids: ["§T999999§"],
+                ids: [999999],
                 reason: "Reject an unknown target.",
             }),
         ).accepted,
@@ -512,7 +529,7 @@ test("admitted pressure reminders use a four-business-step cooldown", async (t) 
     readyEvidence(f);
     const first = await preview(f);
     assert.equal(first.reason, "pressure");
-    commit(f, await propose(f));
+    await commit(f, await propose(f));
     businessSteps(f, 3);
     const early = await preview(f);
     assert.equal(early.decision, "wait");
@@ -612,7 +629,7 @@ test("rejected, empty and cancelled admissions cannot persist a proposed reminde
     assert.equal(JSON.stringify(stateOf(f)), before);
 });
 
-test("candidate and allocation previews are bounded while total tokens include the full ready pool", async (t) => {
+test("candidate previews stay in status and try_release contains bounded numeric IDs only", async (t) => {
     const f = await fixture({ reminders: { ...lowered, maxCandidates: 2 } });
     t.after(f.close);
     const marker = "PREVIEW_SUFFIX";
@@ -639,7 +656,12 @@ test("candidate and allocation previews are bounded while total tokens include t
     assert.ok(text.length < 6000);
     assert.equal(text.includes(marker), false);
     assert.equal(text.includes(original), false);
-    for (const candidate of plan.candidates) assert.ok(text.includes(candidate.id));
+    const line = text.split("\n").find((line) => line.startsWith("try_release:"));
+    assert.equal(
+        line,
+        `try_release: ${plan.candidates.map((candidate) => candidate.id).join(" ")}`,
+    );
+    assert.match(line, /^try_release: [1-9]\d*(?: [1-9]\d*)*$/);
     assert.equal(JSON.stringify(stateOf(f)), before);
 });
 
@@ -652,8 +674,9 @@ test("disabled reminders never establish a cooldown or cause release", async (t)
     assert.equal(plan.reason, "disabled");
     assert.equal(plan.thresholdTokens, null);
     const decision = await propose(f);
-    assert.equal(noticeOf(decision).source.releaseReminderState.lastReminderStep, null);
-    commit(f, decision, true);
+    const notice = noticeOf(decision);
+    assert.doesNotMatch(textOf(notice), /try_release:/);
+    await commit(f, decision, true);
     assert.equal(stateOf(f).reminderState.lastReminderStep, null);
     assert.equal(entryFor(f, id).status, "available");
     assert.equal(f.calls.length, 0);

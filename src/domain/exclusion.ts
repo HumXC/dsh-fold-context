@@ -16,7 +16,10 @@ export function selectedExclusions(
     );
     const eligible = state.entries.filter((entry) => {
         if (
-            entry.status !== "queued" ||
+            !(
+                entry.status === "queued" ||
+                (entry.status === "released" && entry.role === "tool")
+            ) ||
             entry.queuedAt === null ||
             entry.queuedAt >= cutoff ||
             entry.currentSeq === null ||

@@ -23,6 +23,7 @@ import { apply as mountCompression } from "../lib/index.js";
 import { LocalAttachmentStore } from "@deepseek-ai/dsh-attachment-local";
 import { LocalFileSystem } from "@deepseek-ai/dsh-fs-local";
 import { LocalSessionQuery } from "./query-fixture.mjs";
+import { installPtcStub } from "./ptc-fixture.mjs";
 
 /** Guard every filesystem test before any backend is constructed or directory removed. */
 export async function assertTestRoot(root) {
@@ -49,8 +50,11 @@ export async function loopFixture(root, options = {}) {
     new SessionProjectionRegistry(ctx);
     new AgentRegistry(ctx);
     new SystemPrompt(ctx, {});
-    new ToolRuntime(ctx);
+    if (options.ptc !== undefined) installPtcStub(ctx, options.ptc);
+    new ToolRuntime(ctx, options.ptc === undefined ? {} : { mode: "both" });
     new InvariantRegistry(ctx);
+    if (options.strictSession)
+        await (await import("@deepseek-ai/dsh-session/invariant")).apply(ctx);
     await installCompactionInvariants(ctx);
     const query = new LocalSessionQuery(ctx);
     if (options.attachments) {

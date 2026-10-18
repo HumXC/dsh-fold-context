@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
 const data = (outcome) => {
     assert.equal(outcome.isError, false, JSON.stringify(outcome));
@@ -18,14 +19,14 @@ test("released Unicode originals expand exactly through bounded pages without un
     const original = "A🧠é\n".repeat(5000);
     const event = f.toolRound("read", original);
     const id = f.idFor(event);
-    await f.invoke("context_release", { ids: [id], reason: "Consumed" });
-    assert.ok(await f.engine.compactNow(f.agent, signal()));
+    await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed" });
+    commitForcedReleases(f);
     assert.equal(f.engine.state(f.session).entries[0].status, "released");
     const surface = [...f.session.surface.nodes];
     let offset = 0;
     let recovered = "";
     do {
-        const page = await invoke(f, "context_expand", { id, offset, limit: 1703 });
+        const page = await invoke(f, "context_expand", { id: Number(id), offset, limit: 1703 });
         assert.equal(page.status, "found");
         assert.equal(page.format, "text");
         assert.equal(page.sourceSeq, event.seq);
@@ -74,7 +75,7 @@ test("forgotten IDs can be found in summarized originals and expanded after repl
     const expanded = data(
         await f.ctx.tools.execute({
             name: "context_expand",
-            arguments: { id, limit: 40 },
+            arguments: { id: Number(id), limit: 40 },
             callId: "restored-expansion",
             agent: { ...f.agent, id: restored.id, session: restored },
             signal: signal(),
@@ -148,14 +149,23 @@ test("literal search, missing IDs and argument bounds remain explicit", async (t
     assert.equal(hit.hits.length, 1);
     assert.equal(hit.hits[0].id, f.idFor(event));
     assert.equal((await invoke(f, "context_search", { query: "[aZZ]" })).hits.length, 0);
-    const unknown = await invoke(f, "context_expand", { id: "§T999999§" });
+    const unknown = await invoke(f, "context_expand", { id: 999999 });
     assert.equal(unknown.status, "unknown");
-    const beyond = await invoke(f, "context_expand", { id: f.idFor(event), offset: 100000 });
+    const beyond = await invoke(f, "context_expand", {
+        id: Number(f.idFor(event)),
+        offset: 100000,
+    });
     assert.equal(beyond.status, "offset_out_of_range");
     assert.equal(beyond.text, "");
     for (const [name, args] of [
         ["context_expand", { id: "c1" }],
-        ["context_expand", { id: f.idFor(event), limit: 16001 }],
+        ["context_expand", { id: f.idFor(event) }],
+        ["context_expand", { id: "§T1§" }],
+        ["context_expand", { id: 0 }],
+        ["context_expand", { id: -1 }],
+        ["context_expand", { id: 1.5 }],
+        ["context_expand", { id: Number.MAX_SAFE_INTEGER + 1 }],
+        ["context_expand", { id: Number(f.idFor(event)), limit: 16001 }],
         ["context_search", { query: "", limit: 1 }],
         ["context_search", { query: "Regex", limit: 21 }],
         ["context_search", { query: "Regex", cursor: "bad" }],
@@ -204,9 +214,9 @@ test("user and assistant originals retain structured content without normalizati
     );
     f.session.append("step/end", { turn: 1, step: 1 });
     f.advanceSteps(1);
-    const userResult = await invoke(f, "context_expand", { id: f.idFor(user) });
+    const userResult = await invoke(f, "context_expand", { id: Number(f.idFor(user)) });
     assert.equal(userResult.text, "user original\n  whitespace");
-    const assistantResult = await invoke(f, "context_expand", { id: f.idFor(assistant) });
+    const assistantResult = await invoke(f, "context_expand", { id: Number(f.idFor(assistant)) });
     assert.equal(assistantResult.format, "content-json");
     assert.deepEqual(JSON.parse(assistantResult.text), content);
     assert.equal(assistantResult.complete, true);
@@ -236,7 +246,7 @@ test("overlapping session ordinals cannot expose another session's originals or 
     });
     assert.equal(foreign.isError, true);
     assert.equal(
-        (await invoke(right, "context_expand", { id: left.idFor(leftEvent) })).text,
+        (await invoke(right, "context_expand", { id: Number(left.idFor(leftEvent)) })).text,
         "right-private needle",
     );
     assert.ok(left.query.reads.every((id) => id === left.session.id));
@@ -257,5 +267,5 @@ test("literal search preserves query whitespace and bounds impossible identifier
     assert.equal(spaced.hits.length, 0);
     const whitespace = await invoke(f, "context_search", { query: "\n\t", roles: ["tool"] });
     assert.equal(whitespace.hits[0].id, f.idFor(original));
-    assert.equal((await f.invoke("context_expand", { id: `§${"9".repeat(1000)}§` })).isError, true);
+    assert.equal((await f.invoke("context_expand", { id: "9".repeat(1000) })).isError, true);
 });

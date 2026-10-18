@@ -3,6 +3,7 @@ import type { LedgerState } from "./ledger.js";
 import { selectedExclusions } from "./exclusion.js";
 import type { SummaryPolicy, ProjectionPolicy } from "./summary-policy.js";
 import { isSummaryControlNotice } from "./summary-evidence.js";
+import { SUMMARY_CONTROL_TOOLS } from "./protocol.js";
 
 export interface ReasoningOmission {
     id: string;
@@ -145,6 +146,15 @@ export function projectSummaryInput(
         }),
     );
     const excluded = selectedExclusions(state, selected, cutoff, "transcript");
+    const releasedBlocks = new Set(
+        state.entries.flatMap((entry) =>
+            entry.status === "released" &&
+            entry.currentSeq !== null &&
+            entry.releasedBlockIndex !== null
+                ? [`${entry.currentSeq}:${entry.releasedBlockIndex}`]
+                : [],
+        ),
+    );
     const excludedAttachments = new Set(
         excluded
             .filter((entry) => entry.role === "image" || entry.role === "file")
@@ -172,6 +182,19 @@ export function projectSummaryInput(
         set.add(entry.callId);
         calls.set(owner, set);
     }
+    for (const slot of active) {
+        if (
+            slot.role !== "tool" ||
+            slot.tool === null ||
+            !SUMMARY_CONTROL_TOOLS.has(slot.tool) ||
+            slot.callId === null
+        )
+            continue;
+        resultIds.add(slot.id);
+        const set = calls.get(slot.reservationSeq) ?? new Set<string>();
+        set.add(slot.callId);
+        calls.set(slot.reservationSeq, set);
+    }
     const content: ContentBlock[] = [
         {
             type: "text",
@@ -196,11 +219,12 @@ export function projectSummaryInput(
             message.role === "tool" &&
             (message.content.length === 0 ||
                 message.content.every(
-                    (block, index) =>
-                        (block.type === "image" || block.type === "file") &&
-                        excludedAttachments.has(
-                            attachmentByPosition.get(`${slot?.id}:${index}`)?.id ?? "",
-                        ),
+                    (_block, index) =>
+                        releasedBlocks.has(`${slot?.currentSeq}:${index}`) ||
+                        ((_block.type === "image" || _block.type === "file") &&
+                            excludedAttachments.has(
+                                attachmentByPosition.get(`${slot?.id}:${index}`)?.id ?? "",
+                            )),
                 ))
         ) {
             content.push({
@@ -217,6 +241,7 @@ export function projectSummaryInput(
             });
         }
         message.content.forEach((block, blockIndex) => {
+            if (releasedBlocks.has(`${slot?.currentSeq}:${blockIndex}`)) return;
             const attachment = attachmentByPosition.get(`${slot?.id}:${blockIndex}`);
             if (
                 (block.type === "image" || block.type === "file") &&

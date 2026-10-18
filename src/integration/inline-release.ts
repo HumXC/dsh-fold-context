@@ -1,23 +1,19 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { isDeepStrictEqual } from "node:util";
-import {
-    createUserMessage,
-    freezeMessage,
-    type ContentBlock,
-    type ContextFormed,
-} from "@deepseek-ai/dsh-llm";
+import { freezeMessage, type ContentBlock } from "@deepseek-ai/dsh-llm";
 import { SessionSeq, type Session, type SessionEvent } from "@deepseek-ai/dsh-session";
 import type { LedgerState } from "../domain/ledger.js";
-import { inlineReleaseContent, normalizeId, RELEASE_TOOL } from "../domain/protocol.js";
+import type { ReleaseBatchPlan } from "../domain/scheduler.js";
+import { inlineReleaseContent } from "../domain/protocol.js";
 import { canReleaseInline } from "../domain/release.js";
-import { RELEASE_REPORT_KEY, releaseReport } from "../domain/release-report.js";
+import {
+    RELEASE_REPORT_KEY,
+    RELEASE_TARGET_KEY,
+    RELEASE_REPORT_VERSION,
+    releaseReport,
+} from "../domain/release-report.js";
 
-export const RELEASE_CLEANUP_SOURCE = "fold-context-release-cleanup";
-declare module "@deepseek-ai/dsh-llm" {
-    interface MessageSourceMap {
-        "fold-context-release-cleanup": { kind: typeof RELEASE_CLEANUP_SOURCE } & ContextFormed;
-    }
-}
+export { RELEASE_CLEANUP_SOURCE } from "../domain/release-controls.js";
 
 type Entry = LedgerState["entries"][number];
 
@@ -91,122 +87,72 @@ function planReplacements(session: Session, state: LedgerState): Replacement[] {
     return plans;
 }
 
-function successfulReleaseTargets(event: SessionEvent<"tool/result">, state: LedgerState): boolean {
-    if (event.data.message.isError) return false;
-    let value: unknown = event.data.meta;
-    if (value === undefined) {
-        try {
-            value = JSON.parse(
-                event.data.message.content
-                    .filter((b) => b.type === "text")
-                    .map((b) => b.text)
-                    .join(""),
-            );
-        } catch {
-            return false;
-        }
-    }
-    if (
-        value === null ||
-        typeof value !== "object" ||
-        !("accepted" in value) ||
-        value.accepted !== true
-    )
-        return false;
-    if (
-        !("queued" in value) ||
-        !("settled" in value) ||
-        !Array.isArray(value.queued) ||
-        !Array.isArray(value.settled)
-    )
-        return false;
-    const ids: unknown[] = [...value.queued, ...value.settled];
-    return (
-        ids.length > 0 &&
-        ids.every((id) => {
-            if (typeof id !== "string") return false;
-            try {
-                const entry = state.entries.find((entry) => entry.id === normalizeId(id));
-                return entry?.status === "released" || entry?.status === "summarized";
-            } catch {
-                return false;
-            }
-        })
-    );
+export interface InlineReleaseEstimate {
+    readonly revision: number;
+    readonly replacementCount: number;
+    readonly replacements: readonly {
+        seq: number;
+        beforeTokens: number;
+        afterTokens: number;
+        releasableTokens: number;
+    }[];
+    readonly releasedIds: readonly string[];
+    readonly beforeTokens: number;
+    readonly afterTokens: number;
 }
 
-/** Piggyback only on an existing rewrite, without moving its earliest changed position. */
-function cleanupReceipts(
+/** Preflight prices each rewritten message once, even for owner + attachment marks. */
+export function estimateInlineReleases(
     ctx: Context,
     session: Session,
     state: LedgerState,
-    earliestIndex: number,
-): number {
-    const nodes = [...session.surface.nodes];
-    const groups: { start: number; end: number }[] = [];
-    for (let index = 0; index < nodes.length; index++) {
-        const event = session.eventAt(nodes[index]!);
-        if (
-            event?.type !== "assistant/message" ||
-            event.data.message.source.replayState !== undefined
-        )
-            continue;
-        const blocks = event.data.message.content;
-        if (
-            blocks.length === 0 ||
-            !blocks.every((b) => b.type === "tool-call" && b.name === RELEASE_TOOL)
-        )
-            continue;
-        const pending = new Set(blocks.map((b) => (b.type === "tool-call" ? b.id : "")));
-        let end = index;
-        for (let next = index + 1; next < nodes.length && pending.size > 0; next++) {
-            const result = session.eventAt(nodes[next]!);
-            if (
-                result?.type !== "tool/result" ||
-                !pending.has(result.data.message.source.callId) ||
-                !successfulReleaseTargets(result, state)
-            )
-                break;
-            pending.delete(result.data.message.source.callId);
-            end = next;
-        }
-        if (pending.size === 0) groups.push({ start: index, end });
-    }
-    let count = 0;
-    for (const group of groups.slice(0, -2).reverse()) {
-        if (group.start < earliestIndex) continue;
-        const seqs = nodes.slice(group.start, group.end + 1);
-        const start = seqs[0]!;
-        const end = seqs.at(-1)!;
-        session.append("compaction/prune", {
-            shadowedRange: { start, end },
-            shadowedSeqs: seqs,
-            shadowedTokenCount: seqs.reduce((sum, seq) => {
-                const event = session.eventAt(seq)!;
-                const message = session.deriveEventMessage(event);
-                return sum + (message === null ? 0 : ctx.tokenMeter.estimateMessage(message));
-            }, 0),
-        });
-        session.append(
-            "user/message",
-            createUserMessage({
-                content: [
-                    {
-                        type: "text",
-                        text: "[Earlier successful release calls omitted; R placeholders and context_status report applied releases.]",
-                    },
-                ],
-                source: {
-                    kind: RELEASE_CLEANUP_SOURCE,
-                    form: "notice",
-                    summary: "Completed release receipts",
-                },
-            }),
-            { surfaceOp: { op: "replace", startSeq: start, endSeq: end }, sourceEventSeqs: seqs },
+): InlineReleaseEstimate {
+    const plans = state.activeStart === null ? planReplacements(session, state) : [];
+    const replacements = plans.map(({ event, content, releasedIds }) => {
+        const original = event.type === "tool/result" ? event.data.message : event.data;
+        const beforeTokens = ctx.tokenMeter.estimateMessage(original);
+        const afterTokens = ctx.tokenMeter.estimateMessage(freezeMessage({ ...original, content }));
+        const whole = state.entries.some(
+            (entry) => entry.role === "tool" && releasedIds.includes(entry.id),
         );
-        count++;
-    }
-    return count;
+        const removed = new Set(
+            state.numbering.attachments.flatMap((item) =>
+                item.currentSeq === event.seq &&
+                item.currentBlockIndex !== null &&
+                releasedIds.includes(item.id)
+                    ? [item.currentBlockIndex]
+                    : [],
+            ),
+        );
+        const retainedTokens = whole
+            ? 0
+            : ctx.tokenMeter.estimateMessage(
+                  freezeMessage({
+                      ...original,
+                      content: content.filter((_block, index) => !removed.has(index)),
+                  }),
+              );
+        return {
+            seq: Number(event.seq),
+            beforeTokens,
+            afterTokens,
+            releasableTokens: Math.max(0, beforeTokens - retainedTokens),
+        };
+    });
+    const estimate = replacements.reduce(
+        (total, replacement) => ({
+            beforeTokens: total.beforeTokens + replacement.beforeTokens,
+            afterTokens: total.afterTokens + replacement.afterTokens,
+        }),
+        { beforeTokens: 0, afterTokens: 0 },
+    );
+    return {
+        revision: session.seq,
+        replacementCount: plans.length,
+        replacements,
+        releasedIds: [...new Set(plans.flatMap((plan) => plan.releasedIds))],
+        ...estimate,
+    };
 }
 
 /** One synchronous boundary pass: no model request or await can observe a half-applied batch. */
@@ -215,12 +161,17 @@ export function commitInlineReleases(
     session: Session,
     state: LedgerState,
     signal: AbortSignal,
+    permit: ReleaseBatchPlan,
 ): number {
     signal.throwIfAborted();
-    if (state.activeStart !== null) return 0;
+    if (
+        state.activeStart !== null ||
+        permit.decision !== "execute" ||
+        permit.revision !== session.seq
+    )
+        return 0;
     const plans = planReplacements(session, state);
     if (plans.length === 0) return 0;
-    const earliestIndex = Math.min(...plans.map(({ event }) => state.surface.indexOf(event.seq)));
     const releasedIds = new Set(plans.flatMap((plan) => plan.releasedIds));
     const report = {
         ...releaseReport(state, releasedIds, `${session.id}:${session.seq}`),
@@ -238,7 +189,7 @@ export function commitInlineReleases(
             { beforeTokens: 0, afterTokens: 0 },
         ),
     };
-    for (const [index, { event, content }] of plans.entries()) {
+    for (const [index, { event, content, releasedIds: targetIds }] of plans.entries()) {
         const final = index === plans.length - 1;
         const seq = event.seq;
         const original = session.deriveEventMessage(event)!;
@@ -246,6 +197,19 @@ export function commitInlineReleases(
             shadowedRange: { start: seq, end: seq },
             shadowedSeqs: [seq],
             shadowedTokenCount: ctx.tokenMeter.estimateMessage(original),
+            [RELEASE_TARGET_KEY]: {
+                version: RELEASE_REPORT_VERSION,
+                sourceSeq: seq,
+                ids: targetIds,
+                blocks: state.numbering.attachments.flatMap((item) =>
+                    item.currentSeq === seq &&
+                    item.currentBlockIndex !== null &&
+                    targetIds.includes(item.id) &&
+                    !targetIds.includes(item.ownerId)
+                        ? [{ id: item.id, index: item.currentBlockIndex }]
+                        : [],
+                ),
+            },
             ...(final
                 ? {
                       [RELEASE_REPORT_KEY]: {
@@ -286,9 +250,5 @@ export function commitInlineReleases(
             );
         }
     }
-    const committed = ctx.sessionProjections.stateOf(session, "contextCompression");
-    if (committed === undefined)
-        throw new Error("fold-context: ledger unavailable after inline release");
-    cleanupReceipts(ctx, session, committed, earliestIndex);
     return plans.length;
 }

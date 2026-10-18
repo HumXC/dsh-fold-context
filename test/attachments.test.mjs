@@ -21,7 +21,7 @@ const evidence = {
 const signal = () => new AbortController().signal;
 const images = (f) => attachmentSlots(f).filter((slot) => slot.kind === "image");
 
-test("attachment occurrences use shared ordinals before generation without rewriting admitted content", async (t) => {
+test("attachment occurrences share ordinals and a notice preserves every original business block", async (t) => {
     const f = await attachmentFixture(t);
     const image = await f.store.saveImage({ data: png(), mediaType: "image/png", name: "red.png" });
     const file = await f.store.saveFile({
@@ -35,13 +35,24 @@ test("attachment occurrences use shared ordinals before generation without rewri
     ];
     const original = await admit(f, content);
     assert.deepEqual(original.data.content, content);
+    assert.deepEqual(original.data.source, { kind: "user" });
+    const notice = f.session
+        .snapshotEvents()
+        .find(
+            (event) =>
+                event.type === "user/message" &&
+                event.data.source.kind === "fold-context-allocation",
+        ).data;
+    assert.deepEqual(notice.content, [
+        { type: "text", text: "prev: 1\nnext: 4\nattachments:\n2 1 1\n3 1 2" },
+    ]);
     assert.deepEqual(
         attachmentSlots(f).map((slot) => slot.id),
-        ["§I2§", "§F3§"],
+        ["2", "3"],
     );
     assert.deepEqual(
         f.engine.state(f.session).numbering.slots.map((slot) => slot.id),
-        ["§U1§", "§A4§"],
+        ["1", "4"],
     );
     assert.equal(f.engine.state(f.session).numbering.nextNumber, 5);
     const state = ledgerProjection.stateSchema.parse(f.engine.state(f.session));
@@ -61,18 +72,18 @@ test("identical attachment bytes appearing twice retain independent occurrence I
     assert.deepEqual(
         images(f).map((slot) => [slot.id, slot.blockIndex]),
         [
-            ["§I2§", 1],
-            ["§I3§", 2],
+            ["2", 1],
+            ["3", 2],
         ],
     );
     const view = catalog(f.engine.state(f.session), { catalogLimit: 1 });
     assert.equal(view.attachments.length, 1);
     assert.equal(view.attachmentsOmitted, 1);
-    const targeted = catalog(f.engine.state(f.session), { catalogLimit: 1 }, 1, ["§I2§"]);
-    assert.equal(targeted.attachments[0].id, "§I2§");
+    const targeted = catalog(f.engine.state(f.session), { catalogLimit: 1 }, 1, ["2"]);
+    assert.equal(targeted.attachments[0].id, "2");
 });
 
-test("individual image release filters one occurrence only; the checkpoint alone settles it", async (t) => {
+test("an individual image is released before summary and its sibling alone reaches the summarizer", async (t) => {
     const f = await attachmentFixture(t);
     const ref = await f.store.saveImage({ data: png(), mediaType: "image/png" });
     const original = await admit(f, [
@@ -80,9 +91,9 @@ test("individual image release filters one occurrence only; the checkpoint alone
         { type: "image", attachment: ref },
         { type: "image", attachment: ref },
     ]);
-    await f.invoke("context_release", { ids: ["§I2§"], reason: "first occurrence consumed" });
+    await f.invoke("context_release", { ids: [2], reason: "First occurrence consumed" });
     assert.equal(
-        f.engine.state(f.session).entries.find((entry) => entry.id === "§I2§").status,
+        f.engine.state(f.session).entries.find((entry) => entry.id === "2").status,
         "queued",
     );
     assert.equal(
@@ -101,15 +112,15 @@ test("individual image release filters one occurrence only; the checkpoint alone
         1,
     );
     const state = f.engine.state(f.session);
-    assert.deepEqual(state.lastSummary.excludedIds, ["§I2§"]);
+    assert.deepEqual(state.lastSummary.excludedIds, []);
     assert.deepEqual(
         state.lastSummary.projection.attachments.map((item) => item.action),
-        ["marked-excluded", "native-image"],
+        ["native-image"],
     );
-    assert.equal(state.entries.find((entry) => entry.id === "§I2§").status, "released");
-    assert.equal(state.entries.find((entry) => entry.id === "§I3§").status, "summarized");
+    assert.equal(state.entries.find((entry) => entry.id === "2").status, "released");
+    assert.equal(state.entries.find((entry) => entry.id === "3").status, "summarized");
     assert.deepEqual(f.session.eventAt(original.seq).data.content, original.data.content);
-    const outcome = await f.invoke("context_expand", { id: "§I2§" });
+    const outcome = await f.invoke("context_expand", { id: 2 });
     assert.equal(outputValue(outcome).representation, "native-image");
     assert.equal(outcome.content.filter((block) => block.type === "image").length, 1);
 });
@@ -136,7 +147,7 @@ for (const inputModalities of [["text"], null]) {
             f.engine.state(f.session).lastSummary.projection.attachments[0].action,
             "reference-only",
         );
-        const outcome = await f.invoke("context_expand", { id: "§I2§" });
+        const outcome = await f.invoke("context_expand", { id: 2 });
         assert.equal(outputValue(outcome).status, "capability_unsupported");
         assert.equal(
             outcome.content.some((block) => block.type === "image"),
@@ -150,7 +161,7 @@ test("file recovery verifies all bytes and returns a host-mapped handle, never n
     const bytes = Buffer.from("original file body without normalization\n");
     const ref = await f.store.saveFile({ data: bytes, name: "report.txt" });
     await admit(f, [evidence, { type: "file", attachment: ref }]);
-    const outcome = await f.invoke("context_expand", { id: "§F2§" });
+    const outcome = await f.invoke("context_expand", { id: 2 });
     assert.equal(outcome.isError, false);
     const value = outputValue(outcome);
     assert.equal(value.representation, "file-handle");
@@ -159,9 +170,9 @@ test("file recovery verifies all bytes and returns a host-mapped handle, never n
     assert.deepEqual(await readFile(f.store.fileHostPath(ref)), bytes);
     assert.deepEqual(outcome.content.find((block) => block.type === "file").attachment, ref);
     const result = await f.invoke("context_search", { query: "Attachment conclusion" });
-    assert.ok(JSON.stringify(outputValue(result)).includes("§F2§"));
+    assert.ok(JSON.stringify(outputValue(result)).includes('"2"'));
     assert.equal(
-        (await f.invoke("context_release", { ids: ["§F2§"], reason: "file consumed" })).isError,
+        (await f.invoke("context_release", { ids: [2], reason: "File consumed" })).isError,
         false,
     );
     await f.engine.compactNow(f.agent, signal());
@@ -172,10 +183,7 @@ test("file recovery verifies all bytes and returns a host-mapped handle, never n
             .filter((block) => block.type === "file").length,
         1,
     );
-    assert.equal(
-        f.engine.state(f.session).lastSummary.projection.attachments[0].action,
-        "marked-excluded",
-    );
+    assert.equal(f.engine.state(f.session).lastSummary.projection.attachments.length, 0);
 });
 
 test("binary corruption and deletion fail recovery instead of claiming verified availability", async (t) => {
@@ -186,7 +194,7 @@ test("binary corruption and deletion fail recovery instead of claiming verified 
     assert.ok((await realpath(path)).startsWith(`${f.root}/`));
     await chmod(path, 0o600);
     await writeFile(path, "wrong---bytes");
-    const corrupt = await f.invoke("context_expand", { id: "§F2§" });
+    const corrupt = await f.invoke("context_expand", { id: 2 });
     assert.equal(corrupt.isError, true);
     assert.equal(
         corrupt.content.some((block) => block.type === "file"),
@@ -194,7 +202,7 @@ test("binary corruption and deletion fail recovery instead of claiming verified 
     );
     assert.ok((await realpath(path)).startsWith(`${f.root}/`));
     await rm(path);
-    const missing = await f.invoke("context_expand", { id: "§F2§" });
+    const missing = await f.invoke("context_expand", { id: 2 });
     assert.equal(missing.isError, true);
 });
 
@@ -221,13 +229,15 @@ test("attachment recovery requires this session's original occurrence and an ava
     );
     const other = await fixture();
     t.after(other.close);
-    const outcome = await other.invoke("context_expand", { id: slot.id });
+    const reserved = await other.invoke("context_expand", { id: Number(slot.id) });
+    assert.equal(outputValue(reserved).status, "unbound");
+    const outcome = await other.invoke("context_expand", { id: 999999 });
     assert.equal(outputValue(outcome).status, "unknown");
     const noStore = await fixture();
     t.after(noStore.close);
     await admit(noStore, [evidence, { type: "image", attachment: ref }]);
     assert.equal(
-        outputValue(await noStore.invoke("context_expand", { id: "§I2§" })).status,
+        outputValue(await noStore.invoke("context_expand", { id: 2 })).status,
         "attachment_store_unavailable",
     );
 });

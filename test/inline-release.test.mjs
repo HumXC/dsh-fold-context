@@ -7,9 +7,9 @@ import {
     createUserMessage,
 } from "@deepseek-ai/dsh-llm";
 import { fixture } from "./fixture.mjs";
+import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
 const signal = () => new AbortController().signal;
-const releasedAlias = (id) => id.replace(/§$/, "R§");
 const body = (label) => `${label} 🧠é\n`.repeat(1800);
 const value = (outcome) => {
     assert.equal(outcome.isError, false, JSON.stringify(outcome));
@@ -28,8 +28,10 @@ const surfaceSnapshot = (f) => ({
     replaceGeneration: f.session.surface.replaceGeneration,
     contentGeneration: f.session.surface.contentGeneration,
 });
-const boundary = (f, abortSignal = signal()) =>
-    f.engine.compactIfNeeded(f.agent, "pressure", abortSignal);
+const boundary = async (f, abortSignal = signal()) => {
+    commitForcedReleases(f, abortSignal);
+    return null;
+};
 
 function appendSignedRound(f, text) {
     const step = 1;
@@ -89,14 +91,14 @@ function appendSignedRound(f, text) {
     return { assistant, call, result };
 }
 
-test("v6 tool release replaces only its body at the next boundary with auto and scheduling disabled", async (t) => {
+test("v8 tool release replaces only its body with an explicit user-compaction batch permit", async (t) => {
     const f = await fixture({ compaction: { auto: false }, scheduling: { enabled: false } });
     t.after(f.close);
     const user = f.appendUser("Keep this goal and the conversation around the evidence.");
     const original = f.toolRound("read", body("INLINE_ORIGINAL"));
     const sibling = f.toolRound("grep", "Sibling evidence remains available.");
     const id = f.idFor(original);
-    const alias = releasedAlias(id);
+    const placeholder = `[released ${id}]`;
     const originalBytes = JSON.stringify(original);
     const assistant = f.session
         .snapshotEvents()
@@ -117,9 +119,12 @@ test("v6 tool release replaces only its body at the next boundary with auto and 
                 event.data.callId === original.data.message.toolCallId,
         );
     const callBytes = JSON.stringify(call);
-    const receipt = await f.invoke("context_release", { ids: [id], reason: "Evidence consumed" });
+    const receipt = await f.invoke("context_release", {
+        ids: [Number(id)],
+        reason: "Evidence consumed",
+    });
     assert.equal(value(receipt).accepted, true);
-    assert.equal(receipt.meta.dshContextCompression.version, 6);
+    assert.equal(receipt.meta.dshContextCompression.version, 8);
     assert.deepEqual(receipt.meta.dshContextCompression.ids, [id]);
     assert.equal(entryFor(f, id).status, "queued");
     assert.ok(f.session.surface.nodes.includes(original.seq));
@@ -140,7 +145,7 @@ test("v6 tool release replaces only its body at the next boundary with auto and 
     assert.equal(replacement.data.message.toolCallId, original.data.message.toolCallId);
     assert.deepEqual(replacement.sourceEventSeqs, [original.seq]);
     assert.equal(replacement.surfaceOp.op, "replace");
-    assert.ok(JSON.stringify(replacement.data.message.content).includes(alias));
+    assert.ok(JSON.stringify(replacement.data.message.content).includes(placeholder));
     assert.equal(
         JSON.stringify(replacement.data.message.content).includes("INLINE_ORIGINAL"),
         false,
@@ -169,38 +174,54 @@ test("v6 tool release replaces only its body at the next boundary with auto and 
     assert.equal(f.engine.state(f.session).activeStart, null);
 });
 
-test("R aliases normalize release, status and original expansion before and after settlement", async (t) => {
+test("numeric IDs recover exact originals before and after settlement and aliases are rejected", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const text = "Exact original 🧠é\nwith whitespace  preserved.";
     const original = f.toolRound("read", text);
     const id = f.idFor(original);
-    const alias = releasedAlias(id);
-    const receipt = await f.invoke("context_release", { ids: [alias, id], reason: "Consumed" });
+    for (const invalid of [id, `${id}R`, `§T${id}§`]) {
+        assert.equal(
+            (
+                await f.invoke("context_release", {
+                    ids: [invalid],
+                    reason: "Reject string argument",
+                })
+            ).isError,
+            true,
+        );
+        assert.equal((await f.invoke("context_status", { ids: [invalid] })).isError, true);
+        assert.equal((await f.invoke("context_expand", { id: invalid })).isError, true);
+    }
+    const receipt = await f.invoke("context_release", {
+        ids: [Number(id), Number(id)],
+        reason: "Consumed",
+    });
     assert.equal(value(receipt).accepted, true);
+    assert.equal(receipt.meta.dshContextCompression.version, 8);
     assert.deepEqual(receipt.meta.dshContextCompression.ids, [id]);
-    const queued = value(await f.invoke("context_status", { ids: [alias] }));
+    const queued = value(await f.invoke("context_status", { ids: [Number(id)] }));
     assert.deepEqual(
         queued.entries.map((entry) => entry.id),
         [id],
     );
     assert.equal(queued.entries[0].status, "queued");
+    const before = value(await f.invoke("context_expand", { id: Number(id), limit: 16000 }));
+    assert.equal(before.text, text);
     await boundary(f);
-    const settled = value(await f.invoke("context_status", { ids: [alias, id] }));
+    const settled = value(await f.invoke("context_status", { ids: [Number(id), Number(id)] }));
     assert.deepEqual(
         settled.entries.map((entry) => entry.id),
         [id],
     );
     assert.equal(settled.entries[0].status, "released");
-    const canonical = value(await f.invoke("context_expand", { id, limit: 16000 }));
-    const aliased = value(await f.invoke("context_expand", { id: alias, limit: 16000 }));
-    assert.equal(aliased.id, id);
-    assert.equal(aliased.status, "found");
-    assert.equal(aliased.sourceSeq, original.seq);
-    assert.equal(aliased.releaseStatus, "released");
-    assert.equal(aliased.text, text);
-    assert.equal(aliased.restoresSurface, false);
-    assert.deepEqual(aliased, canonical);
+    const expanded = value(await f.invoke("context_expand", { id: Number(id), limit: 16000 }));
+    assert.equal(expanded.id, id);
+    assert.equal(expanded.status, "found");
+    assert.equal(expanded.sourceSeq, original.seq);
+    assert.equal(expanded.releaseStatus, "released");
+    assert.equal(expanded.text, text);
+    assert.equal(expanded.restoresSurface, false);
     assert.equal(entryFor(f, id).status, "released");
     assert.equal(f.calls.length, 0);
 });
@@ -212,7 +233,7 @@ test("inline release replays from JSON into a new Session and a fresh projection
     t.after(fresh.close);
     const original = f.toolRound("read", body("REPLAY_ORIGINAL"));
     const id = f.idFor(original);
-    await f.invoke("context_release", { ids: [id], reason: "Consumed before replay" });
+    await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed before replay" });
     await boundary(f);
     const events = JSON.parse(JSON.stringify(f.session.snapshotEvents()));
     const replay = Session.create(f.session.id, events, f.session.header);
@@ -228,7 +249,7 @@ test("inline release replays from JSON into a new Session and a fresh projection
     assert.equal(restoredEntry.sourceSeq, original.seq);
     assert.equal(restoredEntry.status, "released");
     assert.ok(
-        JSON.stringify(eventFor(replay, restoredEntry.currentSeq)).includes(releasedAlias(id)),
+        JSON.stringify(eventFor(replay, restoredEntry.currentSeq)).includes(`[released ${id}]`),
     );
     const beforeSeq = replay.seq;
     await fresh.engine.compactIfNeeded({ ...fresh.agent, session: replay }, "pressure", signal());
@@ -241,13 +262,13 @@ test("repeated queued and released requests do not advance release progress or r
     t.after(f.close);
     const original = f.toolRound("read", body("ONCE"));
     const id = f.idFor(original);
-    await f.invoke("context_release", { ids: [id], reason: "First intent" });
+    await f.invoke("context_release", { ids: [Number(id)], reason: "First intent" });
     const queued = structuredClone(entryFor(f, id));
     const queuedProgress = f.engine.state(f.session).lastReleaseProgressSeq;
     assert.ok(queuedProgress > 0);
     value(
         await f.invoke("context_release", {
-            ids: [id, releasedAlias(id)],
+            ids: [Number(id), Number(id)],
             reason: "Duplicate intent",
         }),
     );
@@ -260,9 +281,7 @@ test("repeated queued and released requests do not advance release progress or r
         .snapshotEvents()
         .filter((event) => event.type === "compaction/prune").length;
     assert.ok(pruneCount > 0);
-    value(
-        await f.invoke("context_release", { ids: [releasedAlias(id)], reason: "Already released" }),
-    );
+    value(await f.invoke("context_release", { ids: [Number(id)], reason: "Already released" }));
     assert.deepEqual(entryFor(f, id), released);
     assert.equal(f.engine.state(f.session).lastReleaseProgressSeq, settledProgress);
     const beforeSeq = f.session.seq;
@@ -285,7 +304,7 @@ test("new user and assistant release requests are refused without removing conve
     const ids = [f.idFor(user), f.idFor(assistant)];
     for (const id of ids) {
         const receipt = await f.invoke("context_release", {
-            ids: [id],
+            ids: [Number(id)],
             reason: "Attempted conversation release",
         });
         assert.equal(value(receipt).accepted, false);
@@ -303,7 +322,7 @@ test("new user and assistant release requests are refused without removing conve
     assert.equal(f.calls.length, 0);
 });
 
-test("recorded v4 conversation marks remain summary-only and replay compatibly", async (t) => {
+test("obsolete release receipts cannot queue conversation bodies and normal summaries preserve their evidence", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -332,7 +351,7 @@ test("recorded v4 conversation marks remain summary-only and replay compatibly",
             },
         ],
     });
-    for (const id of ids) assert.equal(entryFor(f, id).status, "queued");
+    for (const id of ids) assert.equal(entryFor(f, id).status, "available");
     const replay = Session.create(
         f.session.id,
         JSON.parse(JSON.stringify(f.session.snapshotEvents())),
@@ -344,8 +363,8 @@ test("recorded v4 conversation marks remain summary-only and replay compatibly",
     assert.deepEqual(surfaceSnapshot(f), before);
     assert.equal(f.calls.length, 0);
     assert.ok(await f.engine.compactRegion(user.seq, result.seq, f.agent, signal()));
-    for (const id of ids) assert.equal(entryFor(f, id).status, "released");
-    assert.ok(ids.every((id) => f.engine.state(f.session).lastSummary.excludedIds.includes(id)));
+    for (const id of ids) assert.equal(entryFor(f, id).status, "summarized");
+    assert.ok(ids.every((id) => !f.engine.state(f.session).lastSummary.excludedIds.includes(id)));
     assert.deepEqual(eventFor(f.session, user.seq).data.content, user.data.content);
     assert.deepEqual(eventFor(f.session, assistant.seq).data.message, assistant.data.message);
 });
@@ -412,7 +431,7 @@ for (const kind of ["image", "file"]) {
         assert.equal(
             value(
                 await f.invoke("context_release", {
-                    ids: [id],
+                    ids: [Number(id)],
                     reason: "First occurrence consumed",
                 }),
             ).accepted,
@@ -436,11 +455,12 @@ for (const kind of ["image", "file"]) {
             current.content.filter((block) => text.some((item) => item.text === block.text)),
             text,
         );
-        assert.ok(JSON.stringify(current.content).includes(releasedAlias(id)));
+        assert.ok(JSON.stringify(current.content).includes(`[released ${id}]`));
         assert.equal(entryFor(f, id).status, "released");
         assert.equal(entryFor(f, occurrences[1].id).status, "available");
         assert.equal(entryFor(f, siblingId).status, "available");
-        assert.deepEqual(eventFor(f.session, original.seq).data.content, content);
+        assert.deepEqual(eventFor(f.session, original.seq).data, original.data);
+        assert.deepEqual(original.data.content, content);
         const replay = Session.create(
             f.session.id,
             JSON.parse(JSON.stringify(f.session.snapshotEvents())),
@@ -460,7 +480,7 @@ test("releasing a signed assistant's paired result preserves its complete replay
     const replayBytes = JSON.stringify(assistant.data.message.source.replayState);
     const callBytes = JSON.stringify(call);
     const id = f.idFor(result);
-    await f.invoke("context_release", { ids: [id], reason: "Signed call result consumed" });
+    await f.invoke("context_release", { ids: [Number(id)], reason: "Signed call result consumed" });
     await boundary(f);
     const currentAssistant = f.session
         .deriveMessages()
@@ -473,7 +493,7 @@ test("releasing a signed assistant's paired result preserves its complete replay
     const currentResult = eventFor(f.session, entryFor(f, id).currentSeq);
     assert.equal(currentResult.type, "tool/result");
     assert.equal(currentResult.data.message.toolCallId, call.data.callId);
-    assert.ok(JSON.stringify(currentResult.data.message.content).includes(releasedAlias(id)));
+    assert.ok(JSON.stringify(currentResult.data.message.content).includes(`[released ${id}]`));
     assert.equal(f.calls.length, 0);
 });
 
@@ -483,7 +503,10 @@ test("cancellation before an inline batch preserves pending intents, log, surfac
     const first = f.toolRound("read", body("CANCEL_FIRST"));
     const second = f.toolRound("grep", body("CANCEL_SECOND"));
     const ids = [f.idFor(first), f.idFor(second)];
-    await f.invoke("context_release", { ids, reason: "Queue before cancellation" });
+    await f.invoke("context_release", {
+        ids: ids.map(Number),
+        reason: "Queue before cancellation",
+    });
     const beforeEvents = f.session.snapshotEvents();
     const beforeState = structuredClone(f.engine.state(f.session));
     const beforeSurface = surfaceSnapshot(f);
@@ -508,7 +531,7 @@ test("one unknown ID rejects a mixed inline release batch without queuing its va
     const original = f.toolRound("read", body("KEEP_ON_INVALID_BATCH"));
     const id = f.idFor(original);
     const receipt = await f.invoke("context_release", {
-        ids: [releasedAlias(id), "§T999999R§"],
+        ids: [Number(id), 999999],
         reason: "Invalid mixed batch",
     });
     assert.equal(value(receipt).accepted, false);

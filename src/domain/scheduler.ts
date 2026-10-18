@@ -17,6 +17,11 @@ export const schedulingPolicySchema = z
         cacheReadRatio: ratioSchema.max(1).default(0.1),
         summaryInputRatio: ratioSchema.default(1),
         summaryOutputRatio: ratioSchema.default(1),
+        releaseMinTokens: tokenCountSchema.default(2048),
+        releaseMaxWaitSteps: positiveCountSchema.default(16),
+        releaseBacklogRatio: ratioSchema.positive().max(1).default(0.15),
+        /** Zero disables time-based cache expiry assumptions. */
+        cacheTtlMs: tokenCountSchema.default(300_000),
     })
     .strict();
 
@@ -146,12 +151,19 @@ export interface ScheduledCompactionInput {
     readonly excludedTokens?: number;
     /** Estimate after all summary-input filters; overrides selected minus excluded. */
     readonly filterInputTokens?: number;
+    /** Selected content removable inline; never credit it as summary savings. */
+    readonly inlineReleaseTokens?: number;
+    /** Actual prompt estimate after the pending inline batch, for the ratio gate. */
+    readonly postReleaseTokens?: number;
     readonly stepsSinceSummary: number;
     /** Marks covered by the candidate selection, not unrelated queued marks. */
     readonly markedIds: readonly string[];
     readonly routeSignature?: string | null;
     readonly cacheState?: SchedulingCacheState;
     readonly effectiveCacheReadRatio?: number;
+    /** Credit only a rebuild required independently before this batch was planned. */
+    readonly independentRebuildTokens?: number;
+    readonly cacheExpired?: boolean;
     readonly headerOverheadTokens?: number;
     readonly auto?: boolean;
     /** Caller-authorized safety path, never inferred from economic estimates. */
@@ -166,11 +178,15 @@ const compactionInputSchema = z
         prefixTokens: tokenCountSchema,
         excludedTokens: tokenCountSchema.optional(),
         filterInputTokens: tokenCountSchema.optional(),
+        inlineReleaseTokens: tokenCountSchema.default(0),
+        postReleaseTokens: tokenCountSchema.optional(),
         stepsSinceSummary: tokenCountSchema,
         markedIds: z.array(z.string().min(1)),
         routeSignature: z.string().nullable().default(null),
         cacheState: z.enum(["unknown", "cached", "uncached"]).default("unknown"),
         effectiveCacheReadRatio: ratioSchema.max(1).optional(),
+        independentRebuildTokens: tokenCountSchema.default(0),
+        cacheExpired: z.boolean().default(false),
         headerOverheadTokens: tokenCountSchema.default(0),
         auto: z.boolean().default(true),
         forceSafety: z.enum(["pressure", "overflow", "user_compact"]).optional(),
@@ -190,6 +206,12 @@ const compactionInputSchema = z
         if (input.excludedTokens !== undefined && input.excludedTokens > input.selectedTokens) {
             context.addIssue({ code: "custom", message: "excludedTokens exceed selectedTokens" });
         }
+        if (input.inlineReleaseTokens > input.selectedTokens) {
+            context.addIssue({
+                code: "custom",
+                message: "inlineReleaseTokens exceed selectedTokens",
+            });
+        }
     });
 
 export interface ScheduledCompactionPlan {
@@ -208,6 +230,8 @@ export interface ScheduledCompactionPlan {
     readonly prefixTokens: number;
     readonly excludedTokens: number | null;
     readonly filterInputTokens: number;
+    readonly inlineReleaseTokens: number;
+    readonly postReleaseTokens: number;
     readonly stepsSinceSummary: number;
     readonly predictedSummaryTokens: number;
     readonly netSavingTokens: number;
@@ -216,6 +240,8 @@ export interface ScheduledCompactionPlan {
     readonly retainedSurfaceTokens: number;
     readonly headerOverheadTokens: number;
     readonly rebuiltSuffixTokens: number;
+    readonly independentRebuildTokens: number;
+    readonly cacheExpired: boolean;
     readonly initialRebuildPenalty: number;
     readonly summaryCost: number;
     readonly perTurnSaving: number;
@@ -224,15 +250,10 @@ export interface ScheduledCompactionPlan {
 }
 
 /**
- * Deterministic gate for low-pressure model requests and marked backlog.
- * Unknown cache state conservatively assumes a cached prefix and uses the
- * configured read ratio. An explicitly uncached estimate defaults to ratio 1
- * with no rebuild penalty. Route signatures are provenance only; this module
- * never infers provider hits, TTL, pricing, pressure, or transaction authority.
- *
- * Safety overrides skip economics. auto:false still disables pressure, while
- * overflow and explicit requests remain allowed. /compact should call the base
- * compactNow directly; safety_user_compact is available only for reporting.
+ * Deterministic gate for low-pressure requests and marked backlog. A historical
+ * cache miss describes one call, never future billing. Only independently
+ * required rebuild work or evidenced TTL expiry reduces the rebuild penalty;
+ * the auxiliary summary call is always charged exactly once.
  */
 export function planScheduledCompaction(
     value: ScheduledCompactionInput,
@@ -248,22 +269,23 @@ export function planScheduledCompaction(
         ),
         "predictedSummaryTokens",
     );
-    const netSavingTokens = Math.max(0, input.selectedTokens - predictedSummaryTokens);
+    const netSavingTokens = Math.max(
+        0,
+        input.selectedTokens - predictedSummaryTokens - input.inlineReleaseTokens,
+    );
     const retainedSurfaceTokens =
         input.totalTokens - input.prefixTokens - input.selectedTokens - input.headerOverheadTokens;
     const rebuiltSuffixTokens = checkEstimate(
         predictedSummaryTokens + retainedSurfaceTokens + input.headerOverheadTokens,
         "rebuiltSuffixTokens",
     );
-    const cachedPrefixAssumed = input.cacheState !== "uncached";
-    const effectiveCacheReadRatio =
-        input.effectiveCacheReadRatio ?? (cachedPrefixAssumed ? policy.cacheReadRatio : 1);
-    const initialRebuildPenalty = cachedPrefixAssumed
-        ? checkEstimate(
-              rebuiltSuffixTokens * (1 - effectiveCacheReadRatio),
-              "initialRebuildPenalty",
-          )
-        : 0;
+    const cachedPrefixAssumed = !input.cacheExpired;
+    const effectiveCacheReadRatio = input.effectiveCacheReadRatio ?? policy.cacheReadRatio;
+    const initialRebuildPenalty = checkEstimate(
+        Math.max(0, rebuiltSuffixTokens - input.independentRebuildTokens) *
+            (input.cacheExpired ? 0 : 1 - effectiveCacheReadRatio),
+        "initialRebuildPenalty",
+    );
     const summaryCost = checkEstimate(
         filterInputTokens * policy.summaryInputRatio +
             predictedSummaryTokens * policy.summaryOutputRatio,
@@ -273,7 +295,8 @@ export function planScheduledCompaction(
     const upfrontCost = checkEstimate(initialRebuildPenalty + summaryCost, "upfrontCost");
     const payback = perTurnSaving > 0 ? Math.ceil(upfrontCost / perTurnSaving) : null;
     const breakEvenTurns = payback !== null && Number.isSafeInteger(payback) ? payback : null;
-    const savingsRatio = input.totalTokens > 0 ? netSavingTokens / input.totalTokens : 0;
+    const postReleaseTokens = input.postReleaseTokens ?? input.totalTokens;
+    const savingsRatio = postReleaseTokens > 0 ? netSavingTokens / postReleaseTokens : 0;
     const markedIds = [...new Set(input.markedIds)];
     let reason: SchedulingReason;
     let decision: ScheduledCompactionPlan["decision"] = "wait";
@@ -325,6 +348,8 @@ export function planScheduledCompaction(
         prefixTokens: input.prefixTokens,
         excludedTokens: input.excludedTokens ?? null,
         filterInputTokens,
+        inlineReleaseTokens: input.inlineReleaseTokens,
+        postReleaseTokens,
         stepsSinceSummary: input.stepsSinceSummary,
         predictedSummaryTokens,
         netSavingTokens,
@@ -332,9 +357,120 @@ export function planScheduledCompaction(
         retainedSurfaceTokens,
         headerOverheadTokens: input.headerOverheadTokens,
         rebuiltSuffixTokens,
+        independentRebuildTokens: input.independentRebuildTokens,
+        cacheExpired: input.cacheExpired,
         initialRebuildPenalty,
         summaryCost,
         perTurnSaving,
         breakEvenTurns,
+    };
+}
+
+export interface ReleaseCacheEvidence {
+    readonly routeSignature: string;
+    readonly usageRouteSignature: string;
+    readonly usageAtMs: number;
+    readonly cacheReadTokens: number;
+}
+
+/** TTL is an explicit heuristic, anchored to a same-route cache HIT, never a miss. */
+export function cacheExpiryEvidence(
+    evidence: ReleaseCacheEvidence | null | undefined,
+    nowMs: number,
+    ttlMs: number,
+): boolean {
+    checkCount(ttlMs, "cacheTtlMs");
+    return (
+        ttlMs > 0 &&
+        evidence != null &&
+        evidence.routeSignature.length > 0 &&
+        evidence.routeSignature === evidence.usageRouteSignature &&
+        Number.isFinite(evidence.usageAtMs) &&
+        evidence.usageAtMs >= 0 &&
+        Number.isFinite(nowMs) &&
+        nowMs >= evidence.usageAtMs &&
+        Number.isFinite(evidence.cacheReadTokens) &&
+        evidence.cacheReadTokens > 0 &&
+        nowMs - evidence.usageAtMs >= ttlMs
+    );
+}
+
+export type ReleaseOpportunity = SchedulingSafetyReason | "summary" | "rebuild";
+export type ReleaseBatchReason =
+    | "no_releases"
+    | "active_compaction"
+    | "hot_cache"
+    | "min_release"
+    | "cache_expired"
+    | "max_wait"
+    | "backlog_watermark"
+    | `opportunity_${ReleaseOpportunity}`;
+export interface ReleaseBatchInput {
+    readonly revision: number;
+    readonly totalTokens: number;
+    /** Net savings of complete native replacements; price overlapping owners once. */
+    readonly releaseTokens: number;
+    readonly releaseCount: number;
+    readonly oldestWaitSteps: number;
+    readonly activeCompaction?: boolean;
+    readonly opportunity?: ReleaseOpportunity;
+    readonly cache?: ReleaseCacheEvidence | null;
+    readonly nowMs: number;
+}
+export interface ReleaseBatchPlan {
+    readonly revision: number;
+    readonly decision: "execute" | "wait";
+    readonly reason: ReleaseBatchReason;
+    readonly cacheExpired: boolean;
+    readonly releaseTokens: number;
+    readonly releaseCount: number;
+    readonly oldestWaitSteps: number;
+}
+
+/** Marks alone never create a paid rebuild; this planner cannot mutate a session. */
+export function planReleaseBatch(
+    input: ReleaseBatchInput,
+    config: Partial<SchedulingPolicy> = {},
+): ReleaseBatchPlan {
+    const policy = resolveSchedulingPolicy(config);
+    for (const key of [
+        "revision",
+        "totalTokens",
+        "releaseTokens",
+        "releaseCount",
+        "oldestWaitSteps",
+    ] as const)
+        checkCount(input[key], key);
+    const cacheExpired = cacheExpiryEvidence(input.cache, input.nowMs, policy.cacheTtlMs);
+    let reason: ReleaseBatchReason;
+    let decision: ReleaseBatchPlan["decision"] = "wait";
+    if (input.activeCompaction) reason = "active_compaction";
+    else if (input.releaseCount === 0) reason = "no_releases";
+    else if (input.opportunity !== undefined) {
+        reason = `opportunity_${input.opportunity}`;
+        decision = "execute";
+    } else if (input.releaseTokens === 0) reason = "min_release";
+    else if (input.oldestWaitSteps >= policy.releaseMaxWaitSteps) {
+        reason = "max_wait";
+        decision = "execute";
+    } else if (input.releaseTokens < policy.releaseMinTokens) reason = "min_release";
+    else if (
+        input.totalTokens > 0 &&
+        input.releaseTokens / input.totalTokens >= policy.releaseBacklogRatio
+    ) {
+        reason = "backlog_watermark";
+        decision = "execute";
+    } else if (cacheExpired) {
+        reason = "cache_expired";
+        decision = "execute";
+    } else reason = "hot_cache";
+    return {
+        revision: input.revision,
+        decision,
+        reason,
+        cacheExpired,
+        releaseTokens: input.releaseTokens,
+        releaseCount: input.releaseCount,
+        oldestWaitSteps: input.oldestWaitSteps,
     };
 }

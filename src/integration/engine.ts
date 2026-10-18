@@ -6,16 +6,20 @@ import {
 } from "@deepseek-ai/dsh-compaction-basic";
 import { toolPairingBalancedBefore, type CompactionTrigger } from "@deepseek-ai/dsh-compaction";
 import type { ContentBlock, Message, TokenUsage, ToolSchema } from "@deepseek-ai/dsh-llm";
+import { estimateMessage } from "@deepseek-ai/dsh-token-meter/estimate";
 import { SessionSeq, type Session } from "@deepseek-ai/dsh-session";
-import type { ScopeKey } from "@deepseek-ai/dsh-scope";
 import { ledgerProjection, type LedgerState } from "../domain/ledger.js";
-import { commitInlineReleases } from "./inline-release.js";
+import { commitInlineReleases, estimateInlineReleases } from "./inline-release.js";
+import { releaseControlProjection } from "../domain/release-controls.js";
+import { registerReleaseControlCleanup } from "./release-control.js";
 import { canReleaseInline } from "../domain/release.js";
-import { hasSummaryBusinessEvidence } from "../domain/summary-evidence.js";
+import { hasSummaryBusinessEvidence, isSummaryControlNotice } from "../domain/summary-evidence.js";
 import { createPressureProjection, planningPressure } from "../domain/pressure.js";
+import { RELEASE_TARGET_KEY } from "../domain/release-report.js";
 import { planPressureBudget } from "../domain/pressure-budget.js";
 import {
     describeScheduling,
+    describeReleaseBatch,
     type SchedulingLimits,
     type SummaryInputEstimate,
 } from "../domain/scheduling-diagnostics.js";
@@ -24,11 +28,16 @@ import {
     resolveReminderPolicy,
     type ReminderPolicy,
 } from "../domain/reminder.js";
-import { catalog, type ReleasePolicy } from "../domain/planner.js";
+import type { ReleasePolicy } from "../domain/planner.js";
 import { selectedExclusions } from "../domain/exclusion.js";
 import { projectSummaryInput } from "../domain/summary-projection.js";
 import {
+    cacheExpiryEvidence,
+    planReleaseBatch,
     planScheduledCompaction,
+    type ReleaseBatchPlan,
+    type ReleaseCacheEvidence,
+    type ReleaseOpportunity,
     resolveSchedulingPolicy,
     selectScheduledRange,
     type ScheduledCompactionPlan,
@@ -73,7 +82,6 @@ interface SchedulingSnapshot {
 }
 
 export class ContextCompressionEngine extends BasicCompactionEngine {
-    private readonly agentsByScope = new WeakMap<ScopeKey, Agent>();
     readonly releasePolicy: Readonly<ReleasePolicy>;
     readonly summaryPolicy: Readonly<SummaryPolicy>;
     readonly schedulingPolicy: Readonly<SchedulingPolicy>;
@@ -88,9 +96,8 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         reminders: Partial<ReminderPolicy> = {},
     ) {
         ctx.sessionProjections.register(ledgerProjection);
-        ctx.sessionProjections.register(
-            createPressureProjection((message) => ctx.tokenMeter.estimateMessage(message)),
-        );
+        ctx.sessionProjections.register(releaseControlProjection);
+        ctx.sessionProjections.register(createPressureProjection(estimateMessage));
         // The base owns overflow retry handling, including when ordinary automation is disabled.
         super(ctx, { ...compaction, auto: true });
         this.autoEnabled = compaction.auto ?? true;
@@ -98,6 +105,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         this.summaryPolicy = summaryPolicy;
         this.schedulingPolicy = resolveSchedulingPolicy(scheduling);
         this.reminderPolicy = resolveReminderPolicy(reminders);
+        registerReleaseControlCleanup(ctx, this);
     }
     state(session: Session) {
         const state = this.ctx.sessionProjections.stateOf(session, "contextCompression");
@@ -116,19 +124,40 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
     }
     override async compactIfNeeded(agent: Agent, trigger: CompactionTrigger, signal: AbortSignal) {
         signal.throwIfAborted();
-        this.agentsByScope.set(agent, agent);
-        if (commitInlineReleases(this.ctx, agent.session, this.state(agent.session), signal) > 0) {
-            await this.ctx.parallel("session/flush", agent.session);
-            signal.throwIfAborted();
+        if (trigger === "context-overflow") {
+            await this.releaseBatch(agent, signal, "overflow");
+            return super.compactIfNeeded(agent, trigger, signal);
         }
-        if (trigger === "context-overflow") return super.compactIfNeeded(agent, trigger, signal);
         const requested = this.hasSummaryRequest(agent.session);
-        if (!this.schedulingPolicy.enabled && requested)
+        if (!this.schedulingPolicy.enabled && requested) {
+            await this.releaseBatch(agent, signal, "summary");
             return super.compactIfNeeded(agent, "context-overflow", signal);
-        if (this.autoEnabled) {
-            const result = await this.compactPressure(agent, signal, requested);
-            if (result !== null) return result;
         }
+        if (this.autoEnabled) {
+            const budget = await this.pressureBudget(agent, signal);
+            if (budget !== null && this.measurement(agent.session).totalTokens >= budget.threshold)
+                return this.compactPressure(agent, signal, requested, budget);
+        }
+        // Capture independent work BEFORE this batch. Its own replacements cannot
+        // prove that the rebuild was already paid when reconsidering a summary.
+        const opportunity = this.rebuildEvidence(agent.session);
+        const rebuildFrom =
+            opportunity.rebuildStartSeq === null
+                ? -1
+                : agent.session.surface.nodes.indexOf(SessionSeq(opportunity.rebuildStartSeq));
+        const targets =
+            rebuildFrom < 0
+                ? []
+                : estimateInlineReleases(this.ctx, agent.session, this.state(agent.session))
+                      .replacements;
+        const coveredRebuild =
+            rebuildFrom >= 0 &&
+            targets.length > 0 &&
+            targets.every(
+                (target) =>
+                    agent.session.surface.nodes.indexOf(SessionSeq(target.seq)) >= rebuildFrom,
+            );
+        await this.releaseBatch(agent, signal, coveredRebuild ? "rebuild" : undefined);
         if (!this.schedulingPolicy.enabled || (!requested && !this.autoEnabled)) return null;
         if (
             !requested &&
@@ -136,17 +165,146 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 !this.state(agent.session).entries.some((entry) => entry.status === "queued"))
         )
             return null;
-        const scheduled = await this.inspectSchedule(agent, signal);
+        let scheduled = await this.inspectSchedule(agent, signal, opportunity);
         signal.throwIfAborted();
-        if (scheduled.decision !== "execute" || scheduled.selection === null) return null;
-        // Metadata resolution may yield; never apply a decision to a different surface revision.
-        if (agent.session.seq !== scheduled.revision) return null;
+        if (
+            scheduled.decision !== "execute" ||
+            scheduled.selection === null ||
+            agent.session.seq !== scheduled.revision
+        )
+            return null;
+        if ((await this.releaseBatch(agent, signal, "summary")) > 0) {
+            scheduled = await this.inspectSchedule(agent, signal, opportunity, true);
+            signal.throwIfAborted();
+        }
+        if (
+            scheduled.decision !== "execute" ||
+            scheduled.selection === null ||
+            agent.session.seq !== scheduled.revision
+        )
+            return null;
         return super.compactRegion(
             SessionSeq(scheduled.selection.start),
             SessionSeq(scheduled.selection.end),
             agent,
             signal,
         );
+    }
+    override async compactNow(...args: Parameters<BasicCompactionEngine["compactNow"]>) {
+        const [agent, signal] = args;
+        await this.releaseBatch(agent, signal, "user_compact");
+        return super.compactNow(...args);
+    }
+    private cacheEvidence(session: Session): ReleaseCacheEvidence | null {
+        const measurement = this.measurement(session);
+        const usageSeq = measurement.usageSeq;
+        if (usageSeq === null) return null;
+        const event = session.eventAt(SessionSeq(usageSeq));
+        const routed = session.requestHeader()?.config;
+        // A completed primary message binds both route and usage provenance.
+        if (
+            event?.type !== "assistant/message" ||
+            event.data.usage === undefined ||
+            !routed?.provider ||
+            !routed.model
+        )
+            return null;
+        const source = event.data.message.source;
+        if (source.kind !== "model") return null;
+        return {
+            routeSignature: JSON.stringify([routed.provider, routed.model]),
+            usageRouteSignature: JSON.stringify([source.provider, source.model]),
+            usageAtMs: event.time,
+            cacheReadTokens: event.data.usage.cacheReadTokens ?? 0,
+        };
+    }
+    private rebuildEvidence(session: Session) {
+        const measured = this.measurement(session);
+        const cache = this.cacheEvidence(session);
+        let independentRebuildTokens = 0;
+        let changed = false;
+        let rebuildStartSeq: number | null = null;
+        // O(surface), never a history scan. Only an already committed native
+        // replacement after the latest same-route usage proves independent work.
+        if (
+            cache !== null &&
+            cache.routeSignature === cache.usageRouteSignature &&
+            measured.usageSeq !== null
+        ) {
+            for (const node of measured.nodes) {
+                const event = session.eventAt(SessionSeq(node.seq));
+                const preceding =
+                    node.seq > 0 ? session.eventAt(SessionSeq(node.seq - 1)) : undefined;
+                const ownRelease =
+                    preceding?.type === "compaction/prune" && RELEASE_TARGET_KEY in preceding.data;
+                const ownCleanup =
+                    event?.type === "user/message" &&
+                    event.data.source.kind === "fold-context-release-cleanup";
+                if (
+                    !ownRelease &&
+                    !ownCleanup &&
+                    node.seq > measured.usageSeq &&
+                    event?.surfaceOp !== undefined &&
+                    event.surfaceOp !== "append"
+                ) {
+                    changed = true;
+                    rebuildStartSeq ??= node.seq;
+                }
+                if (changed) independentRebuildTokens += node.tokens;
+            }
+        }
+        return {
+            independentRebuildTokens,
+            rebuildStartSeq,
+            cacheExpired: cacheExpiryEvidence(cache, Date.now(), this.schedulingPolicy.cacheTtlMs),
+        };
+    }
+    private releasePlan(session: Session, opportunity?: ReleaseOpportunity): ReleaseBatchPlan {
+        const state = this.state(session);
+        const estimate = estimateInlineReleases(this.ctx, session, state);
+        const releasedIds = new Set(estimate.releasedIds);
+        let oldestWaitSteps = 0;
+        for (const entry of state.entries) {
+            if (entry.status !== "queued" || !releasedIds.has(entry.id)) continue;
+            const queuedStep = entry.queuedAtBusinessStep;
+            if (queuedStep !== null && queuedStep !== undefined)
+                oldestWaitSteps = Math.max(oldestWaitSteps, state.businessSteps - queuedStep);
+        }
+        return planReleaseBatch(
+            {
+                revision: estimate.revision,
+                totalTokens: this.measurement(session).totalTokens,
+                releaseTokens: Math.max(0, estimate.beforeTokens - estimate.afterTokens),
+                releaseCount: estimate.replacementCount,
+                oldestWaitSteps,
+                activeCompaction: state.activeStart !== null,
+                ...(opportunity === undefined ? {} : { opportunity }),
+                cache: this.cacheEvidence(session),
+                nowMs: Date.now(),
+            },
+            this.schedulingPolicy,
+        );
+    }
+    private async releaseBatch(
+        agent: Agent,
+        signal: AbortSignal,
+        opportunity?: ReleaseOpportunity,
+    ) {
+        signal.throwIfAborted();
+        const session = agent.session;
+        const permit = this.releasePlan(session, opportunity);
+        const released = commitInlineReleases(
+            this.ctx,
+            session,
+            this.state(session),
+            signal,
+            permit,
+        );
+        if (released > 0) {
+            await this.ctx.parallel("session/flush", session);
+            signal.throwIfAborted();
+        }
+        return released;
     }
     private selectionHasBusinessEvidence(
         session: Session,
@@ -295,16 +453,28 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 toolPairingBalancedBefore(session, SessionSeq(seq)),
         });
     }
-    private async compactPressure(agent: Agent, signal: AbortSignal, requested: boolean) {
-        const budget = await this.pressureBudget(agent, signal);
-        if (budget === null) return null;
+    private async compactPressure(
+        agent: Agent,
+        signal: AbortSignal,
+        requested: boolean,
+        budget: NonNullable<Awaited<ReturnType<ContextCompressionEngine["pressureBudget"]>>>,
+    ) {
         let measured = this.measurement(agent.session);
+        if (measured.totalTokens < budget.threshold) return null;
+        if ((await this.releaseBatch(agent, signal, "pressure")) > 0) {
+            const refreshed = await this.pressureBudget(agent, signal);
+            if (refreshed === null) return null;
+            budget = refreshed;
+        }
+        measured = this.measurement(agent.session);
         if (measured.totalTokens < budget.threshold) return null;
         const pruner = this.ctx.get("toolResultPruner");
         if (pruner !== undefined) {
             pruner.pruneSession(agent.session);
             measured = this.measurement(agent.session);
         }
+        const failure = this.latestFailure(agent.session, this.state(agent.session));
+        if (failure !== null && failure.retryAfterSteps > 0) return null;
         let result: Awaited<ReturnType<BasicCompactionEngine["compactRegion"]>> | null = null;
         let retain = this.retentionTokens(agent.session, budget.retain, budget.threshold);
         for (
@@ -348,6 +518,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const pressure = this.pressureStatus(agent.session);
         const effect = pressure.effect;
         const threshold = snapshot.thresholdTokens;
+        const releaseBatch = this.releasePlan(agent.session);
         return {
             policy: { ...this.schedulingPolicy },
             auto: this.autoEnabled,
@@ -356,6 +527,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             reason: snapshot.reason,
             limits: snapshot.limits === null ? null : { ...snapshot.limits },
             summaryInput: snapshot.summaryInput === null ? null : { ...snapshot.summaryInput },
+            releaseBatch: { ...releaseBatch, diagnostic: describeReleaseBatch(releaseBatch) },
             diagnostic: describeScheduling(
                 { ...snapshot, retryAfterSteps: snapshot.failure?.retryAfterSteps ?? 0 },
                 this.schedulingPolicy,
@@ -458,27 +630,28 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             (slot) => slot.role === "assistant" && slot.sourceSeq !== null && slot.sourceSeq > seq,
         ).length;
     }
-    private latestFailure(session: Session, state: LedgerState): SchedulingSnapshot["failure"] {
-        const lastSummary = state.lastSummary?.seq ?? 0;
-        for (let seq = session.seq - 1; seq > lastSummary; seq--) {
-            const event = session.eventAt(SessionSeq(seq));
-            if (event?.type !== "compaction/end" || event.data.error === undefined) continue;
-            const stepsSinceFailure = this.committedStepsAfter(state, event.seq);
-            const cooldown = Math.max(1, Math.min(8, this.schedulingPolicy.minIntervalSteps));
-            const freshIntent =
-                state.entries.some(
-                    (entry) => entry.status === "queued" && (entry.queuedAt ?? 0) > event.seq,
-                ) || state.summaryRequests.some((request) => request.seq > event.seq);
-            return {
-                seq: event.seq,
-                error: event.data.error.slice(0, 1000),
-                stepsSinceFailure,
-                retryAfterSteps: freshIntent ? 0 : Math.max(0, cooldown - stepsSinceFailure),
-            };
-        }
-        return null;
+    private latestFailure(_session: Session, state: LedgerState): SchedulingSnapshot["failure"] {
+        const failure = state.lastSummaryFailure;
+        if (failure == null || failure.seq <= (state.lastSummary?.seq ?? -1)) return null;
+        const stepsSinceFailure = Math.max(0, state.businessSteps - failure.businessStep);
+        const cooldown = Math.max(1, Math.min(8, this.schedulingPolicy.minIntervalSteps));
+        const freshIntent =
+            state.entries.some(
+                (entry) => entry.status === "queued" && (entry.queuedAt ?? -1) > failure.seq,
+            ) || state.summaryRequests.some((request) => request.seq > failure.seq);
+        return {
+            seq: failure.seq,
+            error: failure.error.slice(0, 1000),
+            stepsSinceFailure,
+            retryAfterSteps: freshIntent ? 0 : Math.max(0, cooldown - stepsSinceFailure),
+        };
     }
-    private async inspectSchedule(agent: Agent, signal?: AbortSignal): Promise<SchedulingSnapshot> {
+    private async inspectSchedule(
+        agent: Agent,
+        signal?: AbortSignal,
+        opportunity = this.rebuildEvidence(agent.session),
+        plannedSummary = false,
+    ): Promise<SchedulingSnapshot> {
         signal?.throwIfAborted();
         const session = agent.session;
         const revision = session.seq;
@@ -575,7 +748,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             const message = event === undefined ? null : session.deriveEventMessage(event);
             return message === null ? [] : [message];
         });
-        const input = firstSystemSeq !== undefined && head !== null ? [head, ...region] : region;
+        const input = (
+            firstSystemSeq !== undefined && head !== null ? [head, ...region] : region
+        ).filter((message) => !isSummaryControlNotice(message));
         const images = await this.summaryImages(input, agent, signal);
         signal?.throwIfAborted();
         if (session.seq !== revision) return wait("state_changed");
@@ -619,10 +794,30 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const override = this.config.modelPolicies.find(
             (policy) => policy.provider === routed.provider && policy.model === routed.model,
         );
+        const preflight = estimateInlineReleases(this.ctx, session, state);
+        const measuredNodes = new Map(
+            measurement.nodes.map((node) => [Number(node.seq), node.tokens]),
+        );
+        let totalDelta = 0;
+        let outsideDelta = 0;
+        let inlineReleaseTokens = 0;
+        for (const replacement of preflight.replacements) {
+            const tokens = measuredNodes.get(replacement.seq);
+            if (tokens === undefined) continue;
+            const delta =
+                Math.max(0, tokens + replacement.afterTokens - replacement.beforeTokens) - tokens;
+            totalDelta += delta;
+            if (selected.has(replacement.seq))
+                inlineReleaseTokens += Math.min(tokens, replacement.releasableTokens);
+            else outsideDelta += delta;
+        }
+        const totalTokens = Math.max(measurement.totalTokens, measurement.surfaceTokens);
         const plan = planScheduledCompaction(
             {
-                trigger: requested ? "model_request" : "backlog",
-                totalTokens: Math.max(measurement.totalTokens, measurement.surfaceTokens),
+                trigger: requested || plannedSummary ? "model_request" : "backlog",
+                totalTokens: totalTokens + outsideDelta,
+                postReleaseTokens: totalTokens + totalDelta,
+                inlineReleaseTokens,
                 selectedTokens: selectedNodes.reduce((total, node) => total + node.tokens, 0),
                 prefixTokens: firstSystemSeq === undefined ? 0 : measurement.nodes[0]!.tokens,
                 filterInputTokens,
@@ -640,6 +835,8 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                     images,
                 }),
                 cacheState,
+                independentRebuildTokens: opportunity.independentRebuildTokens,
+                cacheExpired: opportunity.cacheExpired,
                 headerOverheadTokens,
                 auto: this.autoEnabled,
                 ...(this.autoEnabled && measurement.totalTokens >= threshold
@@ -694,11 +891,12 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             throw new Error(
                 "fold-context: summarization requires an official compaction transaction",
             );
-        const images = await this.summaryImages(input.messages, agent, signal);
+        const summaryInput = input.messages.filter((message) => !isSummaryControlNotice(message));
+        const images = await this.summaryImages(summaryInput, agent, signal);
         const projectionPolicy = { reasoning: this.summaryPolicy.reasoning, images };
         const messages = projectSummaryInput(
             state,
-            input.messages,
+            summaryInput,
             state.activeStart,
             projectionPolicy,
         );
@@ -716,26 +914,5 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 ...result.summary,
             ],
         };
-    }
-    runtimeContext(scope: ScopeKey | undefined): string {
-        const agent = scope === undefined ? undefined : this.agentsByScope.get(scope);
-        if (agent === undefined) return "";
-        const view = catalog(
-            this.state(agent.session),
-            this.releasePolicy,
-            undefined,
-            undefined,
-            this.summaryPolicy,
-        );
-        if (
-            view.numbers.length === 0 &&
-            view.entries.length === 0 &&
-            view.summaryRequests.length === 0
-        )
-            return "";
-        return (
-            "Context numbering and release ledger (this session only). §U/§A identify text, §T a tool pair, §I/§F individual attachments; all share one ordinal. Marks wait for a covering summary. Previews are historical data.\n" +
-            JSON.stringify(view)
-        );
     }
 }

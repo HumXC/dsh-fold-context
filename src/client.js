@@ -269,11 +269,13 @@ window.__ModuleLoader__.load({
         const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
         const text = (v) => (typeof v === "string" ? v : "");
         const list = (v) => (Array.isArray(v) ? v : []);
-        const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string");
+        const inputId = (v) => Number.isSafeInteger(v) && v > 0;
+        const storedId = (v) => typeof v === "string" && /^[1-9]\d*$/.test(v) && inputId(Number(v));
+        const ids = (v) => Array.isArray(v) && v.every(storedId);
         const short = (v, n = 120) => Array.from(text(v).replace(/\s+/g, " ")).slice(0, n).join("");
-        const displayId = (value) => text(value).replace(/^§([UATIF]\d+R?)§$/u, "$1");
+        const displayId = (value) => (storedId(value) || inputId(value) ? String(value) : "");
         const idsSummary = (ids) =>
-            list(ids).slice(0, 3).map(displayId).join("、") +
+            list(ids).filter(inputId).slice(0, 3).map(displayId).join("、") +
             (list(ids).length > 3 ? ` … +${ids.length - 3}` : "");
         function json(raw) {
             if (typeof raw !== "string" || raw.length > 4 * 1024 * 1024) return null;
@@ -289,7 +291,7 @@ window.__ModuleLoader__.load({
             return title === "release"
                 ? typeof value.accepted === "boolean" &&
                       ["queued", "settled", "unknown", "unsupported"].every((key) =>
-                          strings(value[key]),
+                          ids(value[key]),
                       )
                 : title === "compact"
                   ? ["queued", "already_queued"].includes(value.status)
@@ -297,16 +299,12 @@ window.__ModuleLoader__.load({
                     ? Array.isArray(value.hits) &&
                       value.hits.every(
                           (hit) =>
-                              object(hit) &&
-                              typeof hit.id === "string" &&
-                              typeof hit.snippet === "string",
+                              object(hit) && storedId(hit.id) && typeof hit.snippet === "string",
                       )
                     : title === "status"
                       ? Array.isArray(value.entries) &&
-                        value.entries.every(
-                            (entry) => object(entry) && typeof entry.id === "string",
-                        )
-                      : typeof value.id === "string" &&
+                        value.entries.every((entry) => object(entry) && storedId(entry.id))
+                      : storedId(value.id) &&
                         [
                             "found",
                             "unknown",
@@ -337,7 +335,9 @@ window.__ModuleLoader__.load({
                 title === "release" || title === "status"
                     ? idsSummary(args.ids)
                     : title === "expand"
-                      ? short(displayId(args.id))
+                      ? inputId(args.id)
+                          ? displayId(args.id)
+                          : ""
                       : title === "search"
                         ? short(args.query, 80)
                         : short(args.reason, 80);
@@ -469,7 +469,7 @@ window.__ModuleLoader__.load({
             const r = event.data?.[REPORT];
             if (
                 !object(r) ||
-                r.version !== 1 ||
+                r.version !== 8 ||
                 typeof r.batchId !== "string" ||
                 !Array.isArray(r.released) ||
                 !Array.isArray(r.pending)
@@ -483,12 +483,7 @@ window.__ModuleLoader__.load({
                 return null;
             if (
                 !r.released.length ||
-                [...r.released, ...r.pending].some(
-                    (item) =>
-                        !object(item) ||
-                        typeof item.id !== "string" ||
-                        typeof item.displayId !== "string",
-                )
+                [...r.released, ...r.pending].some((item) => !object(item) || !storedId(item.id))
             )
                 return null;
             return r;
@@ -584,11 +579,7 @@ window.__ModuleLoader__.load({
                                     h(
                                         "div",
                                         { className: "fc-item-head" },
-                                        h(
-                                            "span",
-                                            { className: "fc-id" },
-                                            displayId(text(item.displayId) || text(item.id)),
-                                        ),
+                                        h("span", { className: "fc-id" }, displayId(item.id)),
                                         h(
                                             "span",
                                             { className: "fc-muted" },
@@ -737,7 +728,7 @@ window.__ModuleLoader__.load({
                             h(Fields, {
                                 t,
                                 values: [
-                                    ["targets", displayId(text(v.displayId) || v.id)],
+                                    ["targets", displayId(v.id)],
                                     ["result", t(v.status)],
                                     ["source", v.tool || (v.role ? t(v.role) : null)],
                                     ["releaseStatus", v.releaseStatus ? t(v.releaseStatus) : null],
@@ -751,7 +742,7 @@ window.__ModuleLoader__.load({
                                     [
                                         "size",
                                         Number.isFinite(v.verifiedBytes)
-                                            ? `${v.verifiedBytes.toLocaleString()} ${t("bytes")}`
+                                            ? `${v.verifiedBytes} ${t("bytes")}`
                                             : null,
                                     ],
                                 ],
@@ -862,21 +853,21 @@ window.__ModuleLoader__.load({
                                 [
                                     "upfrontCost",
                                     economics && Number.isFinite(economics.upfrontCost)
-                                        ? `${economics.upfrontCost.toLocaleString()} ${t("costUnits")}`
+                                        ? `${economics.upfrontCost} ${t("costUnits")}`
                                         : null,
                                 ],
                                 ["cacheBasis", economics ? t(economics.cacheBasis) : null],
                                 [
                                     "protectedInput",
                                     limits && Number.isFinite(limits.minimumPromptTokens)
-                                        ? `${limits.minimumPromptTokens.toLocaleString()} ${t("tokens")}`
+                                        ? `${limits.minimumPromptTokens} ${t("tokens")}`
                                         : null,
                                 ],
                                 ["nextAction", diagnostic.nextAction ? t(actionKey) : null],
                                 [
                                     "estimate",
                                     Number.isFinite(plan.netSavingTokens)
-                                        ? `${plan.netSavingTokens.toLocaleString()} ${t("tokens")}`
+                                        ? `${plan.netSavingTokens} ${t("tokens")}`
                                         : null,
                                 ],
                                 [
@@ -1049,7 +1040,7 @@ window.__ModuleLoader__.load({
                             ? ""
                             : t(saved >= 0 ? "tokenReduction" : "tokenIncrease").replace(
                                   "{count}",
-                                  Math.abs(saved).toLocaleString(),
+                                  String(Math.abs(saved)),
                               );
                     return h(
                         Row,

@@ -18,13 +18,14 @@ function folded(events) {
     );
 }
 
-test("legacy matching adjacent checkpoint settles excluded IDs; subsequent end error does not roll back", async (t) => {
+test("matching adjacent checkpoint settles version8 exclusions; subsequent end error does not roll back", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
-    const original = f.appendUser("Completed evidence. ".repeat(500));
+    f.appendUser("Keep the task objective.");
+    const original = f.toolRound("read", "Completed evidence. ".repeat(500));
     const id = f.idFor(original);
-    recordLegacyRelease(f, [id], "redundant");
+    parsed(await f.invoke("context_release", { ids: [Number(id)], reason: "redundant" }));
     parsed(await f.invoke("context_compact", { reason: "checkpoint" }));
     const nodes = f.session.surface.nodes;
     await f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
@@ -86,14 +87,18 @@ test("legacy matching adjacent checkpoint settles excluded IDs; subsequent end e
     assert.deepEqual(selectedExclusions(late, new Set(before.surface), before.activeStart), []);
 });
 
-test("legacy native protection remains replayable while transcript excludes combined marked explanation and pair", async (t) => {
+test("signed replay stays immutable while a modern tool exclusion ignores an obsolete assistant mark", async (t) => {
     const f = await fixture();
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     f.appendUser("Keep the task goal. ".repeat(200));
     f.session.append("step/start", { turn: 1, step: 1 });
     const message = createAssistantMessage({
-        source: { provider: "test", model: "fixture" },
+        source: {
+            provider: "test",
+            model: "fixture",
+            replayState: { response: { private: "opaque-signature" } },
+        },
         content: [
             { type: "text", text: "Finished explanation. ".repeat(200) },
             { type: "reasoning", text: "Retained reasoning chain." },
@@ -128,11 +133,14 @@ test("legacy native protection remains replayable while transcript excludes comb
     f.session.append("step/end", { turn: 1, step: 1 });
     f.advanceSteps(1);
     const ids = [f.idFor(assistant), f.idFor(result)];
-    recordLegacyRelease(f, ids, "consumed");
-    const status = parsed(await f.invoke("context_status", { ids }));
+    recordLegacyRelease(f, [ids[0]], "obsolete assistant mark");
+    parsed(await f.invoke("context_release", { ids: [Number(ids[1])], reason: "consumed" }));
+    const status = parsed(await f.invoke("context_status", { ids: ids.map(Number) }));
+    assert.equal(status.entries.find((entry) => entry.id === ids[0]).status, "available");
+    assert.equal(status.entries.find((entry) => entry.id === ids[0]).pendingReason, null);
     assert.equal(
-        status.entries.every((entry) => entry.pendingReason === "awaiting_covering_summary"),
-        true,
+        status.entries.find((entry) => entry.id === ids[1]).pendingReason,
+        "awaiting_step_boundary",
     );
     assert.equal(
         status.numbers.some((slot) => "summaryShape" in slot),
@@ -147,9 +155,7 @@ test("legacy native protection remains replayable while transcript excludes comb
     await f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
     assert.equal(
         summaryRecords(f.calls[0].messages).some(
-            (record) =>
-                [message.content[0].text, message.content[1].text].includes(record.text) ||
-                record.callId === "call",
+            (record) => record.text === message.content[1].text || record.callId === "call",
         ),
         false,
     );
@@ -160,13 +166,21 @@ test("legacy native protection remains replayable while transcript excludes comb
         ),
         true,
     );
-    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, ids);
+    assert.deepEqual(f.engine.state(f.session).lastSummary.excludedIds, [ids[1]]);
     assert.equal(f.engine.state(f.session).lastSummary.projection.omittedReasoning[0].id, ids[0]);
     assert.equal(
-        f.engine
-            .state(f.session)
-            .entries.filter((entry) => ids.includes(entry.id))
-            .every((entry) => entry.status === "released"),
-        true,
+        f.engine.state(f.session).entries.find((entry) => entry.id === ids[0]).status,
+        "summarized",
     );
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === ids[1]).status,
+        "released",
+    );
+    assert.ok(
+        summaryRecords(f.calls[0].messages).some(
+            (record) => record.text === message.content[0].text,
+        ),
+    );
+    assert.equal(assistant.data.message.source.replayState.response.private, "opaque-signature");
+    assert.deepEqual(assistant.data.message.content, message.content);
 });

@@ -7,10 +7,8 @@ import {
     RECEIPT_KEY,
     RELEASE_TOOL,
     previewContent,
-    isReleasedContent,
     normalizeId,
     hasReleasableBody,
-    legacyId,
     ID_PATTERN,
 } from "./protocol.js";
 import {
@@ -23,6 +21,7 @@ import { selectedExclusions } from "./exclusion.js";
 import { projectionReceipt } from "./summary-projection.js";
 import { readProjectionStamp } from "./summary-policy.js";
 import { ALLOCATION_SOURCE } from "./numbering.js";
+import { RELEASE_TARGET_KEY, RELEASE_REPORT_VERSION } from "./release-report.js";
 import { initialReminderState } from "./reminder.js";
 
 const reminderStateSchema = z.object({
@@ -81,27 +80,19 @@ const entrySchema = z.object({
     preview: z.string(),
     status: z.enum(["available", "queued", "released", "summarized"]),
     queuedAt: z.number().int().nonnegative().nullable(),
+    releasedBlockIndex: z.number().int().nonnegative().nullable(),
+    queuedAtBusinessStep: z.number().int().nonnegative().nullable(),
     reason: z.string().nullable(),
     releaseMode: z.enum(["inline", "summary"]).default("summary"),
     admittedAtBusinessStep: z.number().int().nonnegative().default(0),
 });
 export const intentSchema = z.object({
-    version: z.literal(4),
+    version: z.literal(8),
     kind: z.enum(["release", "summary"]),
     sessionId: z.string(),
     ids: z.array(z.string().regex(ID_PATTERN)).max(128),
     reason: z.string().max(1000),
 });
-const storedIntentSchema = z.union([
-    intentSchema,
-    intentSchema.extend({ version: z.literal(6) }),
-    intentSchema.extend({ version: z.literal(5) }),
-    intentSchema.extend({ version: z.literal(3) }),
-    intentSchema.extend({
-        version: z.literal(2),
-        ids: z.array(z.string().regex(/^§[1-9]\d*§$/)).max(128),
-    }),
-]);
 const summaryRequestSchema = z.object({
     seq: z.number().int().nonnegative(),
     status: z.enum(["queued", "applied", "failed"]),
@@ -114,6 +105,20 @@ export const ledgerSchema = z.object({
     pendingBusinessStep: z.boolean().default(false),
     lastReleaseProgressSeq: z.number().int().nonnegative().default(0),
     reminderState: reminderStateSchema.default(initialReminderState),
+    pendingInlineRelease: z
+        .object({
+            pruneSeq: z.number().int().nonnegative(),
+            sourceSeq: z.number().int().nonnegative(),
+            ids: z.array(z.string().regex(ID_PATTERN)),
+        })
+        .nullable(),
+    lastSummaryFailure: z
+        .object({
+            seq: z.number().int().nonnegative(),
+            error: z.string(),
+            businessStep: z.number().int().nonnegative(),
+        })
+        .nullable(),
     numbering: numberingSchema,
     surface: z.array(z.number().int().nonnegative()),
     summaryRequests: z.array(summaryRequestSchema),
@@ -168,7 +173,15 @@ function readIntent(event: SessionEvent, name: string) {
         }
     }
     if (value === null || typeof value !== "object" || !(RECEIPT_KEY in value)) return null;
-    const parsed = storedIntentSchema.safeParse(value[RECEIPT_KEY]);
+    let receipt = value[RECEIPT_KEY];
+    if (event.type === "tool/ptc-dispatch" && receipt !== null && typeof receipt === "object") {
+        const args = z
+            .object({ reason: z.string().trim().min(1).max(1000) })
+            .safeParse(event.data.arguments);
+        if (!args.success) return null;
+        receipt = { ...receipt, reason: args.data.reason };
+    }
+    const parsed = intentSchema.safeParse(receipt);
     return parsed.success ? parsed.data : null;
 }
 function withAttachmentEntries(state: LedgerState): LedgerState {
@@ -193,6 +206,8 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
                 preview: `${item.block.attachment.name ?? item.kind} (${item.block.attachment.bytes} bytes)`,
                 status: item.currentSeq === null ? ("summarized" as const) : ("available" as const),
                 queuedAt: null,
+                queuedAtBusinessStep: null,
+                releasedBlockIndex: null,
                 releaseMode: "summary" as const,
                 admittedAtBusinessStep: state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
                 reason: null,
@@ -204,7 +219,7 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
 }
 export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     key: "contextCompression",
-    stateVersion: 13,
+    stateVersion: 16,
     stateSchema: ledgerSchema,
     init: () => ({
         entries: [],
@@ -212,6 +227,8 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
         pendingBusinessStep: false,
         lastReleaseProgressSeq: 0,
         reminderState: initialReminderState(),
+        pendingInlineRelease: null,
+        lastSummaryFailure: null,
         numbering: initialNumbering(),
         surface: [],
         summaryRequests: [],
@@ -240,12 +257,14 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 businessSteps: state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
                 pendingBusinessStep: false,
             };
-        if (
+        const reminderSource =
             event.type === "user/message" &&
             event.surfaceOp === "append" &&
             event.data.source.kind === ALLOCATION_SOURCE
-        ) {
-            const parsed = reminderStateSchema.safeParse(event.data.source.releaseReminderState);
+                ? event.data.source
+                : null;
+        if (reminderSource !== null) {
+            const parsed = reminderStateSchema.safeParse(reminderSource.releaseReminderState);
             if (parsed.success) state = { ...state, reminderState: parsed.data };
         }
         const numbering = foldNumbering(state.numbering, event);
@@ -266,6 +285,45 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                           }
                         : request,
                 ),
+            };
+        }
+        if (event.type === "compaction/prune") {
+            const parsed = z
+                .object({
+                    shadowedSeqs: z.tuple([z.number().int().nonnegative()]),
+                    [RELEASE_TARGET_KEY]: z.object({
+                        version: z.literal(RELEASE_REPORT_VERSION),
+                        sourceSeq: z.number().int().nonnegative(),
+                        ids: z.array(z.string().regex(ID_PATTERN)).min(1),
+                        blocks: z.array(
+                            z.object({
+                                id: z.string().regex(ID_PATTERN),
+                                index: z.number().int().nonnegative(),
+                            }),
+                        ),
+                    }),
+                })
+                .safeParse(event.data);
+            const target =
+                parsed.success &&
+                parsed.data.shadowedSeqs[0] === parsed.data[RELEASE_TARGET_KEY].sourceSeq
+                    ? parsed.data[RELEASE_TARGET_KEY]
+                    : null;
+            const blocks = new Map(target?.blocks.map((block) => [block.id, block.index] as const));
+            return {
+                ...state,
+                pendingInlineRelease:
+                    target === null
+                        ? null
+                        : { pruneSeq: event.seq, sourceSeq: target.sourceSeq, ids: target.ids },
+                entries:
+                    target === null
+                        ? state.entries
+                        : state.entries.map((entry) =>
+                              target.ids.includes(entry.id)
+                                  ? { ...entry, releasedBlockIndex: blocks.get(entry.id) ?? null }
+                                  : entry,
+                          ),
             };
         }
         if (event.type === "compaction/start")
@@ -313,6 +371,14 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 activeStart: null,
                 activeCompactionId: null,
                 pendingSummary: null,
+                lastSummaryFailure:
+                    event.data.error === undefined
+                        ? state.lastSummaryFailure
+                        : {
+                              seq: event.seq,
+                              error: event.data.error,
+                              businessStep: state.businessSteps,
+                          },
                 summaryRequests:
                     event.data.error === undefined || start === null
                         ? state.summaryRequests
@@ -348,7 +414,6 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 ...state.surface.slice(end + 1),
             ];
         }
-        const updatedNumbering = replaceNumberedSurface(state.numbering, event, removed);
         const removedSet = new Set(removed);
         const affected = state.entries.filter(
             (entry) => entry.currentSeq !== null && removedSet.has(entry.currentSeq),
@@ -377,18 +442,34 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 : event.type === "assistant/message" || event.type === "tool/result"
                   ? event.data.message
                   : null;
+        const pendingRelease = state.pendingInlineRelease;
+        const confirmedInline =
+            !checkpoint &&
+            pendingRelease !== null &&
+            event.seq === pendingRelease.pruneSeq + 1 &&
+            removed.length === 1 &&
+            removed[0] === pendingRelease.sourceSeq &&
+            event.sourceEventSeqs?.some((seq) => seq === pendingRelease.sourceSeq) &&
+            message !== null &&
+            (message.role === "user" || message.role === "tool");
         const inlineReleased = new Set(
-            affected
-                .filter(
-                    (entry) =>
-                        !checkpoint &&
-                        (entry.status === "queued" || entry.status === "released") &&
-                        entry.releaseMode === "inline" &&
-                        event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) &&
-                        message !== null &&
-                        isReleasedContent(message.content, entry.id),
-                )
-                .map((entry) => entry.id),
+            confirmedInline
+                ? affected
+                      .filter(
+                          (entry) =>
+                              (entry.status === "queued" || entry.status === "released") &&
+                              entry.releaseMode === "inline" &&
+                              pendingRelease.ids.includes(entry.id) &&
+                              (entry.role === "tool" || entry.releasedBlockIndex !== null),
+                      )
+                      .map((entry) => entry.id)
+                : [],
+        );
+        const updatedNumbering = replaceNumberedSurface(
+            state.numbering,
+            event,
+            removed,
+            inlineReleased,
         );
         let entries = state.entries.map((entry) => {
             if (entry.currentSeq === null || !removedSet.has(entry.currentSeq)) return entry;
@@ -403,12 +484,18 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                     currentSeq: inlineReleased.has(entry.id) ? event.seq : null,
                 };
             }
+            if (confirmedInline && entry.status === "released" && entry.releasedBlockIndex !== null)
+                return { ...entry, currentSeq: event.seq };
             if (!checkpoint && (entry.role === "image" || entry.role === "file")) {
                 const attachment = updatedNumbering.attachments.find(
                     (item) => item.id === entry.id,
                 );
                 if (attachment?.currentSeq != null)
-                    return { ...entry, currentSeq: attachment.currentSeq };
+                    return {
+                        ...entry,
+                        currentSeq: attachment.currentSeq,
+                        releasedBlockIndex: null,
+                    };
             }
             if (
                 !checkpoint &&
@@ -417,25 +504,20 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 message?.role === entry.role &&
                 message.id === entry.messageId
             ) {
-                const released =
-                    entry.status === "queued" &&
-                    event.sourceEventSeqs?.some((seq) => seq === entry.currentSeq) &&
-                    [entry.id, legacyId(entry.id)].some((id) =>
-                        isReleasedContent(message.content, id),
-                    );
                 return {
                     ...entry,
                     currentSeq: event.seq,
-                    status: released ? ("released" as const) : entry.status,
-                    preview: released ? "" : previewContent(message.content),
+                    preview: entry.status === "released" ? "" : previewContent(message.content),
                 };
             }
             return {
                 ...entry,
                 currentSeq: null,
-                status: committedExclusions.has(entry.id)
-                    ? ("released" as const)
-                    : ("summarized" as const),
+                releasedBlockIndex: null,
+                status:
+                    entry.status === "released" || committedExclusions.has(entry.id)
+                        ? ("released" as const)
+                        : ("summarized" as const),
                 preview: "",
             };
         });
@@ -444,6 +526,12 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
             surface,
             numbering: updatedNumbering,
             entries,
+            pendingInlineRelease: null,
+            lastSummaryFailure: confirmed ? null : state.lastSummaryFailure,
+            lastReleaseProgressSeq:
+                inlineReleased.size > 0 || (confirmed && committedExclusions.size > 0)
+                    ? event.seq
+                    : state.lastReleaseProgressSeq,
             lastSummary: confirmed
                 ? {
                       seq: event.seq,
@@ -492,6 +580,8 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                         admittedAtBusinessStep:
                             state.businessSteps + (state.pendingBusinessStep ? 1 : 0),
                         queuedAt: null,
+                        queuedAtBusinessStep: null,
+                        releasedBlockIndex: null,
                         reason: null,
                     },
                 ];
@@ -507,7 +597,7 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
 };
 function applyIntent(
     state: LedgerState,
-    intent: z.infer<typeof storedIntentSchema>,
+    intent: z.infer<typeof intentSchema>,
     seq: number,
 ): LedgerState {
     if (intent.kind === "summary")
@@ -519,34 +609,27 @@ function applyIntent(
                     seq,
                     status: "queued",
                     error: null,
-                    retryable: intent.version === 5,
+                    retryable: true,
                 },
             ],
         };
-    const marked = new Set(
-        intent.version !== 2
-            ? intent.ids.map(normalizeId)
-            : intent.ids.flatMap((id) =>
-                  state.numbering.slots
-                      .filter((slot) => legacyId(slot.id) === id && slot.role === "tool")
-                      .map((slot) => slot.id),
-              ),
-    );
+    const marked = new Set(intent.ids.map(normalizeId));
     return {
         ...state,
-        lastReleaseProgressSeq:
-            intent.version === 6 &&
-            state.entries.some((entry) => marked.has(entry.id) && entry.status === "available")
-                ? seq
-                : state.lastReleaseProgressSeq,
+        lastReleaseProgressSeq: state.entries.some(
+            (entry) => marked.has(entry.id) && entry.status === "available",
+        )
+            ? seq
+            : state.lastReleaseProgressSeq,
         entries: state.entries.map((entry) =>
             marked.has(entry.id) && entry.status === "available"
                 ? {
                       ...entry,
                       status: "queued",
                       queuedAt: seq,
+                      queuedAtBusinessStep: state.businessSteps,
                       reason: intent.reason,
-                      releaseMode: intent.version === 6 ? "inline" : "summary",
+                      releaseMode: "inline",
                   }
                 : entry,
         ),

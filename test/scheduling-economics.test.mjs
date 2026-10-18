@@ -62,6 +62,56 @@ test("configured payback horizons have exact boundaries and elapsed steps do not
     }
 });
 
+test("inline release is discounted from summary gains while the filtered summary is charged once", () => {
+    const baseline = planScheduledCompaction(candidate());
+    const discounted = planScheduledCompaction(candidate({ inlineReleaseTokens: 4000 }));
+    assert.equal(baseline.inlineReleaseTokens, 0);
+    assert.equal(baseline.postReleaseTokens, 12000);
+    assert.equal(baseline.netSavingTokens, 6800);
+    assert.equal(discounted.inlineReleaseTokens, 4000);
+    assert.equal(discounted.netSavingTokens, 2800);
+    assert.equal(discounted.reason, "not_paid_back");
+    assert.equal(discounted.filterInputTokens, baseline.filterInputTokens);
+    assert.equal(discounted.predictedSummaryTokens, baseline.predictedSummaryTokens);
+    assert.equal(discounted.summaryCost, baseline.summaryCost);
+    assert.equal(discounted.summaryCost, 6000 + 1200);
+    const entirelyReleased = planScheduledCompaction(candidate({ inlineReleaseTokens: 8000 }));
+    assert.equal(entirelyReleased.netSavingTokens, 0);
+    assert.equal(entirelyReleased.reason, "min_savings");
+    assert.equal(entirelyReleased.summaryCost, baseline.summaryCost);
+});
+
+test("the ratio gate uses the prompt remaining after release without changing summary cost", () => {
+    const policy = { minSavingsRatio: 0.5, paybackTurns: 96 };
+    const before = planScheduledCompaction(candidate({ inlineReleaseTokens: 2000 }), policy);
+    const after = planScheduledCompaction(
+        candidate({ inlineReleaseTokens: 2000, postReleaseTokens: 6000 }),
+        policy,
+    );
+    assert.equal(before.netSavingTokens, 4800);
+    assert.equal(before.savingsRatio, 0.4);
+    assert.equal(before.reason, "min_ratio");
+    assert.equal(after.postReleaseTokens, 6000);
+    assert.equal(after.savingsRatio, 0.8);
+    assert.equal(after.reason, "eligible");
+    assert.equal(after.summaryCost, before.summaryCost);
+    assert.equal(after.breakEvenTurns, before.breakEvenTurns);
+});
+
+test("an observed cache miss remains diagnostic and does not waive future rebuild or summary costs", () => {
+    const { cacheState: cachedState, ...cached } = planScheduledCompaction(
+        candidate({ cacheState: "cached" }),
+    );
+    const { cacheState: uncachedState, ...uncached } = planScheduledCompaction(
+        candidate({ cacheState: "uncached" }),
+    );
+    assert.equal(cachedState, "cached");
+    assert.equal(uncachedState, "uncached");
+    assert.ok(uncached.initialRebuildPenalty > 0);
+    assert.ok(uncached.summaryCost > 0);
+    assert.deepEqual(uncached, cached);
+});
+
 async function history(t, scheduling = {}, compaction = {}) {
     const f = await fixture({ compaction: { retainTokens: 256, ...compaction }, scheduling });
     t.after(f.close);

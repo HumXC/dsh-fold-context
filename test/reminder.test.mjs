@@ -9,7 +9,7 @@ import {
 
 function candidate(overrides = {}) {
     return {
-        id: "§T1",
+        id: "1",
         tool: "read",
         preview: "finished evidence",
         tokens: 16000,
@@ -261,7 +261,7 @@ test("eight thousand new candidate tokens rearms backoff but still requires the 
 test("candidate identity churn without growth or semantic progress does not rearm", () => {
     const previous = ignoredTwice();
     const changed = planReleaseReminder(
-        input({ step: 24, previous, candidates: [candidate({ id: "§T999", seq: 999 })] }),
+        input({ step: 24, previous, candidates: [candidate({ id: "999", seq: 999 })] }),
     );
     assert.equal(changed.reason, "ignored_backoff");
     assert.equal(changed.state.ignoredCount, 2);
@@ -323,7 +323,7 @@ test("ranking prefers reclaim then newer sequence and caps suggestions without c
 
 test("fingerprints use canonical IDs of the full ready pool, bounded independently of pool size", () => {
     const candidates = Array.from({ length: 1000 }, (_, index) =>
-        candidate({ id: `§T${index}`, seq: index, tokens: 100 }),
+        candidate({ id: String(index + 1), seq: index, tokens: 100 }),
     );
     const original = planReleaseReminder(input({ candidates }));
     assert.equal(original.candidates.length, 5);
@@ -378,7 +378,7 @@ test("unsafe clocks, duplicate ready identities and overflowing totals fail expl
                 input({
                     candidates: [
                         candidate({ tokens: Number.MAX_SAFE_INTEGER }),
-                        candidate({ id: "§T2", tokens: 1 }),
+                        candidate({ id: "2", tokens: 1 }),
                     ],
                 }),
             ),

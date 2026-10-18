@@ -15,7 +15,7 @@ function candidate(overrides = {}) {
         prefixTokens: 1000,
         excludedTokens: 2000,
         stepsSinceSummary: 8,
-        markedIds: ["§T17"],
+        markedIds: ["17"],
         routeSignature: "summary-route-v1",
         ...overrides,
     };
@@ -169,12 +169,11 @@ test("selector rejects unsafe identities and budgets instead of guessing a range
     );
 });
 
-test("cheap cached reads increase heuristic payback; explicitly uncached input is more eligible", () => {
+test("historical cache misses keep conservative future costs unless independent work is proved", () => {
     const unknown = planScheduledCompaction(candidate());
     const cached = planScheduledCompaction(candidate({ cacheState: "cached" }));
-    const uncached = planScheduledCompaction(candidate({ cacheState: "uncached" }));
+    const miss = planScheduledCompaction(candidate({ cacheState: "uncached" }));
     assert.equal(unknown.heuristic, "HEURISTIC");
-    assert.equal(unknown.cacheState, "unknown");
     assert.equal(unknown.cachedPrefixAssumed, true);
     assert.equal(unknown.breakEvenTurns, cached.breakEvenTurns);
     assert.equal(cached.predictedSummaryTokens, 1200);
@@ -186,19 +185,22 @@ test("cheap cached reads increase heuristic payback; explicitly uncached input i
     assert.equal(cached.breakEvenTurns, 17);
     assert.equal(cached.reason, "eligible");
     assert.equal(planScheduledCompaction(candidate(), { paybackTurns: 8 }).reason, "not_paid_back");
-    assert.equal(uncached.cachedPrefixAssumed, false);
-    assert.equal(uncached.effectiveCacheReadRatio, 1);
-    assert.equal(uncached.initialRebuildPenalty, 0);
-    assert.equal(uncached.breakEvenTurns, 2);
-    assert.equal(uncached.decision, "execute");
+    assert.equal(miss.cachedPrefixAssumed, true);
+    assert.equal(miss.effectiveCacheReadRatio, 0.1);
+    assert.equal(miss.initialRebuildPenalty, cached.initialRebuildPenalty);
+    assert.equal(miss.breakEvenTurns, cached.breakEvenTurns);
+    const independentlyPaid = planScheduledCompaction(
+        candidate({ independentRebuildTokens: 4200 }),
+    );
+    assert.equal(independentlyPaid.initialRebuildPenalty, 0);
+    assert.equal(independentlyPaid.summaryCost, cached.summaryCost);
+    assert.equal(independentlyPaid.breakEvenTurns, 11);
     const moreExpensiveReads = planScheduledCompaction(candidate(), { cacheReadRatio: 0.5 });
     assert.ok(cached.breakEvenTurns > moreExpensiveReads.breakEvenTurns);
-    assert.equal(moreExpensiveReads.reason, "eligible");
     const override = planScheduledCompaction(candidate({ effectiveCacheReadRatio: 1 }));
     assert.equal(override.initialRebuildPenalty, 0);
-    assert.equal(override.breakEvenTurns, uncached.breakEvenTurns);
+    assert.equal(override.breakEvenTurns, 2);
 });
-
 test("a covering summary saves the full unmarked span as well as excluded marks", () => {
     const plan = planScheduledCompaction(
         candidate({
@@ -281,6 +283,7 @@ test("interval, marks, and global savings ratio gate real boundary cases", () =>
         selectedTokens: 2560,
         excludedTokens: 0,
         cacheState: "uncached",
+        effectiveCacheReadRatio: 1,
     });
     assert.equal(planScheduledCompaction(atMinimum).netSavingTokens, 2048);
     assert.equal(planScheduledCompaction(atMinimum).savingsRatio, 0.2);
@@ -388,7 +391,7 @@ test("policy and estimates reject nonfinite, unsafe, and incoherent values", () 
 });
 
 test("plans are deterministic finite JSON and leave frozen caller inputs unchanged", () => {
-    const input = Object.freeze(candidate({ markedIds: Object.freeze(["§T17", "§U3", "§T17"]) }));
+    const input = Object.freeze(candidate({ markedIds: Object.freeze(["17", "3", "17"]) }));
     const before = JSON.stringify(input);
     const policy = resolveSchedulingPolicy({ paybackTurns: 20 });
     const first = planScheduledCompaction(input, policy);
@@ -396,7 +399,7 @@ test("plans are deterministic finite JSON and leave frozen caller inputs unchang
     assert.deepEqual(first, second);
     assert.deepEqual(JSON.parse(JSON.stringify(first)), first);
     assert.equal(JSON.stringify(input), before);
-    assert.deepEqual(first.markedIds, ["§T17", "§U3"]);
+    assert.deepEqual(first.markedIds, ["17", "3"]);
     assert.equal(first.routeSignature, "summary-route-v1");
     for (const value of Object.values(first)) {
         if (typeof value === "number") assert.ok(Number.isFinite(value) && value >= 0);

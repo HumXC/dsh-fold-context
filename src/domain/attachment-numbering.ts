@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
+import { ID_PATTERN } from "./protocol.js";
 
 export const attachmentBlockSchema = z.discriminatedUnion("type", [
     z.object({
@@ -27,7 +28,7 @@ export const attachmentBlockSchema = z.discriminatedUnion("type", [
     }),
 ]);
 export const attachmentSlotSchema = z.object({
-    id: z.string().regex(/^§[IF][1-9]\d*§$/),
+    id: z.string().regex(ID_PATTERN),
     kind: z.enum(["image", "file"]),
     ownerId: z.string(),
     role: z.enum(["user", "assistant", "tool"]),
@@ -37,13 +38,9 @@ export const attachmentSlotSchema = z.object({
     currentBlockIndex: z.number().int().nonnegative().nullable(),
     status: z.enum(["bound", "summarized"]),
     block: attachmentBlockSchema,
+    declared: z.boolean(),
 });
 export type AttachmentSlot = z.infer<typeof attachmentSlotSchema>;
 export type AttachmentBlock = Extract<ContentBlock, { type: "image" | "file" }>;
 export const isAttachmentBlock = (block: ContentBlock): block is AttachmentBlock =>
     block.type === "image" || block.type === "file";
-export function attachmentLabel(kind: "image" | "file", ordinal: number): string {
-    if (!Number.isSafeInteger(ordinal) || ordinal < 1)
-        throw new Error("fold-context: invalid attachment ordinal");
-    return `§${kind === "image" ? "I" : "F"}${ordinal}§`;
-}

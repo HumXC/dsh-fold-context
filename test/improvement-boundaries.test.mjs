@@ -63,7 +63,7 @@ for (const queued of [false, true]) {
                 .state(f.session)
                 .entries.find((entry) => entry.messageId === message.id).id;
             const outcome = await f.invoke("context_release", {
-                ids: [id],
+                ids: [Number(id)],
                 reason: "Consumed text",
             });
             assert.equal(outcome.isError, false);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { loopFixture, call } from "./loop-fixture.mjs";
 import { temporaryRoot, png } from "./attachment-fixture.mjs";
+import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 function result(session, name) {
     const events = session.snapshotEvents();
@@ -38,14 +39,17 @@ test("real AgentLoop releases only selected attachment occurrences before recove
                 const occurrences = state.numbering.attachments;
                 assert.deepEqual(
                     occurrences.map((item) => item.id),
-                    ["§I2§", "§I3§", "§F4§", "§F5§"],
+                    ["2", "3", "4", "5"],
                 );
                 ids = [occurrences[0].id, occurrences[2].id];
                 siblings = [occurrences[1], occurrences[3]];
                 originalInput = session
                     .snapshotEvents()
                     .find((event) => event.seq === occurrences[0].sourceSeq);
-                return call("context_release", { ids, reason: "both attachments consumed" });
+                return call("context_release", {
+                    ids: ids.map(Number),
+                    reason: "both attachments consumed",
+                });
             },
             (_request, current) => {
                 assert.equal(current.summaries.length, 0);
@@ -58,15 +62,12 @@ test("real AgentLoop releases only selected attachment occurrences before recove
                     .deriveMessages()
                     .find((message) => message.id === originalInput.data.id);
                 assert.ok(replacement);
-                const expected = structuredClone(content);
+                const expected = structuredClone(originalInput.data.content);
                 for (const [index, id] of [
                     [1, ids[0]],
                     [4, ids[1]],
                 ]) {
-                    assert.match(
-                        replacement.content[index].text,
-                        new RegExp(id.replace(/§$/, "R§")),
-                    );
+                    assert.equal(replacement.content[index].text, `[released ${id}]`);
                     expected[index] = replacement.content[index];
                 }
                 assert.deepEqual(
@@ -91,7 +92,7 @@ test("real AgentLoop releases only selected attachment occurrences before recove
                     ),
                     JSON.stringify(originalInput),
                 );
-                return call("context_expand", { id: ids[0].replace(/§$/, "R§") });
+                return call("context_expand", { id: Number(ids[0]) });
             },
             call("nested_file"),
             (request, current) => {
@@ -137,7 +138,7 @@ test("real AgentLoop releases only selected attachment occurrences before recove
             execute: async (_args, exec) => {
                 const outcome = await world.ctx.tools.execute({
                     name: "context_expand",
-                    arguments: { id: ids[1].replace(/§$/, "R§") },
+                    arguments: { id: Number(ids[1]) },
                     callId: `${exec.callId}:child`,
                     agent: exec.agent,
                     parent: exec.token,
@@ -149,6 +150,7 @@ test("real AgentLoop releases only selected attachment occurrences before recove
             },
         }),
     );
+    installForcedReleaseBoundary(world);
     const image = await world.attachments.saveImage({ data: png(), mediaType: "image/png" });
     const file = await world.attachments.saveFile({
         data: Buffer.from("EXACT_FILE_BYTES\n"),
@@ -200,7 +202,10 @@ test("a released tool body and its child image remain archived after a covering 
                 originalResult = session
                     .snapshotEvents()
                     .find((event) => event.seq === entry.sourceSeq);
-                return call("context_release", { ids: [target], reason: "visual result consumed" });
+                return call("context_release", {
+                    ids: [Number(target)],
+                    reason: "visual result consumed",
+                });
             },
             (request, current) => {
                 const state = current.engine.state(current.sessions.list()[0]);
@@ -215,7 +220,9 @@ test("a released tool body and its child image remain archived after a covering 
                     ).data.foldContextRelease;
                 assert.equal(report.released.length, 2);
                 assert.deepEqual(report.tokenEstimate, {
-                    beforeTokens: world.ctx.tokenMeter.estimateMessage(originalResult.data.message),
+                    beforeTokens: world.ctx.tokenMeter.estimateMessage(
+                        session.eventAt(report.targetSeq).data.message,
+                    ),
                     afterTokens: world.ctx.tokenMeter.estimateMessage(
                         session.eventAt(report.completionSeq).data.message,
                     ),
@@ -239,10 +246,11 @@ test("a released tool body and its child image remain archived after a covering 
                         .entries.find((entry) => entry.id === child.id).status,
                     "released",
                 );
-                return call("context_expand", { id: child.id.replace(/§$/, "R§") });
+                return call("context_expand", { id: Number(child.id) });
             },
         ],
     });
+    installForcedReleaseBoundary(world);
     const ref = await world.attachments.saveImage({ data: png(), mediaType: "image/png" });
     world.ctx.tools.register(
         defineTool({
@@ -261,9 +269,9 @@ test("a released tool body and its child image remain archived after a covering 
     assert.equal(world.summaries.length, 1);
     const state = world.engine.state(handle.agent.session);
     const receipt = state.lastSummary;
-    assert.equal(state.entries.find((entry) => entry.id === target).status, "summarized");
+    assert.equal(state.entries.find((entry) => entry.id === target).status, "released");
     assert.equal(state.entries.find((entry) => entry.id === child.id).status, "released");
-    assert.equal(receipt.excludedIds.includes(target), false);
+    assert.equal(receipt.excludedIds.includes(target), true);
     assert.equal(receipt.excludedIds.includes(child.id), false);
     assert.equal(
         receipt.projection.attachments.some((item) => item.id === child.id),

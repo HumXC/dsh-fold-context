@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { SessionSeq, SessionLogOffset, buildForkSeed } from "@deepseek-ai/dsh-session";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
 import { png } from "./attachment-fixture.mjs";
+import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 const root = process.env.FOLD_CONTEXT_TEST_ROOT;
 await assertTestRoot(root);
@@ -30,19 +31,19 @@ try {
             scheduling: { enabled: false },
             responses: [
                 call("context_release", {
-                    ids: ["§I2§", "§F4§"],
+                    ids: [2, 4],
                     reason: "consumed first attachment occurrences",
                 }),
                 (_request, current) => {
                     assert.equal(current.summaries.length, 0);
                     const state = current.engine.state(current.sessions.list()[0]);
                     assert.equal(state.lastSummary, null);
-                    for (const id of ["§I2§", "§F4§"])
+                    for (const id of ["2", "4"])
                         assert.equal(
                             state.entries.find((entry) => entry.id === id).status,
                             "released",
                         );
-                    for (const id of ["§I3§", "§F5§"])
+                    for (const id of ["3", "5"])
                         assert.equal(
                             state.entries.find((entry) => entry.id === id).status,
                             "available",
@@ -53,6 +54,7 @@ try {
                 },
             ],
         });
+        installForcedReleaseBoundary(world);
         const image = await world.attachments.saveImage({
             data: png(),
             mediaType: "image/png",
@@ -76,25 +78,25 @@ try {
         const state = world.engine.state(session);
         assert.equal(world.summaries.length, 0);
         assert.equal(state.lastSummary, null);
-        const sourceSeq = state.numbering.attachments.find((item) => item.id === "§I2§").sourceSeq;
+        const sourceSeq = state.numbering.attachments.find((item) => item.id === "2").sourceSeq;
         const source = session.snapshotEvents().find((event) => event.seq === sourceSeq);
         assert.deepEqual(source.data.content, content);
         const replacement = session
             .deriveMessages()
             .find((message) => message.id === source.data.id);
         assert.ok(replacement);
-        const expectedContent = structuredClone(content);
+        const expectedContent = structuredClone(source.data.content);
         for (const [index, id] of [
-            [1, "§I2R§"],
-            [3, "§F4R§"],
+            [1, "2"],
+            [3, "4"],
         ]) {
-            assert.match(replacement.content[index].text, new RegExp(id));
+            assert.equal(replacement.content[index].text, `[released ${id}]`);
             expectedContent[index] = replacement.content[index];
         }
         assert.deepEqual(replacement.content, expectedContent);
         for (const [id, index] of [
-            ["§I3§", 2],
-            ["§F5§", 4],
+            ["3", 2],
+            ["5", 4],
         ]) {
             const slot = state.numbering.attachments.find((item) => item.id === id);
             assert.equal(slot.blockIndex, index);
@@ -129,10 +131,7 @@ try {
         world = await loopFixture(root, {
             attachments: true,
             inputModalities: ["text", "image"],
-            responses: [
-                call("context_expand", { id: "§I2R§" }),
-                call("context_expand", { id: "§F4R§" }),
-            ],
+            responses: [call("context_expand", { id: 2 }), call("context_expand", { id: 4 })],
         });
         const parent = await world.resume(expected.sessionId);
         assert.deepEqual(world.engine.state(parent.agent.session).numbering, expected.numbering);
@@ -146,11 +145,11 @@ try {
         );
         assert.deepEqual(parent.agent.session.surface.nodes, expected.surface);
         assert.deepEqual(world.engine.state(parent.agent.session).entries, expected.entries);
-        const imageRecovery = await expand(parent, "§I2R§");
+        const imageRecovery = await expand(parent, 2);
         assert.deepEqual(imageRecovery.attachment, expected.image);
         assert.equal(imageRecovery.releaseStatus, "released");
         assert.equal(imageRecovery.verifiedBytes, expected.image.bytes);
-        const recovered = await expand(parent, "§F4R§");
+        const recovered = await expand(parent, 4);
         assert.deepEqual(recovered.attachment, expected.file);
         assert.equal(recovered.releaseStatus, "released");
         assert.deepEqual(
@@ -180,8 +179,8 @@ try {
             inheritedEventCount: SessionLogOffset(boundary + 1),
             meta: { cwd: root, parentSession: parent.agent.session.id, isSeeded: true },
         });
-        assert.deepEqual((await expand(child, "§I2R§")).attachment, expected.image);
-        assert.deepEqual((await expand(child, "§F4R§")).attachment, expected.file);
+        assert.deepEqual((await expand(child, 2)).attachment, expected.image);
+        assert.deepEqual((await expand(child, 4)).attachment, expected.file);
         const privateFile = await world.attachments.saveFile({
             data: Buffer.from("PRIVATE_CHILD_ATTACHMENT"),
             name: "private-child.txt",
@@ -195,7 +194,7 @@ try {
             .numbering.attachments.find(
                 (item) => item.block.attachment.attachmentId === privateFile.attachmentId,
             ).id;
-        const denied = await expand(parent, privateId);
+        const denied = await expand(parent, Number(privateId));
         assert.equal(denied.status, "unknown");
         assert.equal(
             world.engine.state(parent.agent.session).numbering.nextNumber,
@@ -225,12 +224,12 @@ try {
         world = await loopFixture(root, { attachments: true, inputModalities: ["text", "image"] });
         const handle = await world.resume(child.sessionId);
         assert.deepEqual(world.engine.state(handle.agent.session).numbering, child.numbering);
-        assert.deepEqual((await expand(handle, "§I2R§")).attachment, expected.image);
-        assert.deepEqual((await expand(handle, "§F4R§")).attachment, expected.file);
+        assert.deepEqual((await expand(handle, 2)).attachment, expected.image);
+        assert.deepEqual((await expand(handle, 4)).attachment, expected.file);
         const state = world.engine.state(handle.agent.session);
-        for (const id of ["§I2§", "§F4§"])
+        for (const id of ["2", "4"])
             assert.equal(state.entries.find((entry) => entry.id === id).status, "released");
-        for (const id of ["§I3§", "§F5§"])
+        for (const id of ["3", "5"])
             assert.equal(state.entries.find((entry) => entry.id === id).status, "available");
         assert.equal(
             JSON.stringify(
@@ -240,7 +239,7 @@ try {
             ),
             JSON.stringify(expected.source),
         );
-        assert.equal((await expand(handle, child.privateId)).representation, "file-handle");
+        assert.equal((await expand(handle, Number(child.privateId))).representation, "file-handle");
         console.log(JSON.stringify({ restoredChild: true, pid: process.pid }));
     } else throw new Error("unknown attachment persistence mode");
 } finally {
