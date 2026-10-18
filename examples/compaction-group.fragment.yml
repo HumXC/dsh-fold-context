@@ -27,7 +27,7 @@
           minSavingsTokens: 2048
           minSavingsRatio: 0.2
           expectedSummaryRatio: 0.2
-          paybackTurns: 8
+          paybackTurns: 24
           # HEURISTIC：归一化未缓存 token 成本，不是供应商费用或缓存 TTL。
           # 未知缓存保守假定前缀已缓存；实际压力/溢出与用户 /compact 绕过经济门槛。
           cacheReadRatio: 0.1

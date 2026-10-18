@@ -36,6 +36,8 @@ export interface Config {
     scheduling?: Partial<SchedulingPolicy>;
     reminders?: Partial<ReminderPolicy>;
 }
+const schedulingDefaults = resolveSchedulingPolicy();
+
 export const Config = z.object({
     uiOnly: z.boolean().default(false),
     compaction: BasicCompactionEngine.Config.default({}),
@@ -57,16 +59,43 @@ export const Config = z.object({
         .default({}),
     scheduling: z
         .object({
-            enabled: z.boolean().default(true),
-            proactive: z.boolean().default(true),
-            minIntervalSteps: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(8),
-            minSavingsTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(2048),
-            minSavingsRatio: z.number().min(0).max(1).default(0.2),
-            expectedSummaryRatio: z.number().min(0).max(Number.MAX_SAFE_INTEGER).default(0.2),
-            paybackTurns: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8),
-            cacheReadRatio: z.number().min(0).max(1).default(0.1),
-            summaryInputRatio: z.number().min(0).max(Number.MAX_SAFE_INTEGER).default(1),
-            summaryOutputRatio: z.number().min(0).max(Number.MAX_SAFE_INTEGER).default(1),
+            enabled: z.boolean().default(schedulingDefaults.enabled),
+            proactive: z.boolean().default(schedulingDefaults.proactive),
+            minIntervalSteps: z
+                .number()
+                .step(1)
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.minIntervalSteps),
+            minSavingsTokens: z
+                .number()
+                .step(1)
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.minSavingsTokens),
+            minSavingsRatio: z.number().min(0).max(1).default(schedulingDefaults.minSavingsRatio),
+            expectedSummaryRatio: z
+                .number()
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.expectedSummaryRatio),
+            paybackTurns: z
+                .number()
+                .step(1)
+                .min(1)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.paybackTurns),
+            cacheReadRatio: z.number().min(0).max(1).default(schedulingDefaults.cacheReadRatio),
+            summaryInputRatio: z
+                .number()
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.summaryInputRatio),
+            summaryOutputRatio: z
+                .number()
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .default(schedulingDefaults.summaryOutputRatio),
         })
         .default({}),
     summary: z

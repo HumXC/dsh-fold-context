@@ -11,7 +11,7 @@ import {
     createToolResultMessage,
     createUserMessage,
 } from "@deepseek-ai/dsh-llm";
-import { apply as mountCompression } from "../lib/index.js";
+import foldContext from "../lib/index.js";
 import { LocalSessionQuery } from "./query-fixture.mjs";
 
 /** Fresh Cordis world, RAM sessions and mock stream only: no network, storage backend, profile or Web. */
@@ -62,16 +62,19 @@ export async function fixture(options = {}) {
         const { ToolResultPruner } = await import("@deepseek-ai/dsh-compaction-tool-result-pruner");
         new ToolResultPruner(ctx, options.pruner);
     }
-    mountCompression(ctx, {
+    const fiber = ctx.plugin(foldContext, {
         compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
         release: { catalogLimit: 32 },
-        scheduling: options.scheduling ?? { enabled: false },
+        ...(options.scheduling === null
+            ? {}
+            : { scheduling: options.scheduling ?? { enabled: false } }),
         reminders: options.reminders ?? {},
         summary: {
             reasoning: options.reasoning ?? "omit-from-summary",
             images: options.images ?? "auto",
         },
     });
+    await fiber.await();
     const engine = ctx.compaction;
     const session = sessions.create();
     session.append("request/header", {
