@@ -80,13 +80,38 @@ window.__ModuleLoader__.load({
             execute: "可以执行",
             disabled: "未启用",
             decision: "调度结果",
-            invalid_capacity: "可用上下文容量不足",
+            invalid_capacity: "模型上下文窗口无效",
+            missing_capacity: "模型未声明上下文窗口",
+            metadata_unavailable: "无法读取模型配置",
+            no_route: "尚未配置会话模型",
+            state_changed: "规划期间会话发生变化",
+            active_compaction: "已有摘要事务正在执行",
+            no_business_evidence: "历史前缀没有新的业务证据",
+            ineffective_compaction: "上次摘要未降低实际压力",
+            paybackRequests: "预计回本请求 / 策略上限",
+            upfrontCost: "摘要与重建成本",
+            protectedInput: "固定提示与受保护输入",
+            cacheBasis: "缓存估算来源",
+            assumed_cached: "未知命中情况，保守假定已缓存",
+            primary_usage: "最近主请求的用量报告",
+            noFinitePayback: "无法预计有限回本周期",
+            costUnits: "归一化 tokens（估算）",
+            nextAction: "下一步",
+            checkModelAction: "检查会话路由与模型 contextWindow 配置。",
+            checkFailureAction: "检查最近摘要错误并修正原因，原请求会保留。",
+            checkPolicyAction: "检查 auto、enabled 和 proactive 配置。",
+            verifyUsageAction: "摘要后查看下一次主请求用量，确认压力是否下降。",
+            boundaryAction: "等待下一个可执行的步骤边界。",
+            waitSummaryAction: "等待当前摘要事务完成。",
+            continueAction: "继续当前任务；排队请求会在后续边界重新评估。",
+            fixed_overhead: "固定提示与工具定义已达到压力阈值，仅压缩历史无法达标。",
+            protected_input: "固定提示与当前任务尾部已达到压力阈值，需缩短固定输入或拆分当前任务。",
             not_paid_back: "尚未达到预计回本门槛",
             min_interval: "尚未达到最小处理间隔",
             insufficient_savings: "预计节省不足",
             min_savings: "预计节省不足",
             min_ratio: "预计节省比例不足",
-            no_selection: "没有可处理的历史区间",
+            no_selection: "没有同时满足保留预算与任务保护的完整历史前缀",
             no_marks: "没有待处理标记",
             eligible: "满足调度条件",
             legacy_request: "已有压缩请求",
@@ -180,13 +205,42 @@ window.__ModuleLoader__.load({
             execute: "Ready",
             disabled: "Disabled",
             decision: "Scheduling",
-            invalid_capacity: "Insufficient available context capacity",
+            invalid_capacity: "Invalid model context window",
+            missing_capacity: "Model context window is missing",
+            metadata_unavailable: "Model metadata unavailable",
+            no_route: "No conversation route",
+            state_changed: "Session changed during planning",
+            active_compaction: "A summary is already running",
+            no_business_evidence: "No new business evidence in the prefix",
+            ineffective_compaction: "Last summary did not reduce observed pressure",
+            paybackRequests: "Payback requests / policy limit",
+            upfrontCost: "Summary and rebuild cost",
+            protectedInput: "Fixed and protected input",
+            cacheBasis: "Cache estimate source",
+            assumed_cached: "Unknown; conservatively assumed cached",
+            primary_usage: "Latest primary request usage",
+            noFinitePayback: "No finite estimated payback",
+            costUnits: "normalized tokens (estimated)",
+            nextAction: "Next action",
+            checkModelAction: "Check the conversation route and model contextWindow.",
+            checkFailureAction:
+                "Inspect the summary error and fix its cause; queued intent is preserved.",
+            checkPolicyAction: "Inspect auto, enabled and proactive settings.",
+            verifyUsageAction:
+                "Use the next primary request's usage to verify pressure after the summary.",
+            boundaryAction: "Wait for the next eligible step boundary.",
+            waitSummaryAction: "Wait for the running summary transaction.",
+            continueAction: "Continue the task; queued intent is reconsidered at later boundaries.",
+            fixed_overhead:
+                "The fixed prompt and tool definitions reach the pressure threshold; history summaries alone cannot reach the target.",
+            protected_input:
+                "Fixed input and the active task tail reach the pressure threshold; reduce fixed input or split the task.",
             not_paid_back: "Estimated payback gate not met",
             min_interval: "Minimum interval not reached",
             insufficient_savings: "Insufficient estimated savings",
             min_savings: "Insufficient estimated savings",
             min_ratio: "Estimated savings ratio too low",
-            no_selection: "No eligible history span",
+            no_selection: "No balanced prefix meets retention and task protection",
             no_marks: "No pending marks",
             eligible: "Scheduling gates met",
             legacy_request: "Compaction already requested",
@@ -759,6 +813,27 @@ window.__ModuleLoader__.load({
                         );
                     const scheduling = object(v.scheduling) ? v.scheduling : {};
                     const plan = object(scheduling.plan) ? scheduling.plan : {};
+                    const diagnostic = object(scheduling.diagnostic) ? scheduling.diagnostic : {};
+                    const economics = object(diagnostic.economics) ? diagnostic.economics : null;
+                    const limits = object(scheduling.limits) ? scheduling.limits : null;
+                    const actionKey = [
+                        "no_route",
+                        "missing_capacity",
+                        "invalid_capacity",
+                        "metadata_unavailable",
+                    ].includes(scheduling.reason)
+                        ? "checkModelAction"
+                        : scheduling.reason === "failed_cooldown"
+                          ? "checkFailureAction"
+                          : scheduling.reason === "disabled"
+                            ? "checkPolicyAction"
+                            : text(scheduling.reason).startsWith("safety_")
+                              ? "verifyUsageAction"
+                              : ["eligible", "legacy_request"].includes(scheduling.reason)
+                                ? "boundaryAction"
+                                : scheduling.reason === "active_compaction"
+                                  ? "waitSummaryAction"
+                                  : "continueAction";
                     return h(
                         React.Fragment,
                         null,
@@ -777,6 +852,28 @@ window.__ModuleLoader__.load({
                                 ],
                                 ["reason", scheduling.reason ? t(scheduling.reason) : null],
                                 [
+                                    "paybackRequests",
+                                    economics
+                                        ? Number.isFinite(economics.breakEvenRequests)
+                                            ? `${economics.breakEvenRequests} / ${economics.expectedFutureRequests}`
+                                            : t("noFinitePayback")
+                                        : null,
+                                ],
+                                [
+                                    "upfrontCost",
+                                    economics && Number.isFinite(economics.upfrontCost)
+                                        ? `${economics.upfrontCost.toLocaleString()} ${t("costUnits")}`
+                                        : null,
+                                ],
+                                ["cacheBasis", economics ? t(economics.cacheBasis) : null],
+                                [
+                                    "protectedInput",
+                                    limits && Number.isFinite(limits.minimumPromptTokens)
+                                        ? `${limits.minimumPromptTokens.toLocaleString()} ${t("tokens")}`
+                                        : null,
+                                ],
+                                ["nextAction", diagnostic.nextAction ? t(actionKey) : null],
+                                [
                                     "estimate",
                                     Number.isFinite(plan.netSavingTokens)
                                         ? `${plan.netSavingTokens.toLocaleString()} ${t("tokens")}`
@@ -790,6 +887,13 @@ window.__ModuleLoader__.load({
                                 ],
                             ],
                         }),
+                        ...list(diagnostic.constraints).map((constraint, index) =>
+                            h(
+                                "p",
+                                { className: "fc-note", key: `constraint-${index}` },
+                                t(constraint.code),
+                            ),
+                        ),
                         v.entries.length
                             ? h(Items, { t, title: "result", items: v.entries })
                             : h("p", null, t("noRecords")),

@@ -462,9 +462,9 @@ test("only newly accepted releases advance semantic progress; compact requests p
 
 for (const { label, compaction, threshold } of [
     {
-        label: "reserved output and headroom",
-        compaction: { thresholdRatio: 1, headroomTokens: 129000 },
-        threshold: 131072 - 1024 - 129000,
+        label: "the window ratio despite large output and headroom budgets",
+        compaction: { thresholdRatio: 0.008, retainTokens: 1, headroomTokens: 129000 },
+        threshold: Math.floor(131072 * 0.008),
     },
     {
         label: "the matching model policy override",
@@ -484,7 +484,7 @@ for (const { label, compaction, threshold } of [
         threshold: Math.floor(131072 * 0.01),
     },
 ]) {
-    test(`pressure reminders use the official threshold with ${label}`, async (t) => {
+    test(`pressure reminders use the shared window threshold with ${label}`, async (t) => {
         const f = await fixture({ reminders: pressureOnly, compaction });
         t.after(f.close);
         readyEvidence(f);
@@ -506,7 +506,7 @@ for (const { label, compaction, threshold } of [
 test("admitted pressure reminders use a four-business-step cooldown", async (t) => {
     const f = await fixture({
         reminders: pressureOnly,
-        compaction: { thresholdRatio: 1, headroomTokens: 129000 },
+        compaction: { thresholdRatio: 0.008, retainTokens: 1, headroomTokens: 129000 },
     });
     t.after(f.close);
     readyEvidence(f);
@@ -535,7 +535,10 @@ test("unknown or invalid model capacity disables pressure urgency", async (t) =>
         {},
         { contextWindow: 0 },
         { contextWindow: NaN },
-        { contextWindow: 1024 },
+        { contextWindow: Infinity },
+        { contextWindow: -1 },
+        { contextWindow: 1.5 },
+        { contextWindow: Number.MAX_SAFE_INTEGER + 1 },
     ]) {
         f.llm.resolveModelInfo = async () => ({
             context,

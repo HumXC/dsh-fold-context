@@ -113,7 +113,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: STATUS_TOOL,
             description:
-                "Inspect numbered content, release states, summary coverage and receipts. Also reports the current read-only scheduling plan, estimated savings, preserved head, rebuild suffix, and wait/failure reason; query exact IDs or an owner ID for attachments.",
+                "Inspect numbered content, releases and summary coverage. Reports compaction blockers, next actions, protected input, pressure verification and payback estimates. Query exact IDs or an owner ID for attachments.",
             parameters: {
                 ids: {
                     type: "array",

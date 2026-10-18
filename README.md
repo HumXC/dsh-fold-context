@@ -65,25 +65,25 @@ pnpm build
   group: true
   disabled: false
   isolate:
-    compaction: true
-    toolResultPruner: true
+      compaction: true
+      toolResultPruner: true
   config:
-    - id: fold-context
-      name: dsh-fold-context
-      config:
-        compaction:
-          auto: true
-        scheduling:
-          enabled: true
-          proactive: true
-    - id: command-compact
-      name: "@deepseek-ai/dsh-command-compact"
-    - id: tool-result-pruner
-      name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
-      config:
-        thresholdChars: 8192
-        headChars: 4096
-        tailChars: 1024
+      - id: fold-context
+        name: dsh-fold-context
+        config:
+            compaction:
+                auto: true
+            scheduling:
+                enabled: true
+                proactive: true
+      - id: command-compact
+        name: "@deepseek-ai/dsh-command-compact"
+      - id: tool-result-pruner
+        name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+        config:
+            thresholdChars: 8192
+            headChars: 4096
+            tailChars: 1024
 ```
 
 这里，组的 `config` 是子插件列表；`fold-context` 行下的 `config` 才是本插件选项。`compaction.auto` 控制普通压力与 backlog 摘要，`scheduling.enabled` 控制经济调度，`scheduling.proactive` 控制低压力下的释放 backlog 摘要。完整可调参数及注释见[配置示例](./examples/compaction-group.fragment.yml)。
@@ -203,7 +203,7 @@ scheduling:
     minSavingsTokens: 2048
     minSavingsRatio: 0.2
     expectedSummaryRatio: 0.2
-    paybackTurns: 8
+    paybackTurns: 24
     cacheReadRatio: 0.1
     summaryInputRatio: 1
     summaryOutputRatio: 1
@@ -229,23 +229,35 @@ release:
 
 关键选项：
 
-| 选项                                   | 含义                                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `compaction.auto`                      | 关闭普通压力和 backlog 自动摘要；独立释放仍运行，实际溢出恢复、模型显式请求和用户 `/compact` 仍可执行。 |
-| `thresholdRatio`                       | 压力比例上限；输出预留与 headroom 可能让触发早于该比例。                                                |
-| `retainRatio`                          | 保留近期原文尾部的预算比例，不是压缩后的目标大小。                                                      |
-| `scheduling.enabled`                   | 开启经济调度；关闭后，模型显式请求沿用旧的强制摘要行为。                                                |
-| `scheduling.proactive`                 | 允许排队标记自动触发低压力摘要；关闭后仍可通过模型显式请求触发。                                        |
-| `minIntervalSteps`                     | 距离上次摘要至少经过多少个已提交的 assistant 步骤。                                                     |
-| `minSavingsTokens` / `minSavingsRatio` | 最低预计净缩短量，以及相对当前总输入的最低比例。                                                        |
-| `paybackTurns`                         | 允许的估算回本周期。                                                                                    |
-| `summary.reasoning`                    | 默认只从摘要输入省略 reasoning；`preserve` 将其作为历史文字保留。                                       |
-| `summary.images`                       | `auto` 仅向明确支持图片的摘要模型传原图；`references` 固定只传引用。                                    |
-| `release.catalogLimit`                 | 按需目录大小，范围 1–128；日常通知最多附带 8 条变化。                                                   |
+| 选项                                       | 含义                                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `compaction.auto`                          | 关闭普通压力和 backlog 自动摘要；独立释放仍运行，实际溢出恢复、模型显式请求和用户 `/compact` 仍可执行。 |
+| `thresholdRatio`                           | 普通压力阈值占当前 `contextWindow` 的比例。                                                             |
+| `retainRatio`                              | 近期原文尾部占当前窗口的预算比例；保留目标最多为触发阈值减 1，不是压缩后的目标大小。                    |
+| `headroomTokens` / `compaction.maxTokens`  | 原生摘要请求的默认输出预算与显式输出上限；不参与普通压力阈值计算。                                      |
+| `scheduling.enabled`                       | 开启经济调度；关闭后，模型显式请求沿用旧的强制摘要行为。                                                |
+| `scheduling.proactive`                     | 允许排队标记自动触发低压力摘要；关闭后仍可通过模型显式请求触发。                                        |
+| `minIntervalSteps`                         | 距离上次摘要至少经过多少个已提交的 assistant 步骤。                                                     |
+| `minSavingsTokens` / `minSavingsRatio`     | 最低预计净缩短量，以及相对当前总输入的最低比例。                                                        |
+| `paybackTurns`                             | 默认允许在未来 24 次主请求内估算回本，适合长会话；短任务可显式设为 8。                                  |
+| `cacheReadRatio`                           | 默认 0.1，表示缓存读取的相对成本权重；未知命中情况保守按已缓存估算，不为触发摘要而抬高它。              |
+| `expectedSummaryRatio`                     | 默认 0.2，预测摘要相对实际辅助请求输入的大小。                                                          |
+| `summaryInputRatio` / `summaryOutputRatio` | 默认均为 1，表示摘要路由输入和输出的相对成本权重；按实际路由校准。                                      |
+| `summary.reasoning`                        | 默认只从摘要输入省略 reasoning；`preserve` 将其作为历史文字保留。                                       |
+| `summary.images`                           | `auto` 仅向明确支持图片的摘要模型传原图；`references` 固定只传引用。                                    |
+| `release.catalogLimit`                     | 按需目录大小，范围 1–128；日常通知最多附带 8 条变化。                                                   |
 
-压力阈值为 `floor(min(C × thresholdRatio, C − R − headroomTokens))`，其中 C 是当前模型容量，R 是输出预留。模型专属参数可以通过官方 `compaction.modelPolicies` 配置。
+普通压力阈值为 `max(1, floor(C × thresholdRatio))`，其中 C 是当前模型的 `contextWindow`。保留尾部按 `floor(C × retainRatio)` 或显式 `retainTokens` 计算，并限制在 `0` 到 `阈值 − 1` 之间。模型专属参数通过 `compaction.modelPolicies` 配置；模型专属保留参数优先于全局设置。自动压缩、`context_status` 和释放提醒使用同一预算。
+
+主请求的输出上限由模型适配器管理。任意正安全整数窗口都能得到有效的压缩预算，包括窗口小于主请求 `maxTokens` 或固定安全余量的情况。未知、非正整数或超出安全整数范围的窗口会停用普通压力判断。`headroomTokens` 用作原生摘要的默认输出预算，显式 `compaction.maxTokens` 可以覆盖它。
+
+规划预算不代表供应商接受了相同的输入和输出组合。固定提示词、工具定义、受保护尾部及摘要本身可能超过很小的窗口；系统仍保留工具配对和当前任务，只有生成摘要后的实际用量才能验证是否达到目标。
 
 成本字段是 **HEURISTIC 估算权重**，不是供应商价格。未知缓存按已缓存前缀保守估算。真正提交摘要仍会改变历史前缀，因此不能保证缓存命中或实际节费。
+
+`context_status` 按需返回当前阻断原因及下一步动作、固定请求开销与受保护尾部的下限、摘要输入的历史/system/tools/framing 拆分，以及回本所需的未来主请求次数。缺少窗口、无效窗口和模型配置读取失败分别报告；配置读取失败时仍可检查释放 backlog，取消会保持取消结果。
+
+例如选区 8000 tokens、过滤后辅助输入 6000、保留尾部 3000、固定头部 1000 时，默认权重预测摘要 1200，摘要成本 7200，加上首次缓存重建 3780，每次后续主请求预计节省 680，约需 17 次请求回本。其他门槛满足时，默认 24 次周期允许执行，显式 8 次周期继续等待。`not_paid_back` 是对未来收益的预测；单纯多等几个步骤不会累计回本。固定输入或当前任务已超过压力阈值时，状态会明确说明仅摘要旧历史无法达到目标。
 
 ## 图片、文件与恢复边界
 

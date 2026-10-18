@@ -13,6 +13,12 @@ import { commitInlineReleases } from "./inline-release.js";
 import { canReleaseInline } from "../domain/release.js";
 import { hasSummaryBusinessEvidence } from "../domain/summary-evidence.js";
 import { createPressureProjection, planningPressure } from "../domain/pressure.js";
+import { planPressureBudget } from "../domain/pressure-budget.js";
+import {
+    describeScheduling,
+    type SchedulingLimits,
+    type SummaryInputEstimate,
+} from "../domain/scheduling-diagnostics.js";
 import {
     planReleaseReminder,
     resolveReminderPolicy,
@@ -51,6 +57,8 @@ type SummaryResult = {
 );
 interface SchedulingSnapshot {
     readonly revision: number;
+    readonly limits: SchedulingLimits | null;
+    readonly summaryInput: SummaryInputEstimate | null;
     readonly thresholdTokens: number | null;
     readonly selection: ScheduledRange | null;
     readonly plan: ScheduledCompactionPlan | null;
@@ -186,46 +194,39 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const native = this.ctx.tokenMeter.measure(session);
         return { ...native, ...planningPressure(this.pressureState(session), native) };
     }
+    private modelPressureBudget(window: number | undefined, provider: string, model: string) {
+        const override = this.config.modelPolicies.find(
+            (item) => item.provider === provider && item.model === model,
+        );
+        const budget = planPressureBudget(window, {
+            thresholdRatio: override?.thresholdRatio ?? this.config.thresholdRatio,
+            retainRatio: override?.retainRatio ?? this.config.retainRatio ?? 0,
+            retainTokens:
+                override?.retainTokens ??
+                (override?.retainRatio === undefined ? this.config.retainTokens : undefined),
+        });
+        return budget === null
+            ? null
+            : { ...budget, retries: override?.compactionRetries ?? this.config.compactionRetries };
+    }
+    private async pressureModelInfo(provider: string, model: string, signal?: AbortSignal) {
+        try {
+            const info = await this.ctx.llm.resolveModelInfo(provider, model, signal);
+            signal?.throwIfAborted();
+            return info;
+        } catch (error) {
+            signal?.throwIfAborted();
+            if (error instanceof Error && error.name === "AbortError") throw error;
+            return null;
+        }
+    }
     private async pressureBudget(agent: Agent, signal?: AbortSignal) {
         const header = agent.session.requestHeader()?.config;
         if (!header?.provider || !header.model) return null;
         const revision = agent.session.seq;
-        const info = await this.ctx.llm.resolveModelInfo(header.provider, header.model, signal);
-        signal?.throwIfAborted();
-        if (agent.session.seq !== revision) return null;
-        const override = this.config.modelPolicies.find(
-            (item) => item.provider === header.provider && item.model === header.model,
-        );
-        const window = info.context?.contextWindow;
-        const reserved = header.maxTokens ?? info.defaultMaxTokens ?? 0;
-        const headroom = override?.headroomTokens ?? this.config.headroomTokens;
-        if (
-            window === undefined ||
-            !Number.isSafeInteger(window) ||
-            window <= 0 ||
-            !Number.isSafeInteger(reserved) ||
-            reserved < 0 ||
-            window - reserved - headroom <= 0
-        )
-            return null;
-        const threshold = Math.floor(
-            Math.min(
-                window * (override?.thresholdRatio ?? this.config.thresholdRatio),
-                window - reserved - headroom,
-            ),
-        );
-        const retain =
-            override?.retainTokens ??
-            (override?.retainRatio !== undefined
-                ? Math.floor((window - reserved) * override.retainRatio)
-                : (this.config.retainTokens ??
-                  Math.floor((window - reserved) * this.config.retainRatio!)));
-        if (retain >= threshold) return null;
-        return {
-            threshold,
-            retain,
-            retries: override?.compactionRetries ?? this.config.compactionRetries,
-        };
+        const info = await this.pressureModelInfo(header.provider, header.model, signal);
+        if (agent.session.seq !== revision || info === null) return null;
+        return this.modelPressureBudget(info.context?.contextWindow, header.provider, header.model);
     }
     private retentionTokens(session: Session, retain: number, threshold: number) {
         const state = this.pressureState(session);
@@ -353,6 +354,12 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             revision: snapshot.revision,
             decision: snapshot.decision,
             reason: snapshot.reason,
+            limits: snapshot.limits === null ? null : { ...snapshot.limits },
+            summaryInput: snapshot.summaryInput === null ? null : { ...snapshot.summaryInput },
+            diagnostic: describeScheduling(
+                { ...snapshot, retryAfterSteps: snapshot.failure?.retryAfterSteps ?? 0 },
+                this.schedulingPolicy,
+            ),
             selection: snapshot.selection === null ? null : { ...snapshot.selection },
             failure: snapshot.failure === null ? null : { ...snapshot.failure },
             plan:
@@ -392,32 +399,21 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const header = session.requestHeader()?.config;
         let threshold: number | null = null;
         if (this.reminderPolicy.enabled && header?.provider && header.model) {
-            const info = await this.ctx.llm.resolveModelInfo(header.provider, header.model, signal);
+            const info = await this.pressureModelInfo(header.provider, header.model, signal);
             signal?.throwIfAborted();
             const current = session.requestHeader()?.config;
-            const override = this.config.modelPolicies.find(
-                (policy) => policy.provider === header.provider && policy.model === header.model,
-            );
-            const window = info.context?.contextWindow;
-            const reserved = header.maxTokens ?? info.defaultMaxTokens ?? 0;
-            const headroom = override?.headroomTokens ?? this.config.headroomTokens;
             if (
+                info !== null &&
                 current?.provider === header.provider &&
                 current.model === header.model &&
-                current.maxTokens === header.maxTokens &&
-                window !== undefined &&
-                Number.isSafeInteger(window) &&
-                window > 0 &&
-                Number.isSafeInteger(reserved) &&
-                reserved >= 0 &&
-                window - reserved - headroom > 0
+                current.maxTokens === header.maxTokens
             ) {
-                threshold = Math.floor(
-                    Math.min(
-                        window * (override?.thresholdRatio ?? this.config.thresholdRatio),
-                        window - reserved - headroom,
-                    ),
-                );
+                threshold =
+                    this.modelPressureBudget(
+                        info.context?.contextWindow,
+                        header.provider,
+                        header.model,
+                    )?.threshold ?? null;
             }
         }
         const state = this.state(session);
@@ -490,6 +486,8 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const failure = this.latestFailure(session, state);
         const wait = (reason: string): SchedulingSnapshot => ({
             thresholdTokens: null,
+            limits: null,
+            summaryInput: null,
             revision,
             selection: null,
             plan: null,
@@ -501,45 +499,45 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const header = session.requestHeader();
         const routed = header?.config;
         if (!routed?.provider || !routed.model) return wait("no_route");
-        const info = await this.ctx.llm.resolveModelInfo(routed.provider, routed.model, signal);
-        signal?.throwIfAborted();
+        const info = await this.pressureModelInfo(routed.provider, routed.model, signal);
         if (session.seq !== revision) return wait("state_changed");
-        const override = this.config.modelPolicies.find(
-            (policy) => policy.provider === routed.provider && policy.model === routed.model,
-        );
+        if (info === null) return wait("metadata_unavailable");
         const window = info.context?.contextWindow;
-        const reserved = routed.maxTokens ?? info.defaultMaxTokens ?? 0;
-        const thresholdRatio = override?.thresholdRatio ?? this.config.thresholdRatio;
-        const headroom = override?.headroomTokens ?? this.config.headroomTokens;
-        if (
-            !Number.isSafeInteger(window) ||
-            window === undefined ||
-            window <= 0 ||
-            !Number.isSafeInteger(reserved) ||
-            reserved < 0 ||
-            window - reserved - headroom <= 0
-        )
-            return wait("invalid_capacity");
-        const threshold = Math.floor(
-            Math.min(window * thresholdRatio, window - reserved - headroom),
-        );
-        const retain =
-            override?.retainTokens ??
-            (override?.retainRatio !== undefined
-                ? Math.floor((window - reserved) * override.retainRatio)
-                : (this.config.retainTokens ??
-                  Math.floor((window - reserved) * this.config.retainRatio!)));
-        if (retain >= threshold) return wait("invalid_retention");
+        if (window === undefined) return wait("missing_capacity");
+        const budget = this.modelPressureBudget(window, routed.provider, routed.model);
+        if (budget === null) return wait("invalid_capacity");
+        const { threshold, retain } = budget;
         const measurement = this.measurement(session);
         const headSeq = measurement.nodes[0]?.seq;
         const headEvent = headSeq === undefined ? undefined : session.eventAt(SessionSeq(headSeq));
         const head = headEvent === undefined ? null : session.deriveEventMessage(headEvent);
         const firstSystemSeq = head?.role === "system" ? headSeq : undefined;
-        const selection = this.pressureRange(
-            session,
-            measurement,
-            this.retentionTokens(session, retain, threshold),
+        const retentionTokens = this.retentionTokens(session, retain, threshold);
+        const selection = this.pressureRange(session, measurement, retentionTokens);
+        const headerOverheadTokens = Math.max(
+            0,
+            measurement.totalTokens - measurement.surfaceTokens,
         );
+        const systemHeadTokens = firstSystemSeq === undefined ? 0 : measurement.nodes[0]!.tokens;
+        const protectedSeqs = new Set<number>(
+            session.surface.nodes.slice(this.protectedTailStart(session)),
+        );
+        const protectedTailTokens = measurement.nodes.reduce(
+            (total, node) =>
+                total +
+                (node.seq !== firstSystemSeq && protectedSeqs.has(node.seq) ? node.tokens : 0),
+            0,
+        );
+        const limits: SchedulingLimits = {
+            heuristic: "HEURISTIC",
+            contextWindowTokens: window,
+            thresholdTokens: threshold,
+            retentionTokens,
+            headerOverheadTokens,
+            systemHeadTokens,
+            protectedTailTokens,
+            minimumPromptTokens: headerOverheadTokens + systemHeadTokens + protectedTailTokens,
+        };
         if (
             selection !== null &&
             this.autoEnabled &&
@@ -558,6 +556,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                         : "no_business_evidence",
                 ),
                 thresholdTokens: threshold,
+                limits,
                 selection,
             };
         const start =
@@ -587,21 +586,27 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                       reasoning: this.summaryPolicy.reasoning,
                       images,
                   });
-        const headerOverheadTokens = Math.max(
-            0,
-            measurement.totalTokens - measurement.surfaceTokens,
-        );
         // Include the preserved system head and request envelope in the auxiliary call estimate.
         // The fixed allowance covers the official instruction and checkpoint framing.
-        const filterInputTokens =
-            selection === null
+        const projectedTokens = projected.reduce(
+            (total, message) => total + this.ctx.tokenMeter.estimateMessage(message),
+            0,
+        );
+        const systemTokens =
+            selection === null || firstSystemSeq === undefined
                 ? 0
-                : projected.reduce(
-                      (total, message) => total + this.ctx.tokenMeter.estimateMessage(message),
-                      0,
-                  ) +
-                  this.pressureState(session).toolsTokens +
-                  256;
+                : this.ctx.tokenMeter.estimateMessage(head!);
+        const summaryInput: SummaryInputEstimate | null =
+            selection === null
+                ? null
+                : {
+                      historyTokens: projectedTokens - systemTokens,
+                      systemTokens,
+                      toolsTokens: this.pressureState(session).toolsTokens,
+                      framingTokens: 256,
+                      totalTokens: projectedTokens + this.pressureState(session).toolsTokens + 256,
+                  };
+        const filterInputTokens = summaryInput?.totalTokens ?? 0;
         const usage =
             measurement.baseline.kind === "usage" ? measurement.baseline.usage : undefined;
         const cacheState =
@@ -611,6 +616,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                   ? "uncached"
                   : "cached";
         const requested = this.hasSummaryRequest(session);
+        const override = this.config.modelPolicies.find(
+            (policy) => policy.provider === routed.provider && policy.model === routed.model,
+        );
         const plan = planScheduledCompaction(
             {
                 trigger: requested ? "model_request" : "backlog",
@@ -645,6 +653,8 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         return {
             revision,
             thresholdTokens: threshold,
+            limits,
+            summaryInput,
             selection,
             plan,
             decision: cooling ? "wait" : plan.decision,

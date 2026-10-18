@@ -184,7 +184,8 @@ test("cheap cached reads increase heuristic payback; explicitly uncached input i
     assert.equal(cached.summaryCost, 7200);
     assert.equal(cached.perTurnSaving, 680);
     assert.equal(cached.breakEvenTurns, 17);
-    assert.equal(cached.reason, "not_paid_back");
+    assert.equal(cached.reason, "eligible");
+    assert.equal(planScheduledCompaction(candidate(), { paybackTurns: 8 }).reason, "not_paid_back");
     assert.equal(uncached.cachedPrefixAssumed, false);
     assert.equal(uncached.effectiveCacheReadRatio, 1);
     assert.equal(uncached.initialRebuildPenalty, 0);
@@ -212,6 +213,7 @@ test("a covering summary saves the full unmarked span as well as excluded marks"
     assert.equal(plan.reason, "eligible");
     const filtered = planScheduledCompaction(
         candidate({ filterInputTokens: 2500, headerOverheadTokens: 100 }),
+        { paybackTurns: 8 },
     );
     assert.equal(filtered.predictedSummaryTokens, 500);
     assert.equal(filtered.rebuiltSuffixTokens, 3500);

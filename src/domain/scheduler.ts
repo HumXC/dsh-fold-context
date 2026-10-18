@@ -13,7 +13,7 @@ export const schedulingPolicySchema = z
         minSavingsTokens: tokenCountSchema.default(2048),
         minSavingsRatio: ratioSchema.max(1).default(0.2),
         expectedSummaryRatio: ratioSchema.default(0.2),
-        paybackTurns: positiveCountSchema.default(8),
+        paybackTurns: positiveCountSchema.default(24),
         cacheReadRatio: ratioSchema.max(1).default(0.1),
         summaryInputRatio: ratioSchema.default(1),
         summaryOutputRatio: ratioSchema.default(1),

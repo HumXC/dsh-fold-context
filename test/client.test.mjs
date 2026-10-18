@@ -278,6 +278,48 @@ test("search/status use structured lists and unknown old results remain inspecta
     );
 });
 
+test("status cards explain payback, cache assumptions and protected constraints in both locales", () => {
+    const c = client();
+    const value = {
+        entries: [],
+        scheduling: {
+            decision: "wait",
+            reason: "not_paid_back",
+            limits: { minimumPromptTokens: 1900 },
+            diagnostic: {
+                nextAction: "Continue working.",
+                economics: {
+                    breakEvenRequests: 17,
+                    expectedFutureRequests: 8,
+                    upfrontCost: 10980,
+                    cacheBasis: "assumed_cached",
+                },
+                constraints: [{ code: "fixed_overhead" }],
+            },
+        },
+    };
+    for (const language of ["zh", "en"]) {
+        c.setLanguage(language);
+        const text = c.visibleText(
+            c.render({
+                type: c.views.get("context_status"),
+                props: outcome("context_status", {}, value),
+            }),
+        );
+        assert.match(text, /17 \/ 8/);
+        assert.match(text, /10,980/);
+        assert.match(text, /1,900/);
+        assert.match(text, language === "zh" ? /保守假定已缓存/ : /conservatively assumed cached/);
+        assert.match(
+            text,
+            language === "zh"
+                ? /仅压缩历史无法达标/
+                : /history summaries alone cannot reach the target/,
+        );
+        assert.match(text, language === "zh" ? /继续当前任务/ : /Continue the task/);
+    }
+});
+
 test("release savings stay visible when collapsed, localize, and preserve increases", () => {
     const c = client();
     const render = (tokenEstimate) =>

@@ -89,7 +89,7 @@ released 表示该编号被排除于此次摘要输入，不保证别处没有�
 
 [调度器](../src/domain/scheduler.ts) 是纯选区建议和经济门槛；[引擎](../src/integration/engine.ts) 提供真实计量、路由、工具配对边界，并交由官方事务执行。候选选区按 surface 位置保持官方尾部保留语义，保留最前面的 system；缺少合法工具配对边界则不选。真正替换仍需通过官方选区、稳定性及缩短验证。
 
-低压力下 `context_compact` 的显式模型请求与 queued-release backlog 共用门槛，context_release 仅提交排队意图。默认 `enabled: true`、`proactive: true`；backlog 需在候选范围内有实际可过滤的标记，显式请求不要求标记。默认需距最近摘要至少 8 个已提交助手步骤，净节省至少 2048 tokens、占当前总请求至少 0.2，预计在 8 个回合内回本。间隔从已提交 assistant slot 的 sourceSeq 推导，不是进程内调用次数。选区范围包含未标记历史，收益不能只算被标记条目。
+低压力下 `context_compact` 的显式模型请求与 queued-release backlog 共用门槛，context_release 仅提交排队意图。默认 `enabled: true`、`proactive: true`；backlog 需在候选范围内有实际可过滤的标记，显式请求不要求标记。默认需距最近摘要至少 8 个已提交助手步骤，净节省至少 2048 tokens、占当前总请求至少 0.2，预计在未来 24 次主请求内回本。默认周期面向长会话；显式较短周期仍可拒绝同一候选。间隔从已提交 assistant slot 的 sourceSeq 推导，不是进程内调用次数。选区范围包含未标记历史，收益不能只算被标记条目。
 
 所有成本标记 **HEURISTIC**，以归一化未缓存 token 为单位。`expectedSummaryRatio` 默认 0.2；`cacheReadRatio` 默认 0.1；`summaryInputRatio`、`summaryOutputRatio` 默认 1。令 S 为整个选区 token，I 为过滤后辅助摘要请求估算，P 为预计摘要 token，T 为保留尾部 token，H 为请求开销，r 为有效缓存读取比例，则主要估算为：
 
@@ -106,11 +106,15 @@ breakEvenTurns = ceil((initialRebuildPenalty + summaryCost) / perTurnSaving)
 
 I 使用实际摘要投影的估算，包含保留 system、过滤后的历史、请求开销及 256 tokens 固定 framing 余量；P、成本和回本均是预测。每回合无正收益或无法表示有限回本时，breakEvenTurns 返回 null；当前请求 token 为 0 时 savingsRatio 为 0。最近 usage 未提供 cacheReadTokens 时保守假定前缀已缓存，使用配置 r；明确未缓存时 r 默认 1、无首次重建惩罚。路由签名只记录估算来源，既不证明后续供应商命中，也不推断 TTL 或真实费用。
 
-官方压力在经济/冷却检查前执行，实际 `context-overflow` 直接交回基础引擎；两条安全路径绕过经济门槛。用户 `/compact` 直接使用继承的 `compactNow`。内部基础引擎以 `auto: true` 保留官方溢出监听器，插件另记用户 `compaction.auto`：false 关闭普通压力与 backlog，仍允许实际溢出和显式模型请求。`proactive: false` 只关闭低压力 backlog；`enabled: false` 关闭经济调度，显式请求沿旧的强制摘要路径。
+普通压力在经济/冷却检查前执行，实际 `context-overflow` 直接交回基础引擎；两条安全路径绕过经济门槛。用户 `/compact` 直接使用继承的 `compactNow`。内部基础引擎以 `auto: true` 保留官方溢出监听器，插件另记用户 `compaction.auto`：false 关闭普通压力与 backlog，仍允许实际溢出和显式模型请求。`proactive: false` 只关闭低压力 backlog；`enabled: false` 关闭经济调度，显式请求沿旧的强制摘要路径。
+
+普通压力、调度预览与释放提醒共用 `planPressureBudget`：任意正安全整数窗口 C 的阈值为 `max(1, floor(C × thresholdRatio))`，尾部目标为显式 `retainTokens` 或 `floor(C × retainRatio)`，限制在 `0..threshold−1`。模型专属保留参数优先于全局参数；主请求输出上限和原生摘要输出预算不参与该阈值计算。缺少窗口返回 missing_capacity，无效窗口返回 invalid_capacity，非取消的模型配置读取错误返回 metadata_unavailable 并停用压力紧迫度；释放 backlog 仍可预览。取消始终向上传播。保护尾部和固定请求开销仍可能使实际输入超过预算，需以后续主请求 usage 验证效果。
 
 失败的 version 5 摘要请求保留 retryable。最近一次摘要后的 `compaction/end` 错误与错误后已提交的助手 slot 推导冷却步数 `max(1, min(8, minIntervalSteps))`；新的 queued 释放或摘要意图可令剩余等待为 0。失败不创建额外重试事件或运行期重试计数器；恢复和 fork 继续依据各自日志。历史 version 4 failed 请求不参与自动重试。官方提交后，之前 queued 及 failed/retryable 请求才成为 applied。
 
-`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure、plan 和 pressure；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。pressure 返回选择用的预计总量、回放额外成本、最近主请求输入、当前阈值、预计是否低于阈值以及最近摘要的 effect/verification，不返回逐节点成本表。verification 区分 awaiting_replacement、awaiting_usage、below_threshold、above_threshold、unknown_target 和 route_changed；observedSavingsTokens 是移除新增内容估算后的观测值，不代表精确供应商账单。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 no_business_evidence、ineffective_compaction、active_compaction、no_route、invalid_capacity、invalid_retention、state_changed、failed_cooldown 等。查询只预览，不消耗稳定编号、不追加日志或修改 surface。
+`context_status` 返回 scheduling.policy、auto、revision、decision、reason、selection、failure、plan、pressure、limits、summaryInput 和 diagnostic；plan 中 markedIds 按查询 limit 截断并报告 omitted，失败 error 最多 1000 字符。diagnostic 给出首个调度门槛的短解释及下一步动作；经济比较包含摘要与重建总成本、允许的未来主请求次数、预计收益和回本次数，并区分主请求 usage 与未知缓存保守假设。回本是对候选未来收益的预测，stepsSinceSummary 增长不抵扣该预测。limits 公开固定 system、请求开销、当前受保护尾部及它们合计的 HEURISTIC 下限；超过阈值时附 fixed_overhead 或 protected_input 约束。它们用于解释能力边界，不放宽选区保护，也不阻止仍有净收益的安全摘要。summaryInput 拆分历史、保留 system、tools 和固定 framing，合计严格等于 plan.filterInputTokens；excludedTokens 为 null 仅表示未单独估算，不等于没有过滤。
+
+pressure 返回选择用的预计总量、回放额外成本、最近主请求输入、当前阈值、预计是否低于阈值以及最近摘要的 effect/verification，不返回逐节点成本表。verification 区分 awaiting_replacement、awaiting_usage、below_threshold、above_threshold、unknown_target 和 route_changed；observedSavingsTokens 是移除新增内容估算后的观测值，不代表精确供应商账单。reason 包括 disabled、no_selection、no_marks、min_interval、min_savings、min_ratio、not_paid_back、eligible，以及 no_business_evidence、ineffective_compaction、active_compaction、no_route、missing_capacity、invalid_capacity、metadata_unavailable、state_changed、failed_cooldown 等。查询只预览，不消耗稳定编号、不追加日志或修改 surface；详细诊断仅按需返回，不注入常驻提示或每次释放提醒。
 
 ## 准入 ledger、目录与恢复
 
