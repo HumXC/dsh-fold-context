@@ -140,10 +140,11 @@ export async function loopFixture(root, options = {}) {
             retainTokens: 512,
             thresholdRatio: 0.5,
             compactionRetries: 0,
+            ...options.compaction,
         },
         summary: { reasoning: options.reasoning ?? "omit-from-summary" },
         release: { catalogLimit: 32 },
-        scheduling: options.scheduling ?? { enabled: false },
+        scheduling: options.scheduling ?? {},
     });
     for (const [name, execute] of Object.entries(options.tools ?? {}))
         ctx.tools.register(

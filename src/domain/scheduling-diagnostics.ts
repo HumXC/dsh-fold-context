@@ -75,10 +75,6 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
         "The candidate meets the interval, savings and estimated payback gates.",
         "The queued checkpoint can run at the next eligible step boundary.",
     ],
-    legacy_request: [
-        "An explicit checkpoint request is using the disabled scheduler's direct path.",
-        "The native summary transaction still validates the selected range.",
-    ],
     safety_pressure: [
         "Prompt pressure reached the window threshold; economic gates are bypassed.",
         "Run the balanced summary, then verify its effect using the next primary request's usage.",
@@ -86,10 +82,6 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
     safety_overflow: [
         "The provider reported context overflow; economic gates are bypassed.",
         "Run the bounded overflow recovery and retry the primary request.",
-    ],
-    safety_user_compact: [
-        "The user explicitly requested compaction.",
-        "Run the native summary transaction when the agent is idle.",
     ],
 };
 

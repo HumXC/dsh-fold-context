@@ -1,7 +1,7 @@
 import { planReleaseBatch } from "../lib/domain/scheduler.js";
 import { commitInlineReleases, estimateInlineReleases } from "../lib/integration/inline-release.js";
 
-/** Explicit user-compaction opportunity for tests of release application, not timing. */
+/** Imminent-summary permit for isolated release-application tests. */
 export function forcedReleasePermit(f) {
     const state = f.engine.state(f.session);
     const estimate = estimateInlineReleases(f.ctx, f.session, state);
@@ -13,7 +13,7 @@ export function forcedReleasePermit(f) {
         oldestWaitSteps: 0,
         nowMs: Date.now(),
         cache: null,
-        opportunity: "user_compact",
+        opportunity: "summary",
         activeCompaction: state.activeStart !== null,
     });
 }
@@ -26,20 +26,4 @@ export function commitForcedReleases(f, signal = new AbortController().signal) {
         signal,
         forcedReleasePermit(f),
     );
-}
-
-/** Isolate release/recovery semantics from default scheduling in real-loop tests. */
-export function installForcedReleaseBoundary(f) {
-    return f.ctx.on("agent/pre-step", async (context, next) => {
-        commitForcedReleases(
-            {
-                ctx: f.ctx,
-                engine: f.engine,
-                session: context.agent.session,
-                meter: f.ctx.tokenMeter,
-            },
-            context.signal,
-        );
-        return next();
-    });
 }

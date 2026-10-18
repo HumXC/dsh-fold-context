@@ -33,29 +33,27 @@ const reminderStateSchema = z.object({
     lastProgressSeq: z.number().int().nonnegative(),
 });
 const receiptSchema = z.object({
-    version: z.union([z.literal(1), z.literal(2)]),
+    version: z.literal(2),
     reasoning: z.enum(["preserve", "omit-from-summary"]),
-    images: z.enum(["native", "references"]).optional(),
-    attachments: z
-        .array(
-            z.object({
-                id: z.string(),
-                ownerId: z.string(),
-                sourceSeq: z.number().int().nonnegative(),
-                currentSeq: z.number().int().nonnegative(),
-                blockIndex: z.number().int().nonnegative(),
-                kind: z.enum(["image", "file"]),
-                bytes: z.number().int().nonnegative(),
-                action: z.enum([
-                    "native-image",
-                    "file-handle",
-                    "reference-only",
-                    "marked-excluded",
-                    "tool-pair-excluded",
-                ]),
-            }),
-        )
-        .optional(),
+    images: z.enum(["native", "references"]),
+    attachments: z.array(
+        z.object({
+            id: z.string(),
+            ownerId: z.string(),
+            sourceSeq: z.number().int().nonnegative(),
+            currentSeq: z.number().int().nonnegative(),
+            blockIndex: z.number().int().nonnegative(),
+            kind: z.enum(["image", "file"]),
+            bytes: z.number().int().nonnegative(),
+            action: z.enum([
+                "native-image",
+                "file-handle",
+                "reference-only",
+                "marked-excluded",
+                "tool-pair-excluded",
+            ]),
+        }),
+    ),
     omittedReasoning: z.array(
         z.object({
             id: z.string(),
@@ -219,7 +217,7 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
 }
 export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     key: "contextCompression",
-    stateVersion: 16,
+    stateVersion: 17,
     stateSchema: ledgerSchema,
     init: () => ({
         entries: [],

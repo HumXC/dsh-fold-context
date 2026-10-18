@@ -2,20 +2,13 @@ import type { Context } from "@deepseek-ai/cordis";
 import { createDeveloperMessage, type ContextFormed } from "@deepseek-ai/dsh-llm";
 import { SessionSeq, type Session } from "@deepseek-ai/dsh-session";
 import type { ContextCompressionEngine } from "./engine.js";
-import {
-    contentHash,
-    pureReleasePtc,
-    RELEASE_CLEANUP_SOURCE,
-    type ReleaseControlProof,
-    type ReleaseControlState,
-} from "../domain/release-controls.js";
+import { RELEASE_CLEANUP_SOURCE, type ReleaseControlState } from "../domain/release-controls.js";
 
 export { RELEASE_CLEANUP_SOURCE } from "../domain/release-controls.js";
 declare module "@deepseek-ai/dsh-llm" {
     interface MessageSourceMap {
         "fold-context-release-cleanup": {
             kind: typeof RELEASE_CLEANUP_SOURCE;
-            releaseControl?: ReleaseControlProof;
         } & ContextFormed;
     }
 }
@@ -28,51 +21,6 @@ function controls(ctx: Context, session: Session): ReleaseControlState {
 
 /** Native empty developer records are durable but derive to no model message. */
 export function registerReleaseControlCleanup(ctx: Context, engine: ContextCompressionEngine) {
-    ctx.on("tools/result", (exec, result) => {
-        if (
-            exec.name !== "run_code" ||
-            exec.parent !== undefined ||
-            exec.agent === undefined ||
-            result.isError ||
-            result.concludesTurn ||
-            (result.additionalContexts?.length ?? 0) > 0
-        )
-            return;
-        const session = exec.agent.session;
-        const candidates = controls(ctx, session).groups.filter((group) =>
-            group.calls.some(
-                (call) =>
-                    call.id === exec.callId && call.name === "run_code" && call.resultSeq === null,
-            ),
-        );
-        if (candidates.length !== 1) return;
-        const group = candidates[0]!;
-        const call = group.calls.find(
-            (item) =>
-                item.id === exec.callId && item.name === "run_code" && item.resultSeq === null,
-        )!;
-        if (!pureReleasePtc(call, result.value, result.content)) return;
-        session.append(
-            "developer/message",
-            {
-                turn: group.turn,
-                step: group.step,
-                message: createDeveloperMessage({
-                    content: [],
-                    source: {
-                        kind: RELEASE_CLEANUP_SOURCE,
-                        releaseControl: {
-                            version: 1,
-                            rootCallId: exec.callId,
-                            childIds: call.children.map((child) => child.id),
-                            contentHash: contentHash(result.content),
-                        },
-                    },
-                }),
-            },
-            { surfaceOp: "append" },
-        );
-    });
     ctx.on("agent/request", async ({ agent, turn, step, signal }, next) => {
         const config = await next();
         signal.throwIfAborted();

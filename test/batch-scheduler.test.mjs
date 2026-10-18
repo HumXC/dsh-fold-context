@@ -28,7 +28,7 @@ test("marks do not buy an independent rebuild and hot small batches wait", () =>
     assert.equal(planReleaseBatch(input).reason, "hot_cache");
     assert.equal(planReleaseBatch(input).decision, "wait");
     assert.deepEqual(planReleaseBatch(input), planReleaseBatch(input));
-    for (const opportunity of ["summary", "rebuild", "pressure", "overflow", "user_compact"]) {
+    for (const opportunity of ["summary", "rebuild", "pressure", "overflow"]) {
         const plan = planReleaseBatch(candidate({ opportunity, releaseTokens: 1 }));
         assert.equal(plan.decision, "execute");
         assert.equal(plan.reason, `opportunity_${opportunity}`);

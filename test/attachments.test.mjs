@@ -83,7 +83,7 @@ test("identical attachment bytes appearing twice retain independent occurrence I
     assert.equal(targeted.attachments[0].id, "2");
 });
 
-test("an individual image is released before summary and its sibling alone reaches the summarizer", async (t) => {
+test("a manual checkpoint excludes one image occurrence and sends only its sibling to the summarizer", async (t) => {
     const f = await attachmentFixture(t);
     const ref = await f.store.saveImage({ data: png(), mediaType: "image/png" });
     const original = await admit(f, [
@@ -112,10 +112,10 @@ test("an individual image is released before summary and its sibling alone reach
         1,
     );
     const state = f.engine.state(f.session);
-    assert.deepEqual(state.lastSummary.excludedIds, []);
+    assert.deepEqual(state.lastSummary.excludedIds, ["2"]);
     assert.deepEqual(
         state.lastSummary.projection.attachments.map((item) => item.action),
-        ["native-image"],
+        ["marked-excluded", "native-image"],
     );
     assert.equal(state.entries.find((entry) => entry.id === "2").status, "released");
     assert.equal(state.entries.find((entry) => entry.id === "3").status, "summarized");
@@ -183,7 +183,12 @@ test("file recovery verifies all bytes and returns a host-mapped handle, never n
             .filter((block) => block.type === "file").length,
         1,
     );
-    assert.equal(f.engine.state(f.session).lastSummary.projection.attachments.length, 0);
+    assert.deepEqual(
+        f.engine
+            .state(f.session)
+            .lastSummary.projection.attachments.map(({ id, action }) => ({ id, action })),
+        [{ id: "2", action: "marked-excluded" }],
+    );
 });
 
 test("binary corruption and deletion fail recovery instead of claiming verified availability", async (t) => {

@@ -26,6 +26,17 @@ const result = (session, name) => namedResults(session, name).at(-1);
 try {
     if (mode === "write") {
         world = await loopFixture(root, {
+            compaction: { retainTokens: 0 },
+            // Exercise archival projection and replay with a small, eligible checkpoint.
+            scheduling: {
+                minIntervalSteps: 0,
+                minSavingsTokens: 1,
+                minSavingsRatio: 0,
+                expectedSummaryRatio: 0.05,
+                cacheReadRatio: 1,
+                summaryInputRatio: 0.01,
+                summaryOutputRatio: 0.01,
+            },
             responses: [
                 {
                     blocks: [

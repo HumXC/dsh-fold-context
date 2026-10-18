@@ -10,8 +10,12 @@ import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
 const longText = (label) => `${label} `.repeat(1500);
 const signal = () => new AbortController().signal;
+const smallCheckpoint = {
+    compaction: { retainTokens: 0 },
+    scheduling: { minIntervalSteps: 0, minSavingsTokens: 1, paybackTurns: 128 },
+};
 
-test("v8 queued release is applied before a manual checkpoint and remains replayable", async (t) => {
+test("v8 queued release settles in a manual checkpoint transaction and remains replayable", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const result = f.toolRound("read", longText("ORIGINAL"));
@@ -38,7 +42,7 @@ test("v8 queued release is applied before a manual checkpoint and remains replay
     assert.ok(f.meter.measure(f.session).totalTokens < before);
     assert.equal(
         f.session.snapshotEvents().some((event) => event.type === "compaction/prune"),
-        true,
+        false,
     );
     assert.equal(
         f.calls[0].messages.some((message) => message.id === result.data.message.id),
@@ -197,12 +201,13 @@ test("official manual summary filters marked bodies, retains pairing and exact o
 });
 
 test("explicit summary runs below pressure at the next boundary and records applied", async (t) => {
-    const f = await fixture();
+    const f = await fixture(smallCheckpoint);
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     f.appendUser(longText("GOAL"));
     f.toolRound("read", longText("DETAIL"));
     await f.invoke("context_compact", { reason: "A milestone is complete" });
+    f.appendUser("Continue the next milestone using the earlier evidence.");
     assert.equal(f.calls.length, 0);
     assert.equal(f.engine.state(f.session).summaryRequests[0].status, "queued");
     const compact = await f.engine.compactIfNeeded(f.agent, "pressure", signal());
@@ -213,7 +218,7 @@ test("explicit summary runs below pressure at the next boundary and records appl
 });
 
 test("a failed summary retains settled releases and exact recovery evidence while closing its transaction", async (t) => {
-    const f = await fixture({ finish: "max-tokens" });
+    const f = await fixture({ ...smallCheckpoint, finish: "max-tokens" });
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     f.appendUser(longText("GOAL"));
@@ -221,6 +226,7 @@ test("a failed summary retains settled releases and exact recovery evidence whil
     const id = f.idFor(result);
     await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed" });
     await f.invoke("context_compact", { reason: "Checkpoint" });
+    f.appendUser("Continue the next milestone after the pending checkpoint.");
     const before = [...f.session.surface.nodes];
     await assert.rejects(
         f.engine.compactIfNeeded(f.agent, "pressure", signal()),
@@ -247,7 +253,7 @@ test("a failed summary retains settled releases and exact recovery evidence whil
     assert.ok(f.session.snapshotEvents().at(-1).data.error);
 });
 
-test("cancellation during summarization preserves the preceding release batch and exact originals", async (t) => {
+test("manual summary cancellation preserves queued evidence and exact originals", async (t) => {
     const controller = new AbortController();
     const f = await fixture({
         onStream: () => {
@@ -266,16 +272,10 @@ test("cancellation during summarization preserves the preceding release batch an
         /isolated manual summary cancelled/,
     );
     assert.ok(before.includes(result.seq));
-    assert.equal(f.session.surface.nodes.includes(result.seq), false);
-    assert.ok(
-        f.session.surface.nodes.includes(
-            f.engine.state(f.session).entries.find((entry) => entry.id === id).currentSeq,
-        ),
-    );
-    assert.equal(
-        f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
-        "released",
-    );
+    assert.ok(f.session.surface.nodes.includes(result.seq));
+    const queued = f.engine.state(f.session).entries.find((entry) => entry.id === id);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.currentSeq, result.seq);
     assert.equal(
         f.session.eventAt(result.seq).data.message.content[0].text,
         longText("QUEUED_ON_CANCEL"),
@@ -284,7 +284,7 @@ test("cancellation during summarization preserves the preceding release batch an
     assert.equal(f.engine.state(f.session).activeStart, null);
     assert.equal(
         f.session.snapshotEvents().some((event) => event.type === "compaction/prune"),
-        true,
+        false,
     );
 });
 

@@ -3,7 +3,6 @@ import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { SessionId, SessionSeq, SessionLogOffset, buildForkSeed } from "@deepseek-ai/dsh-session";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
-import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 const root = process.env.FOLD_CONTEXT_TEST_ROOT;
 await assertTestRoot(root);
@@ -35,7 +34,19 @@ if (mode === "write") {
     let inlineEntry;
     const f = await loopFixture(root, {
         auto: false,
-        scheduling: { enabled: false },
+        compaction: { retainTokens: 0 },
+        // Keep this cold-process archival scenario independent of production cost thresholds.
+        scheduling: {
+            minIntervalSteps: 0,
+            minSavingsTokens: 1,
+            minSavingsRatio: 0,
+            expectedSummaryRatio: 0.05,
+            cacheReadRatio: 1,
+            summaryInputRatio: 0.01,
+            summaryOutputRatio: 0.01,
+            releaseMinTokens: 0,
+            releaseBacklogRatio: 0.000001,
+        },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
@@ -63,16 +74,25 @@ if (mode === "write") {
                     JSON.stringify(request.messages).includes(`[released ${inlineEntry.id}]`),
                 );
                 assert.equal(JSON.stringify(request.messages).includes(original), false);
-                return call("context_compact", {
-                    reason: "Durable covering checkpoint before restart",
-                });
+                return {
+                    blocks: [
+                        {
+                            type: "text",
+                            text: "The restart objective and released evidence are recorded.",
+                        },
+                    ],
+                };
             },
+            call("context_compact", {
+                reason: "Durable covering checkpoint before restart",
+            }),
         ],
     });
-    installForcedReleaseBoundary(f);
     try {
         const handle = await f.create();
         await f.followup(handle, "Preserve the restart user objective. ".repeat(500));
+        assert.equal(f.summaries.length, 0);
+        await f.followup(handle, "Checkpoint the completed work before restarting this session.");
         await f.flush(handle);
         const state = f.engine.state(handle.agent.session);
         const entry = state.entries.find((entry) => entry.role === "tool");

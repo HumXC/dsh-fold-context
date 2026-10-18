@@ -124,7 +124,7 @@ export function selectScheduledRange(input: ScheduledRangeInput): ScheduledRange
 }
 
 export type ScheduledTrigger = "backlog" | "model_request";
-export type SchedulingSafetyReason = "pressure" | "overflow" | "user_compact";
+export type SchedulingSafetyReason = "pressure" | "overflow";
 export type SchedulingCacheState = "unknown" | "cached" | "uncached";
 export type SchedulingReason =
     | "disabled"
@@ -135,10 +135,8 @@ export type SchedulingReason =
     | "min_ratio"
     | "not_paid_back"
     | "eligible"
-    | "legacy_request"
     | "safety_pressure"
-    | "safety_overflow"
-    | "safety_user_compact";
+    | "safety_overflow";
 
 export interface ScheduledCompactionInput {
     readonly trigger: ScheduledTrigger;
@@ -189,7 +187,7 @@ const compactionInputSchema = z
         cacheExpired: z.boolean().default(false),
         headerOverheadTokens: tokenCountSchema.default(0),
         auto: z.boolean().default(true),
-        forceSafety: z.enum(["pressure", "overflow", "user_compact"]).optional(),
+        forceSafety: z.enum(["pressure", "overflow"]).optional(),
     })
     .strict()
     .superRefine((input, context) => {
@@ -310,9 +308,6 @@ export function planScheduledCompaction(
         decision = "execute";
     } else if (input.forceSafety === "pressure") {
         reason = "disabled";
-    } else if (!policy.enabled && input.trigger === "model_request") {
-        reason = "legacy_request";
-        decision = "execute";
     } else if (
         !policy.enabled ||
         (input.trigger === "backlog" && (!input.auto || !policy.proactive))

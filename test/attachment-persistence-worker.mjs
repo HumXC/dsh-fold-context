@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { SessionSeq, SessionLogOffset, buildForkSeed } from "@deepseek-ai/dsh-session";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
 import { png } from "./attachment-fixture.mjs";
-import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 const root = process.env.FOLD_CONTEXT_TEST_ROOT;
 await assertTestRoot(root);
@@ -28,7 +27,7 @@ try {
             attachments: true,
             inputModalities: ["text", "image"],
             auto: false,
-            scheduling: { enabled: false },
+            scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
             responses: [
                 call("context_release", {
                     ids: [2, 4],
@@ -54,7 +53,6 @@ try {
                 },
             ],
         });
-        installForcedReleaseBoundary(world);
         const image = await world.attachments.saveImage({
             data: png(),
             mediaType: "image/png",

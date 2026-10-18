@@ -4,7 +4,8 @@ import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/ds
 import { fixture } from "./fixture.mjs";
 import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { ledgerProjection } from "../lib/domain/ledger.js";
-import { selectedExclusions, summaryInput } from "../lib/domain/exclusion.js";
+import { selectedExclusions } from "../lib/domain/exclusion.js";
+import { projectSummaryInput } from "../lib/domain/summary-projection.js";
 import { summaryRecords } from "./summary-records.mjs";
 
 function parsed(outcome) {
@@ -147,10 +148,20 @@ test("signed replay stays immutable while a modern tool exclusion ignores an obs
         false,
     );
     const state = f.engine.state(f.session);
-    assert.deepEqual(
-        summaryInput(state, f.session.deriveMessages(), f.session.seq),
-        f.session.deriveMessages(),
+    const messages = f.session.deriveMessages();
+    const beforeProjection = JSON.stringify(messages);
+    const projected = summaryRecords(
+        projectSummaryInput(state, messages, f.session.seq, {
+            reasoning: "omit-from-summary",
+            images: "references",
+        }),
     );
+    assert.ok(projected.some((record) => record.text === message.content[0].text));
+    assert.equal(
+        projected.some((record) => record.type === "reasoning" || record.callId === "call"),
+        false,
+    );
+    assert.equal(JSON.stringify(messages), beforeProjection);
     const nodes = f.session.surface.nodes;
     await f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
     assert.equal(
@@ -183,4 +194,36 @@ test("signed replay stays immutable while a modern tool exclusion ignores an obs
     );
     assert.equal(assistant.data.message.source.replayState.response.private, "opaque-signature");
     assert.deepEqual(assistant.data.message.content, message.content);
+});
+
+test("obsolete plugin stamps cannot prove exclusions while unstamped SDK summaries remain valid", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    f.session.append("turn/start", { turn: 1 });
+    const original = f.toolRound("read", "Completed evidence.");
+    const id = f.idFor(original);
+    parsed(await f.invoke("context_release", { ids: [Number(id)], reason: "consumed" }));
+    const compactionId = "other-sdk-producer";
+    f.session.append("compaction/start", { compactionId, turn: 1 });
+    const state = f.engine.state(f.session);
+    const summary = (text) =>
+        ledgerProjection.apply(state, {
+            type: "compaction/summary",
+            seq: f.session.seq + 1,
+            time: 0,
+            data: {
+                compactionId,
+                turn: 1,
+                shadowedSeqs: state.surface,
+                summary: [{ type: "text", text }],
+            },
+        }).pendingSummary;
+    const native = summary("Summary from another SDK compaction producer.");
+    assert.deepEqual(native.excludedIds, [id]);
+    assert.equal(native.projection, null);
+    const obsolete = summary(
+        `[fold-context-projection:1 ${JSON.stringify({ reasoning: "preserve", compactionId })}]`,
+    );
+    assert.deepEqual(obsolete.excludedIds, []);
+    assert.equal(obsolete.projection, null);
 });

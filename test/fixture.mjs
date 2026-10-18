@@ -67,9 +67,7 @@ export async function fixture(options = {}) {
     const fiber = ctx.plugin(foldContext, {
         compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
         release: { catalogLimit: 32 },
-        ...(options.scheduling === null
-            ? {}
-            : { scheduling: options.scheduling ?? { enabled: false } }),
+        scheduling: options.scheduling ?? {},
         reminders: options.reminders ?? {},
         summary: {
             reasoning: options.reasoning ?? "omit-from-summary",

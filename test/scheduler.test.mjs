@@ -303,17 +303,19 @@ test("automatic switches preserve explicit requests and safety overrides", () =>
     );
     assert.equal(planScheduledCompaction(candidate(), { proactive: false }).reason, "disabled");
     assert.equal(planScheduledCompaction({ ...ready, forceSafety: "pressure" }).reason, "disabled");
-    for (const forceSafety of ["overflow", "user_compact"]) {
-        const plan = planScheduledCompaction({ ...ready, stepsSinceSummary: 0, forceSafety });
-        assert.equal(plan.decision, "execute");
-        assert.equal(plan.reason, `safety_${forceSafety}`);
-    }
+    const overflow = planScheduledCompaction({
+        ...ready,
+        stepsSinceSummary: 0,
+        forceSafety: "overflow",
+    });
+    assert.equal(overflow.decision, "execute");
+    assert.equal(overflow.reason, "safety_overflow");
     const pressure = planScheduledCompaction(
         candidate({ stepsSinceSummary: 0, forceSafety: "pressure" }),
     );
     assert.equal(pressure.reason, "safety_pressure");
     assert.equal(pressure.decision, "execute");
-    const legacy = planScheduledCompaction(
+    const disabled = planScheduledCompaction(
         candidate({
             trigger: "model_request",
             selectedTokens: 1,
@@ -324,8 +326,8 @@ test("automatic switches preserve explicit requests and safety overrides", () =>
         }),
         { enabled: false },
     );
-    assert.equal(legacy.reason, "legacy_request");
-    assert.equal(legacy.decision, "execute");
+    assert.equal(disabled.reason, "disabled");
+    assert.equal(disabled.decision, "wait");
     assert.equal(planScheduledCompaction(candidate(), { enabled: false }).reason, "disabled");
     assert.equal(
         planScheduledCompaction(

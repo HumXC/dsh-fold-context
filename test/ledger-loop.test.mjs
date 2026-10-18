@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
-import { previousAdmissionLedger } from "../lib/domain/admission-ledger.js";
 
 async function setup(t, options) {
     const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
@@ -40,7 +39,17 @@ test("batched release changes only the tool body before a checkpoint while ordin
     let checked = false;
     const f = await setup(t, {
         auto: false,
-        scheduling: { enabled: false },
+        compaction: { retainTokens: 0 },
+        // This scenario checks release/replay semantics with an eligible archival checkpoint.
+        scheduling: {
+            minIntervalSteps: 0,
+            minSavingsTokens: 1,
+            minSavingsRatio: 0,
+            expectedSummaryRatio: 0.05,
+            cacheReadRatio: 1,
+            summaryInputRatio: 0.01,
+            summaryOutputRatio: 0.01,
+        },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
@@ -82,8 +91,16 @@ test("batched release changes only the tool body before a checkpoint while ordin
             (request, world) => {
                 assert.equal(world.summaries.length, 0);
                 assertPrefix(world.requests.at(-2), request);
-                return call("context_compact", { reason: "Checkpoint after releasing" });
+                return {
+                    blocks: [
+                        {
+                            type: "text",
+                            text: "The released evidence and current objective are recorded.",
+                        },
+                    ],
+                };
             },
+            call("context_compact", { reason: "Checkpoint after releasing" }),
             (request, world) => {
                 assert.equal(world.summaries.length, 1);
                 const session = world.sessions.list()[0];
@@ -113,7 +130,6 @@ test("batched release changes only the tool body before a checkpoint while ordin
                     ),
                     JSON.stringify(source),
                 );
-                assert.equal(previousAdmissionLedger(session), null);
                 checked = true;
                 return { blocks: [{ type: "text", text: "Continue from the current summary." }] };
             },
@@ -121,12 +137,14 @@ test("batched release changes only the tool body before a checkpoint while ordin
     });
     const handle = await f.create();
     await f.followup(handle, "Preserve this goal through the checkpoint. ".repeat(180));
+    assert.equal(f.summaries.length, 0);
+    await f.followup(handle, "Checkpoint the completed work and preserve the objective.");
     assert.equal(checked, true);
-    assert.equal(f.requests.length, 5);
+    assert.equal(f.requests.length, 6);
     assertPrefix(f.requests[0], f.requests[1]);
     assertPrefix(f.requests[2], f.requests[3]);
     await f.followup(handle, "Continue with the covered evidence.");
-    assertPrefix(f.requests[4], f.requests[5]);
+    assertPrefix(f.requests[5], f.requests[6]);
     assert.ok(
         f.requests.every(
             (request) =>
@@ -197,7 +215,6 @@ test("cold resume and fork retain numbering without bootstrapping visible ledger
         inheritedEventCount: SessionLogOffset(seed.length),
         meta: { cwd: f.root, parentSession: sessionId, isSeeded: true },
     });
-    assert.equal(previousAdmissionLedger(fork.agent.session), null);
     await f.followup(fork, "Continue the fork.");
     assert.equal(notices(f.requests.at(-1)).length, 3);
     const numbered = f.requests

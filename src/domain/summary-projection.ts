@@ -1,7 +1,7 @@
 import { createUserMessage, type ContentBlock, type Message } from "@deepseek-ai/dsh-llm";
 import type { LedgerState } from "./ledger.js";
 import { selectedExclusions } from "./exclusion.js";
-import type { SummaryPolicy, ProjectionPolicy } from "./summary-policy.js";
+import type { ProjectionPolicy } from "./summary-policy.js";
 import { isSummaryControlNotice } from "./summary-evidence.js";
 import { SUMMARY_CONTROL_TOOLS } from "./protocol.js";
 
@@ -28,19 +28,18 @@ export interface AttachmentProjection {
         | "tool-pair-excluded";
 }
 export interface ProjectionReceipt {
-    version: 1 | 2;
-    reasoning: SummaryPolicy["reasoning"];
+    version: 2;
+    reasoning: ProjectionPolicy["reasoning"];
     omittedReasoning: ReasoningOmission[];
-    images?: "native" | "references";
-    attachments?: AttachmentProjection[];
+    images: ProjectionPolicy["images"];
+    attachments: AttachmentProjection[];
 }
 
 /** The same deterministic recipe is used before generation and when replaying a commit. */
 export function projectionReceipt(
     state: LedgerState,
     selected: ReadonlySet<number>,
-    policy: Pick<SummaryPolicy, "reasoning"> &
-        Partial<Pick<ProjectionPolicy, "images" | "stampVersion">>,
+    policy: ProjectionPolicy,
 ): ProjectionReceipt {
     const omittedReasoning: ReasoningOmission[] = [];
     if (policy.reasoning === "omit-from-summary") {
@@ -64,8 +63,6 @@ export function projectionReceipt(
             });
         }
     }
-    if (policy.stampVersion === 1)
-        return { version: 1, reasoning: policy.reasoning, omittedReasoning };
     const excluded = new Set(
         selectedExclusions(
             state,
@@ -112,7 +109,7 @@ export function projectionReceipt(
         version: 2,
         reasoning: policy.reasoning,
         omittedReasoning,
-        images: policy.images ?? "references",
+        images: policy.images,
         attachments,
     };
 }
@@ -122,7 +119,7 @@ export function projectSummaryInput(
     state: LedgerState,
     messages: readonly Message[],
     cutoff: number,
-    policy: Pick<SummaryPolicy, "reasoning"> & Partial<Pick<ProjectionPolicy, "images">>,
+    policy: ProjectionPolicy,
 ): Message[] {
     const summaryMessages = messages.filter((message) => !isSummaryControlNotice(message));
     const keys = summaryMessages.map((message) => `${message.role}:${message.id}`);

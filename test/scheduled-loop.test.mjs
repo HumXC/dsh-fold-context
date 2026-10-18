@@ -188,13 +188,16 @@ test("pressure and overflow bypass checkpoint interval and savings gates", async
     assert.equal(overflow.calls.length, 1);
 });
 
-test("disabled scheduling preserves explicit model-request checkpoint behavior", async (t) => {
+test("disabled scheduling keeps model requests queued without a forced overflow fallback", async (t) => {
     const f = await candidate(t, {
         scheduling: { enabled: false, minIntervalSteps: 100, minSavingsTokens: 1000000 },
     });
-    assert.equal((await f.engine.schedulingStatus(f.agent)).decision, "execute");
-    assert.ok(await f.engine.compactIfNeeded(f.agent, "pressure", signal()));
-    assert.equal(f.calls.length, 1);
+    const status = await f.engine.schedulingStatus(f.agent);
+    assert.equal(status.decision, "wait");
+    assert.equal(status.reason, "disabled");
+    assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.engine.hasSummaryRequest(f.session), true);
 });
 
 test("direct user compactNow bypasses checkpoint economics without a queued model request", async (t) => {

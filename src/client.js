@@ -114,10 +114,8 @@ window.__ModuleLoader__.load({
             no_selection: "没有同时满足保留预算与任务保护的完整历史前缀",
             no_marks: "没有待处理标记",
             eligible: "满足调度条件",
-            legacy_request: "已有压缩请求",
             safety_pressure: "上下文压力触发",
             safety_overflow: "上下文溢出触发",
-            safety_user_compact: "用户请求压缩",
             failed_cooldown: "上次摘要失败，等待重试间隔",
             awaiting_step_boundary: "等待下一处理边界",
             protocol_protection: "受协议保护",
@@ -243,10 +241,8 @@ window.__ModuleLoader__.load({
             no_selection: "No balanced prefix meets retention and task protection",
             no_marks: "No pending marks",
             eligible: "Scheduling gates met",
-            legacy_request: "Compaction already requested",
             safety_pressure: "Context pressure",
             safety_overflow: "Context overflow",
-            safety_user_compact: "User requested compaction",
             failed_cooldown: "Waiting after a failed summary",
             awaiting_step_boundary: "Awaiting next step boundary",
             protocol_protection: "Protected by protocol",
@@ -820,7 +816,7 @@ window.__ModuleLoader__.load({
                             ? "checkPolicyAction"
                             : text(scheduling.reason).startsWith("safety_")
                               ? "verifyUsageAction"
-                              : ["eligible", "legacy_request"].includes(scheduling.reason)
+                              : scheduling.reason === "eligible"
                                 ? "boundaryAction"
                                 : scheduling.reason === "active_compaction"
                                   ? "waitSummaryAction"

@@ -4,7 +4,8 @@ import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/ds
 import { fixture } from "./fixture.mjs";
 import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { ledgerProjection } from "../lib/domain/ledger.js";
-import { selectedExclusions, summaryInput } from "../lib/domain/exclusion.js";
+import { selectedExclusions } from "../lib/domain/exclusion.js";
+import { projectSummaryInput } from "../lib/domain/summary-projection.js";
 import { summaryRecords } from "./summary-records.mjs";
 
 function parsed(outcome) {
@@ -78,7 +79,20 @@ test("ambiguous native call IDs stay paired through modern release intent and su
     const state = f.engine.state(f.session);
     assert.deepEqual(selectedExclusions(state, new Set(state.surface), f.session.seq), []);
     const messages = f.session.deriveMessages();
-    assert.deepEqual(summaryInput(state, messages, f.session.seq), messages);
+    const projected = projectSummaryInput(state, messages, f.session.seq, {
+        reasoning: "omit-from-summary",
+        images: "references",
+    });
+    assert.equal(
+        summaryRecords(projected).filter((record) => record.type === "tool-call").length,
+        2,
+    );
+    assert.deepEqual(
+        summaryRecords(projected)
+            .filter((record) => record.role === "tool")
+            .map((record) => record.text),
+        ["read evidence", "grep evidence"],
+    );
     const status = parsed(await f.invoke("context_status", { ids: [Number(tools[0].id)] }));
     assert.equal(status.entries[0].status, "queued");
     assert.equal(status.entries[0].pendingReason, "awaiting_step_boundary");
@@ -140,7 +154,16 @@ test("obsolete user release receipt and same-identity replacement cannot create 
     assert.equal(state.numbering.slots.find((slot) => slot.id === id).currentSeq, replacement.seq);
     assert.deepEqual(selectedExclusions(state, new Set(state.surface), f.session.seq), []);
     const messages = f.session.deriveMessages();
-    assert.deepEqual(summaryInput(state, messages, f.session.seq), messages);
+    const projected = projectSummaryInput(state, messages, f.session.seq, {
+        reasoning: "omit-from-summary",
+        images: "references",
+    });
+    assert.deepEqual(
+        summaryRecords(projected)
+            .filter((record) => record.role === "user" && record.type === "reasoning")
+            .map(({ type, text }) => ({ type, text })),
+        replacement.data.content,
+    );
     const status = parsed(await f.invoke("context_status", { ids: [Number(id)] }));
     assert.equal(status.entries[0].status, "available");
     assert.equal(status.entries[0].pendingReason, null);

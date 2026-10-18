@@ -4,133 +4,94 @@ import { fixture } from "./fixture.mjs";
 import { commitForcedReleases } from "./release-batch-fixture.mjs";
 import { releaseControlProjection } from "../lib/domain/release-controls.js";
 
-for (const fault of [
-    "missing",
-    "duplicate",
-    "orphan",
-    "mismatch",
-    "error",
-    "rejected",
-    "empty-id",
-    "parent-mismatch",
-    "unrelated",
-])
-    test(`PTC ${fault} dispatch evidence is classified conservatively`, async (t) => {
-        let f;
-        let ids;
-        f = await fixture({
-            ptc: async (tools) => {
-                const value = await tools.context_release({ ids, reason: "Consumed evidence" });
-                return { value };
-            },
-        });
-        t.after(f.close);
-        ids = [Number(f.idFor(f.toolRound("read", "Source evidence")))];
-        f.ctx.on("tools/ptc-dispatch-log", async (dispatch, next) => {
-            const content = await next();
-            const start = f.session
-                .snapshotEvents()
-                .findLast(
-                    (event) =>
-                        event.type === "tool/ptc-dispatch-start" &&
-                        event.data.subCallId === dispatch.subCallId,
-                ).data;
-            const completion = { ...start, isError: dispatch.isError, content };
-            if (fault === "missing")
-                f.session.append("tool/ptc-dispatch-start", {
-                    rootCallId: completion.rootCallId,
-                    parentCallId: completion.parentCallId,
-                    subCallId: "missing-child",
-                    name: completion.name,
-                    arguments: completion.arguments,
-                });
-            else if (fault === "duplicate") f.session.append("tool/ptc-dispatch", completion);
-            else if (fault === "orphan")
-                f.session.append("tool/ptc-dispatch", { ...completion, subCallId: "orphan" });
-            else if (fault === "mismatch")
-                f.session.append("tool/ptc-dispatch", {
-                    ...completion,
-                    arguments: { ids, reason: "Different arguments" },
-                });
-            else if (fault === "error")
-                f.session.append("tool/ptc-dispatch", { ...completion, isError: true });
-            else if (fault === "rejected")
-                f.session.append("tool/ptc-dispatch", {
-                    ...completion,
-                    content: [
-                        {
-                            type: "text",
-                            text: JSON.stringify({
-                                accepted: false,
-                                queued: [],
-                                settled: [],
-                                unknown: ids,
-                                unsupported: [],
-                            }),
-                        },
-                    ],
-                });
-            else if (fault === "empty-id" || fault === "parent-mismatch") {
-                const extra = {
-                    ...start,
-                    subCallId: fault === "empty-id" ? "" : `${start.rootCallId}:ptc:extra`,
-                    parentCallId:
-                        fault === "parent-mismatch" ? "different-parent" : start.parentCallId,
-                };
-                f.session.append("tool/ptc-dispatch-start", extra);
-                f.session.append("tool/ptc-dispatch", { ...extra, isError: false, content });
-            } else
-                f.session.append("tool/ptc-dispatch", {
-                    ...completion,
-                    rootCallId: "unrelated-root",
-                });
-            return content;
-        });
-        const outcome = await f.invoke("run_code", {
-            code: "return await tools.context_release(args)",
-            description: "Release evidence",
-        });
-        assert.equal(outcome.isError, false, JSON.stringify(outcome));
-        const assistant = f.session
-            .snapshotEvents()
-            .findLast((event) => event.type === "assistant/message");
-        const events = f.session.snapshotEvents();
-        const proofs = events.filter(
-            (event) =>
-                event.type === "developer/message" &&
-                event.data.message.source.releaseControl !== undefined,
-        );
-        assert.equal(proofs.length, fault === "unrelated" ? 1 : 0);
-        // Historical wrappers without a canonical-value proof cannot be established as pure from rendered JSON.
-        const cold = events
-            .filter((event) => !proofs.includes(event))
-            .reduce(
-                (state, event) => releaseControlProjection.apply(state, event),
-                releaseControlProjection.init(),
-            );
+test("release control v2 rejects retired PTC and native tracking shapes", () => {
+    assert.equal(releaseControlProjection.stateVersion, 2);
+    for (const name of ["context_release", "run_code"]) {
         assert.equal(
-            cold.groups.some((group) => group.assistantSeq === assistant.seq),
+            releaseControlProjection.stateSchema.safeParse({
+                surface: [1],
+                groups: [
+                    {
+                        assistantSeq: 1,
+                        turn: 1,
+                        step: 1,
+                        calls: [
+                            {
+                                id: "old-control",
+                                name,
+                                resultSeq: null,
+                                ids: [],
+                                children: [],
+                                proofHash: null,
+                            },
+                        ],
+                    },
+                ],
+            }).success,
             false,
         );
-        commitForcedReleases(f);
-        await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
-        const step =
-            1 +
-            Math.max(
-                ...f.session
-                    .snapshotEvents()
-                    .filter((event) => event.type === "step/start")
-                    .map((event) => event.data.step),
-            );
-        f.session.append("step/start", { turn: 1, step });
-        await f.ctx.waterfall(
-            "agent/request",
-            { agent: f.agent, turn: 1, step, signal: new AbortController().signal },
-            async () => ({ provider: "test", model: "fixture" }),
-        );
-        f.session.append("step/end", { turn: 1, step });
-        assert.equal(f.session.surface.nodes.includes(assistant.seq), fault !== "unrelated");
+    }
+});
+
+test("PTC dispatches queue releases without becoming cleanup candidates", async (t) => {
+    let ids;
+    const f = await fixture({
+        ptc: async (tools) => ({
+            value: await tools.context_release({ ids, reason: "Consumed evidence" }),
+        }),
     });
+    t.after(f.close);
+    const id = f.idFor(f.toolRound("read", "Source evidence"));
+    ids = [Number(id)];
+    const outcome = await f.invoke("run_code", {
+        code: "return await tools.context_release(args)",
+        description: "Release evidence",
+    });
+    assert.equal(outcome.isError, false, JSON.stringify(outcome));
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+        "queued",
+    );
+    const events = f.session.snapshotEvents();
+    const assistant = events.findLast((event) => event.type === "assistant/message");
+    const result = events.findLast((event) => event.type === "tool/result");
+    assert.equal(events.filter((event) => event.type === "tool/ptc-dispatch").length, 1);
+    assert.equal(
+        events.some(
+            (event) =>
+                event.type === "developer/message" &&
+                event.data.message.source.kind === "fold-context-release-cleanup",
+        ),
+        false,
+    );
+    const cold = events.reduce(
+        (state, event) => releaseControlProjection.apply(state, event),
+        releaseControlProjection.init(),
+    );
+    assert.deepEqual(cold.groups, []);
+    commitForcedReleases(f);
+    await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
+    const step =
+        1 +
+        Math.max(
+            ...events
+                .filter((event) => event.type === "step/start")
+                .map((event) => event.data.step),
+        );
+    f.session.append("step/start", { turn: 1, step });
+    await f.ctx.waterfall(
+        "agent/request",
+        { agent: f.agent, turn: 1, step, signal: new AbortController().signal },
+        async () => ({ provider: "test", model: "fixture" }),
+    );
+    f.session.append("step/end", { turn: 1, step });
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+        "released",
+    );
+    assert.ok(f.session.surface.nodes.includes(assistant.seq));
+    assert.ok(f.session.surface.nodes.includes(result.seq));
+});
 
 test("policy feedback added to a native release result is preserved", async (t) => {
     const f = await fixture();
@@ -161,7 +122,39 @@ test("policy feedback added to a native release result is preserved", async (t) 
     );
 });
 
-test("multiple concurrent release subcalls and a returned receipt array are removed together", async (t) => {
+for (const fault of ["message-identity", "metadata"])
+    test(`a native result replacement with changed ${fault} revokes cleanup eligibility`, async (t) => {
+        const f = await fixture();
+        t.after(f.close);
+        const ids = [Number(f.idFor(f.toolRound("read", "Source evidence")))];
+        await f.invoke("context_release", { ids, reason: "Consumed evidence" });
+        const original = f.session
+            .snapshotEvents()
+            .findLast((event) => event.type === "tool/result");
+        const bytes = JSON.stringify(original);
+        const state = f.ctx.sessionProjections.stateOf(f.session, "contextReleaseControls");
+        assert.equal(state.groups.length, 1);
+        const replacement = {
+            ...original,
+            seq: f.session.seq + 1,
+            surfaceOp: { op: "replace", startSeq: original.seq, endSeq: original.seq },
+            data: {
+                ...original.data,
+                ...(fault === "message-identity"
+                    ? { message: { ...original.data.message, toolCallId: "different-control-id" } }
+                    : {
+                          meta: {
+                              ...original.data.meta,
+                              policyFeedback: "Preserve policy metadata",
+                          },
+                      }),
+            },
+        };
+        assert.deepEqual(releaseControlProjection.apply(state, replacement).groups, []);
+        assert.equal(JSON.stringify(f.session.eventAt(original.seq)), bytes);
+    });
+
+test("multiple concurrent release subcalls settle their targets and retain the PTC array result", async (t) => {
     let ids;
     const f = await fixture({
         ptc: async (tools) => ({
@@ -208,8 +201,15 @@ test("multiple concurrent release subcalls and a returned receipt array are remo
         async () => ({ provider: "test", model: "fixture" }),
     );
     f.session.append("step/end", { turn: 1, step });
-    assert.equal(f.session.surface.nodes.includes(assistant.seq), false);
-    assert.equal(f.session.surface.nodes.includes(result.seq), false);
+    assert.ok(f.session.surface.nodes.includes(assistant.seq));
+    assert.ok(f.session.surface.nodes.includes(result.seq));
+    assert.ok(
+        ids.every(
+            (id) =>
+                f.engine.state(f.session).entries.find((entry) => entry.id === String(id))
+                    .status === "released",
+        ),
+    );
 });
 
 for (const mode of ["native", "ptc"])

@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createAssistantMessage, createToolResultMessage } from "@deepseek-ai/dsh-llm";
+import { assertTestRoot } from "./loop-fixture.mjs";
 import { fixture } from "./fixture.mjs";
 import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
@@ -156,6 +160,26 @@ test("an already settled release disappears without another body rewrite", async
     assertBalanced(f);
 });
 
+test("a direct release-only group waits for all targets before disappearing together", async (t) => {
+    const f = await fixture();
+    t.after(f.close);
+    const ids = [
+        Number(f.idFor(f.toolRound("read", "First evidence"))),
+        Number(f.idFor(f.toolRound("grep", "Second evidence"))),
+    ];
+    const round = await invoke(
+        f,
+        ids.map((id, index) => releaseCall([id], `release-${index}`)),
+    );
+    await requestBoundary(f, false);
+    assert.ok(visible(f, round.assistant));
+    assert.ok(round.results.every(({ result }) => visible(f, result)));
+    await requestBoundary(f);
+    assert.equal(visible(f, round.assistant), false);
+    assert.ok(round.results.every(({ result }) => !visible(f, result)));
+    assertBalanced(f);
+});
+
 test("pending and rejected releases keep their feedback", async (t) => {
     const f = await fixture();
     t.after(f.close);
@@ -214,7 +238,7 @@ test("an interleaved business message prevents range cleanup", async (t) => {
 });
 
 for (const mode of ["void", "return", "array", "settled"])
-    test(`pure PTC ${mode} wrapper disappears and preserves the exact reason on replay`, async (t) => {
+    test(`quiet PTC ${mode} wrapper stays visible and preserves the exact reason on replay`, async (t) => {
         let ids;
         let inner;
         const f = await fixture({
@@ -263,8 +287,12 @@ for (const mode of ["void", "return", "array", "settled"])
                 "PTC reason retained privately",
             );
         await requestBoundary(f);
-        assert.equal(visible(f, round.assistant), false);
-        assert.equal(visible(f, round.results[0].result), false);
+        assert.ok(visible(f, round.assistant));
+        assert.ok(visible(f, round.results[0].result));
+        assert.equal(
+            f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+            "released",
+        );
         assertBalanced(f);
         const replay = f.sessions.create("ptc-cleanup-replay", {
             seed: f.session.snapshotEvents(),
@@ -272,6 +300,71 @@ for (const mode of ["void", "return", "array", "settled"])
         assert.deepEqual(replay.deriveMessages(), f.session.deriveMessages());
         assert.deepEqual(f.engine.state(replay), f.engine.state(f.session));
     });
+
+test("a quiet PTC filesystem write and nested release both survive cleanup", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
+    const file = join(root, "business-result.txt");
+    const text = "Business work completed without logging or returning a value.";
+    let f;
+    let ids;
+    t.after(async () => {
+        await f?.close();
+        await assertTestRoot(root);
+        await rm(root, { recursive: true, force: true });
+    });
+    f = await fixture({
+        ptc: async (tools) => {
+            await writeFile(file, text, "utf8");
+            await tools.context_release({ ids, reason: "Evidence consumed by the file write" });
+            return {};
+        },
+    });
+    const id = f.idFor(f.toolRound("read", "Source evidence used in business work."));
+    ids = [Number(id)];
+    const round = await invoke(
+        f,
+        [
+            {
+                type: "tool-call",
+                id: "ptc-filesystem-work",
+                name: "run_code",
+                arguments: JSON.stringify({
+                    code: [
+                        'const fs = await import("node:fs/promises");',
+                        `await fs.writeFile(${JSON.stringify(file)}, ${JSON.stringify(text)}, "utf8");`,
+                        `await tools.context_release(${JSON.stringify({
+                            ids,
+                            reason: "Evidence consumed by the file write",
+                        })});`,
+                    ].join("\n"),
+                    description: "Write the business result and release its consumed evidence",
+                }),
+            },
+        ],
+        { opaque: "Original provider replay for filesystem work" },
+    );
+    assert.equal(round.results[0].outcome.isError, false);
+    assert.deepEqual(round.results[0].outcome.value.logs, []);
+    assert.equal(round.results[0].outcome.value.result, undefined);
+    assert.equal(round.results[0].outcome.content[0].text, "(run_code completed with no output)");
+    const original = JSON.stringify(round.assistant);
+    assert.equal(await readFile(file, "utf8"), text);
+    await requestBoundary(f);
+    assert.equal(
+        f.engine.state(f.session).entries.find((entry) => entry.id === id).status,
+        "released",
+    );
+    assert.ok(visible(f, round.assistant));
+    assert.ok(visible(f, round.results[0].result));
+    assert.equal(JSON.stringify(f.session.eventAt(round.assistant.seq)), original);
+    assert.equal(await readFile(file, "utf8"), text);
+    assertBalanced(f);
+    const replay = f.sessions.create("filesystem-work-replay", {
+        seed: f.session.snapshotEvents(),
+    });
+    assert.deepEqual(replay.deriveMessages(), f.session.deriveMessages());
+    assert.deepEqual(f.engine.state(replay), f.engine.state(f.session));
+});
 
 for (const mode of ["business-call", "logs", "custom-result", "sandbox", "policy-content"])
     test(`PTC ${mode} preserves its outer call and output`, async (t) => {

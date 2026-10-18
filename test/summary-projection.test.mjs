@@ -5,12 +5,15 @@ import { Session } from "@deepseek-ai/dsh-session";
 import { fixture } from "./fixture.mjs";
 import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { catalog } from "../lib/domain/planner.js";
+import { ledgerProjection, ledgerSchema } from "../lib/domain/ledger.js";
 import { projectSummaryInput } from "../lib/domain/summary-projection.js";
 import {
     projectionStamp,
     readProjectionStamp,
     resolveSummaryPolicy,
 } from "../lib/domain/summary-policy.js";
+
+const projectionPolicy = { reasoning: "omit-from-summary", images: "references" };
 
 function assistant(f, content, replayState = { response: { private: "opaque-signature" } }) {
     f.session.append("step/start", { turn: 1, step: 1 });
@@ -213,8 +216,10 @@ test("historical omission report is independently bounded and exact-ID discovera
         ids: [],
         excludedIds: [],
         projection: {
-            version: 1,
+            version: 2,
             reasoning: "omit-from-summary",
+            images: "references",
+            attachments: [],
             omittedReasoning: Array.from({ length: 5000 }, (_, i) => ({
                 id: String(i + 1),
                 sourceSeq: i,
@@ -251,7 +256,7 @@ test("tool results retain success/failure and empty outcomes in historical evide
                     : message,
             ),
             f.session.seq,
-            resolveSummaryPolicy(),
+            projectionPolicy,
         );
     const success = records(project(false)).find(
         (record) => record.role === "tool" && record.callId === original.data.message.toolCallId,
@@ -291,13 +296,13 @@ test("ambiguous input identities and unknown content fail before native data is 
                 state,
                 [original.data, original.data],
                 f.session.seq,
-                resolveSummaryPolicy(),
+                projectionPolicy,
             ),
         /ambiguous message/,
     );
     const mutated = { ...original.data, content: [{ type: "future-unsupported-kind" }] };
     assert.throws(
-        () => projectSummaryInput(state, [mutated], f.session.seq, resolveSummaryPolicy()),
+        () => projectSummaryInput(state, [mutated], f.session.seq, projectionPolicy),
         /unsupported summary content block/,
     );
     f.session.append("user/message", original.data, { surfaceOp: "append" });
@@ -307,7 +312,7 @@ test("ambiguous input identities and unknown content fail before native data is 
                 f.engine.state(f.session),
                 [original.data],
                 f.session.seq,
-                resolveSummaryPolicy(),
+                projectionPolicy,
             ),
         /ambiguous live message/,
     );
@@ -315,21 +320,55 @@ test("ambiguous input identities and unknown content fail before native data is 
 
 test("policy stamp validates transaction identity and refuses unsupported recipes", () => {
     const policy = resolveSummaryPolicy();
-    const stamp = projectionStamp(policy, "compaction");
+    const stamp = projectionStamp(policy, "compaction", "references");
     assert.deepEqual(readProjectionStamp(stamp, "compaction"), {
         reasoning: policy.reasoning,
         images: "references",
-        stampVersion: 2,
     });
     assert.equal(readProjectionStamp(stamp, "different"), null);
     assert.equal(readProjectionStamp("[fold-context-projection:2 {}]", "compaction"), null);
+    assert.equal(
+        readProjectionStamp(
+            '[fold-context-projection:2 {"reasoning":"preserve","compactionId":"compaction"}]',
+            "compaction",
+        ),
+        null,
+    );
+    assert.equal(
+        readProjectionStamp(
+            '[fold-context-projection:3 {"reasoning":"preserve","images":"native","compactionId":"compaction"}]',
+            "compaction",
+        ),
+        null,
+    );
     assert.equal(readProjectionStamp("ordinary historical summary", "compaction"), undefined);
     assert.equal(
         readProjectionStamp(
-            '[fold-context-projection:1 {"compactionId":"compaction"}]',
+            '[fold-context-projection:1 {"reasoning":"preserve","compactionId":"compaction"}]',
             "compaction",
         ),
         null,
     );
     assert.throws(() => resolveSummaryPolicy({ reasoning: "unsafe" }));
+});
+
+test("projection state rejects obsolete and incomplete receipts", () => {
+    const receipt = {
+        version: 2,
+        reasoning: "omit-from-summary",
+        images: "references",
+        attachments: [],
+        omittedReasoning: [],
+    };
+    const stateWith = (projection) => ({
+        ...ledgerProjection.init(),
+        lastSummary: { seq: 1, ids: [], excludedIds: [], projection },
+    });
+    assert.equal(ledgerSchema.safeParse(stateWith(receipt)).success, true);
+    assert.equal(ledgerSchema.safeParse(stateWith({ ...receipt, version: 1 })).success, false);
+    for (const field of ["images", "attachments"]) {
+        const incomplete = { ...receipt };
+        delete incomplete[field];
+        assert.equal(ledgerSchema.safeParse(stateWith(incomplete)).success, false, field);
+    }
 });

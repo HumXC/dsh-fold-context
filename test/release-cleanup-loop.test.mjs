@@ -5,10 +5,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loopFixture, assertTestRoot, call } from "./loop-fixture.mjs";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 for (const mode of ["native", "ptc", "siblings"])
-    test(`real AgentLoop ${mode} removes controls before the immediately next adapter request`, async (t) => {
+    test(`real AgentLoop ${mode} retains PTC work and cleans only direct release groups before the next request`, async (t) => {
         const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
         let f;
         let ids;
@@ -20,6 +19,7 @@ for (const mode of ["native", "ptc", "siblings"])
         });
         f = await loopFixture(root, {
             strictSession: true,
+            scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
             tools: { probe_read: () => "Consumed source evidence. ".repeat(300) },
             ...(mode === "native"
                 ? {}
@@ -67,14 +67,25 @@ for (const mode of ["native", "ptc", "siblings"])
                             .filter((block) => block.type === "tool-call")
                             .map((block) => block.id),
                     );
-                    assert.deepEqual(rootCalls, ["business-read"]);
-                    assert.equal(
-                        request.messages.some(
-                            (message) =>
-                                message.role === "tool" &&
-                                ["native-control", "ptc-control"].includes(message.source.callId),
-                        ),
-                        false,
+                    const expectedControls =
+                        mode === "native"
+                            ? []
+                            : mode === "ptc"
+                              ? ["ptc-control"]
+                              : ["native-control", "ptc-control"];
+                    assert.deepEqual(rootCalls, ["business-read", ...expectedControls]);
+                    assert.deepEqual(
+                        request.messages
+                            .filter(
+                                (message) =>
+                                    message.role === "tool" &&
+                                    ["native-control", "ptc-control"].includes(
+                                        message.source.callId,
+                                    ),
+                            )
+                            .map((message) => message.source.callId)
+                            .sort(),
+                        [...expectedControls].sort(),
                     );
                     assert.equal(
                         request.messages.some(
@@ -84,7 +95,7 @@ for (const mode of ["native", "ptc", "siblings"])
                     );
                     assert.equal(
                         JSON.stringify(request.messages).includes("Private native release reason"),
-                        false,
+                        mode === "siblings",
                     );
                     assert.equal(
                         JSON.stringify(request.messages).includes("Private PTC release reason"),
@@ -102,7 +113,6 @@ for (const mode of ["native", "ptc", "siblings"])
                 },
             ],
         });
-        installForcedReleaseBoundary(f);
         const handle = await f.create();
         await f.followup(handle, "Preserve A, release consumed evidence, then continue.");
         assert.ok(checked);
@@ -110,7 +120,7 @@ for (const mode of ["native", "ptc", "siblings"])
         assert.equal(f.summaries.length, 0);
     });
 
-test("a pure PTC call reusing an earlier retained native callId still disappears", async (t) => {
+test("a quiet PTC call reusing an earlier retained native callId remains intact", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
     let f;
     let ids;
@@ -122,6 +132,7 @@ test("a pure PTC call reusing an earlier retained native callId still disappears
     });
     f = await loopFixture(root, {
         strictSession: true,
+        scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
         tools: { probe_read: () => "Consumed source evidence." },
         ptc: async (tools) => ({
             value: await tools.context_release({ ids, reason: "Already consumed" }),
@@ -156,7 +167,7 @@ test("a pure PTC call reusing an earlier retained native callId still disappears
                         )
                         .map((block) => block.name),
                 );
-                assert.deepEqual(names, ["context_release"]);
+                assert.deepEqual(names, ["context_release", "run_code"]);
                 assert.ok(
                     JSON.stringify(request.messages).includes(
                         "Interleaved business finding must remain.",
@@ -175,7 +186,6 @@ test("a pure PTC call reusing an earlier retained native callId still disappears
         });
         exec.agent.session.append("user/message", message, { surfaceOp: "append" });
     });
-    installForcedReleaseBoundary(f);
     const handle = await f.create();
     await f.followup(handle, "Continue after releasing consumed evidence.");
     assert.ok(checked);

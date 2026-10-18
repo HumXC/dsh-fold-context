@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { loopFixture, call } from "./loop-fixture.mjs";
 import { temporaryRoot, png } from "./attachment-fixture.mjs";
-import { installForcedReleaseBoundary } from "./release-batch-fixture.mjs";
 
 function result(session, name) {
     const events = session.snapshotEvents();
@@ -31,7 +30,7 @@ test("real AgentLoop releases only selected attachment occurrences before recove
         attachments: true,
         inputModalities: ["text", "image"],
         auto: false,
-        scheduling: { enabled: false },
+        scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
         responses: [
             (_request, current) => {
                 const session = current.sessions.list()[0];
@@ -150,7 +149,6 @@ test("real AgentLoop releases only selected attachment occurrences before recove
             },
         }),
     );
-    installForcedReleaseBoundary(world);
     const image = await world.attachments.saveImage({ data: png(), mediaType: "image/png" });
     const file = await world.attachments.saveFile({
         data: Buffer.from("EXACT_FILE_BYTES\n"),
@@ -190,6 +188,19 @@ test("a released tool body and its child image remain archived after a covering 
     world = await loopFixture(root, {
         attachments: true,
         inputModalities: ["text", "image"],
+        compaction: { retainTokens: 0 },
+        // This scenario verifies archival coverage rather than production economics.
+        scheduling: {
+            minIntervalSteps: 0,
+            minSavingsTokens: 1,
+            minSavingsRatio: 0,
+            expectedSummaryRatio: 0.05,
+            cacheReadRatio: 1,
+            summaryInputRatio: 0.01,
+            summaryOutputRatio: 0.01,
+            releaseMinTokens: 0,
+            releaseBacklogRatio: 0.000001,
+        },
         responses: [
             call("picture"),
             (_request, current) => {
@@ -237,8 +248,16 @@ test("a released tool body and its child image remain archived after a covering 
                         .some((block) => block.type === "image"),
                     false,
                 );
-                return call("context_compact", { reason: "summarize prior work" });
+                return {
+                    blocks: [
+                        {
+                            type: "text",
+                            text: "The visual evidence has been consumed and its conclusions retained.",
+                        },
+                    ],
+                };
             },
+            call("context_compact", { reason: "summarize prior work" }),
             (_request, current) => {
                 assert.equal(
                     current.engine
@@ -250,7 +269,6 @@ test("a released tool body and its child image remain archived after a covering 
             },
         ],
     });
-    installForcedReleaseBoundary(world);
     const ref = await world.attachments.saveImage({ data: png(), mediaType: "image/png" });
     world.ctx.tools.register(
         defineTool({
@@ -266,6 +284,11 @@ test("a released tool body and its child image remain archived after a covering 
     );
     const handle = await world.create();
     await world.followup(handle, "Keep this completed-work objective. ".repeat(700));
+    assert.equal(world.summaries.length, 0);
+    await world.followup(
+        handle,
+        "Checkpoint the completed visual investigation and recover its archived image.",
+    );
     assert.equal(world.summaries.length, 1);
     const state = world.engine.state(handle.agent.session);
     const receipt = state.lastSummary;

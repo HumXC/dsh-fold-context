@@ -235,3 +235,54 @@ test("a previous inline batch cannot manufacture permission for another pending 
     assert.ok(f.session.surface.nodes.includes(second.seq));
     assert.equal(f.calls.length, 0);
 });
+
+test("native release-control cleanup cannot purchase another batch or rebuild credit on replay", async (t) => {
+    const f = await queued(t);
+    primaryCacheObservation(f);
+    assert.ok(commitForcedReleases(f) > 0);
+    assert.equal(entry(f).status, "released");
+    f.advanceSteps(100);
+    f.session.append("step/start", { turn: 1, step: 100 });
+    await f.ctx.waterfall(
+        "agent/request",
+        { agent: f.agent, turn: 1, step: 100, signal: signal() },
+        async () => ({ provider: "test", model: "fixture" }),
+    );
+    f.session.append("step/end", { turn: 1, step: 100 });
+    assert.ok(
+        f.session
+            .snapshotEvents()
+            .some(
+                (event) =>
+                    event.type === "developer/message" &&
+                    event.data.message.source.kind === "fold-context-release-cleanup",
+            ),
+    );
+    const second = f.toolRound("read_second_archive", "SECOND_QUEUED_ARCHIVE ".repeat(2000));
+    const secondId = f.idFor(second);
+    await f.invoke("context_release", {
+        ids: [Number(secondId)],
+        reason: "Second archive consumed",
+    });
+    const cold = Session.create(
+        f.session.id,
+        JSON.parse(JSON.stringify(f.session.snapshotEvents())),
+        f.session.header,
+    );
+    for (const session of [f.session, cold]) {
+        const evidence = f.engine.rebuildEvidence(session);
+        assert.equal(evidence.rebuildStartSeq, null);
+        assert.equal(evidence.independentRebuildTokens, 0);
+        assert.equal(
+            (await f.engine.schedulingStatus({ ...f.agent, session })).releaseBatch.decision,
+            "wait",
+        );
+    }
+    await f.engine.compactIfNeeded(f.agent, "pressure", signal());
+    assert.equal(
+        f.engine.state(f.session).entries.find((item) => item.id === secondId).status,
+        "queued",
+    );
+    assert.ok(f.session.surface.nodes.includes(second.seq));
+    assert.equal(f.calls.length, 0);
+});

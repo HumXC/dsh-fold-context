@@ -15,6 +15,8 @@ test("allocation notices stay outside summaries while literal ID-like business t
     let checked = false;
     t.after(() => world?.close());
     world = await loopFixture(root, {
+        compaction: { retainTokens: 0 },
+        scheduling: { minIntervalSteps: 0 },
         tools: { probe_read: () => business },
         responses: [
             call("probe_read"),
@@ -44,10 +46,15 @@ test("allocation notices stay outside summaries while literal ID-like business t
                     state.numbering.slots.find((item) => item.id === "2").sourceSeq,
                 );
                 assistantBytes = JSON.stringify(assistant.data);
-                return call("context_compact", {
-                    reason: "Retain the business code and project requirements.",
-                });
+                return {
+                    blocks: [
+                        { type: "text", text: "The business code and requirements are recorded." },
+                    ],
+                };
             },
+            call("context_compact", {
+                reason: "Retain the business code and project requirements.",
+            }),
             (_request, current) => {
                 assert.equal(current.summaries.length, 1);
                 const records = summaryRecords(current.summaries[0].messages);
@@ -63,5 +70,11 @@ test("allocation notices stay outside summaries while literal ID-like business t
     });
     const handle = await world.create();
     await world.followup(handle, input);
+    assert.equal(world.summaries.length, 0);
+    // The completed business frames become eligible once the next turn protects its own input.
+    await world.followup(
+        handle,
+        "Checkpoint the completed work and continue with the retained requirements.",
+    );
     assert.equal(checked, true);
 });

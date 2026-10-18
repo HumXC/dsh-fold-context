@@ -38,10 +38,3 @@ export function pendingReleaseReason(
     if (state.summaryRequests.at(-1)?.status === "failed") return "summary_failed";
     return "awaiting_covering_summary";
 }
-
-/** R labels describe a visible placeholder, not a historical summary exclusion. */
-export function hasInlinePlaceholder(entry: Entry | undefined): boolean {
-    return (
-        entry?.status === "released" && entry.releaseMode === "inline" && entry.currentSeq !== null
-    );
-}

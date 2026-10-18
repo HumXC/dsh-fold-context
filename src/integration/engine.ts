@@ -10,7 +10,7 @@ import { estimateMessage } from "@deepseek-ai/dsh-token-meter/estimate";
 import { SessionSeq, type Session } from "@deepseek-ai/dsh-session";
 import { ledgerProjection, type LedgerState } from "../domain/ledger.js";
 import { commitInlineReleases, estimateInlineReleases } from "./inline-release.js";
-import { releaseControlProjection } from "../domain/release-controls.js";
+import { releaseControlProjection, RELEASE_CLEANUP_SOURCE } from "../domain/release-controls.js";
 import { registerReleaseControlCleanup } from "./release-control.js";
 import { canReleaseInline } from "../domain/release.js";
 import { hasSummaryBusinessEvidence, isSummaryControlNotice } from "../domain/summary-evidence.js";
@@ -129,10 +129,6 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             return super.compactIfNeeded(agent, trigger, signal);
         }
         const requested = this.hasSummaryRequest(agent.session);
-        if (!this.schedulingPolicy.enabled && requested) {
-            await this.releaseBatch(agent, signal, "summary");
-            return super.compactIfNeeded(agent, "context-overflow", signal);
-        }
         if (this.autoEnabled) {
             const budget = await this.pressureBudget(agent, signal);
             if (budget !== null && this.measurement(agent.session).totalTokens >= budget.threshold)
@@ -190,11 +186,6 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             signal,
         );
     }
-    override async compactNow(...args: Parameters<BasicCompactionEngine["compactNow"]>) {
-        const [agent, signal] = args;
-        await this.releaseBatch(agent, signal, "user_compact");
-        return super.compactNow(...args);
-    }
     private cacheEvidence(session: Session): ReleaseCacheEvidence | null {
         const measurement = this.measurement(session);
         const usageSeq = measurement.usageSeq;
@@ -238,8 +229,8 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 const ownRelease =
                     preceding?.type === "compaction/prune" && RELEASE_TARGET_KEY in preceding.data;
                 const ownCleanup =
-                    event?.type === "user/message" &&
-                    event.data.source.kind === "fold-context-release-cleanup";
+                    event?.type === "developer/message" &&
+                    event.data.message.source.kind === RELEASE_CLEANUP_SOURCE;
                 if (
                     !ownRelease &&
                     !ownCleanup &&

@@ -11,10 +11,6 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./memory": {
-      "types": "./lib/memory/contracts.d.ts",
-      "default": "./lib/memory/contracts.js"
-    },
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },

@@ -16,8 +16,6 @@ export const CONTROL_TOOLS = new Set([
     SEARCH_TOOL,
 ]);
 export const SUMMARY_CONTROL_TOOLS = new Set([RELEASE_TOOL, COMPACT_TOOL, STATUS_TOOL]);
-export type EntryStatus = "available" | "queued" | "released" | "summarized";
-export type EntryRole = "user" | "assistant" | "tool";
 export const ID_PATTERN = /^[1-9]\d*$/;
 export const idArgumentSchema = z.number().int().positive().safe().transform(String);
 export function normalizeId(id: string): string {
@@ -32,21 +30,6 @@ export function inlineReleaseContent(id: string): { type: "text"; text: string }
             text: `[released ${normalizeId(id)}]`,
         },
     ];
-}
-export interface ContextEntry {
-    id: string;
-    role: EntryRole | "image" | "file";
-    ownerId?: string | null;
-    blockIndex?: number | null;
-    sourceSeq: number;
-    currentSeq: number | null;
-    messageId: string;
-    callId: string | null;
-    tool: string | null;
-    preview: string;
-    status: EntryStatus;
-    queuedAt: number | null;
-    reason: string | null;
 }
 export interface Intent {
     version: 8;

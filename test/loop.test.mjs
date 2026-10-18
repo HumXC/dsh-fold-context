@@ -111,7 +111,6 @@ test("real inline release replaces only the tool body before recovery without an
     let beforeRelease;
     const f = await setup(t, {
         auto: false,
-        scheduling: { enabled: false },
         tools: { probe_read: () => original },
         responses: [
             call("probe_read"),
@@ -207,11 +206,14 @@ test("real inline release replaces only the tool body before recovery without an
     );
 });
 
-test("real explicit summary runs below threshold and search discovers folded evidence", async (t) => {
+test("real eligible checkpoint request runs below threshold and search discovers folded evidence", async (t) => {
     const f = await setup(t, {
+        compaction: { retainTokens: 0 },
+        scheduling: { minIntervalSteps: 0 },
         tools: { probe_read: () => "SUMMARY_LOOP_HIDDEN ".repeat(1500) },
         responses: [
             call("probe_read"),
+            { blocks: [{ type: "text", text: "The original evidence has been inspected." }] },
             call("context_compact", { reason: "Checkpoint" }),
             (_request, world) => {
                 assert.equal(
@@ -226,6 +228,11 @@ test("real explicit summary runs below threshold and search discovers folded evi
     await f.followup(
         handle,
         "A large original should be retrievable after an explicit checkpoint. ".repeat(120),
+    );
+    assert.equal(f.summaries.length, 0);
+    await f.followup(
+        handle,
+        "Checkpoint the completed investigation and discover its original evidence.",
     );
     assert.equal(f.summaries.length, 1);
     const searched = toolOutcome(handle.agent.session, "context_search");

@@ -9,7 +9,8 @@ import { fixture } from "./fixture.mjs";
 import { summaryRecords } from "./summary-records.mjs";
 import { ALLOCATION_SOURCE } from "../lib/domain/numbering.js";
 import { projectSummaryInput, projectionReceipt } from "../lib/domain/summary-projection.js";
-import { resolveSummaryPolicy } from "../lib/domain/summary-policy.js";
+
+const projectionPolicy = { reasoning: "omit-from-summary", images: "references" };
 
 async function admit(f, input) {
     const decision = await f.ctx.waterfall(
@@ -77,7 +78,7 @@ test("summary input hides numeric message provenance without changing task text,
     assert.deepEqual(sourceIds, ["1", "2", "3"]);
     const messages = [user.data, assistant, result];
     const before = JSON.stringify({ events: f.session.snapshotEvents(), state, messages });
-    const projected = projectSummaryInput(state, messages, f.session.seq, resolveSummaryPolicy());
+    const projected = projectSummaryInput(state, messages, f.session.seq, projectionPolicy);
     const records = summaryRecords(projected);
     assert.equal(records.length, 4);
     assert.equal(
@@ -187,6 +188,8 @@ test("summary input retains attachment archive IDs while hiding owner IDs and al
             reasoning: "omit-from-summary",
             images,
         });
+        assert.equal(receipt.version, 2);
+        assert.equal(receipt.images, images);
         assert.deepEqual(
             receipt.attachments.map(({ id, ownerId }) => ({ id, ownerId })),
             attachments.map(({ id, ownerId }) => ({ id, ownerId })),
@@ -227,7 +230,7 @@ test("summary input omits allocation and release cleanup notices while preservin
     const messages = [{ ...allocation, id: input.id }, { ...cleanup, id: input.id }, input];
     const state = f.engine.state(f.session);
     const before = JSON.stringify({ events: f.session.snapshotEvents(), state, messages });
-    const projected = projectSummaryInput(state, messages, f.session.seq, resolveSummaryPolicy());
+    const projected = projectSummaryInput(state, messages, f.session.seq, projectionPolicy);
     const records = summaryRecords(projected);
     assert.equal(records.length, 1);
     assert.equal(records[0].role, "user");

@@ -88,8 +88,8 @@ export function catalog(
                           : {
                                 version: state.lastSummary.projection.version,
                                 reasoning: state.lastSummary.projection.reasoning,
-                                images: state.lastSummary.projection.images ?? null,
-                                attachments: (state.lastSummary.projection.attachments ?? [])
+                                images: state.lastSummary.projection.images,
+                                attachments: state.lastSummary.projection.attachments
                                     .filter(
                                         (item) =>
                                             ids === undefined ||
@@ -97,18 +97,17 @@ export function catalog(
                                             ids.includes(item.ownerId),
                                     )
                                     .slice(-limit),
-                                attachmentsTotal:
-                                    state.lastSummary.projection.attachments?.length ?? 0,
+                                attachmentsTotal: state.lastSummary.projection.attachments.length,
                                 attachmentsOmitted:
-                                    (state.lastSummary.projection.attachments?.length ?? 0) -
-                                    (state.lastSummary.projection.attachments
-                                        ?.filter(
+                                    state.lastSummary.projection.attachments.length -
+                                    state.lastSummary.projection.attachments
+                                        .filter(
                                             (item) =>
                                                 ids === undefined ||
                                                 ids.includes(item.id) ||
                                                 ids.includes(item.ownerId),
                                         )
-                                        .slice(-limit).length ?? 0),
+                                        .slice(-limit).length,
                                 omittedReasoning: state.lastSummary.projection.omittedReasoning
                                     .filter((item) => ids === undefined || ids.includes(item.id))
                                     .slice(-limit),

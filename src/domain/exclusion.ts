@@ -1,4 +1,3 @@
-import type { Message } from "@deepseek-ai/dsh-llm";
 import type { LedgerState } from "./ledger.js";
 
 /** Pure selection shared by request filtering and replay-time commit settlement. */
@@ -84,58 +83,4 @@ export function selectedExclusions(
         }
     }
     return eligible.filter((entry) => !blocked.has(entry.id));
-}
-
-/** Only the temporary summary request changes. No original message or event is mutated. */
-export function summaryInput(
-    state: LedgerState,
-    messages: readonly Message[],
-    cutoff: number,
-): Message[] {
-    const messageIds = new Set<string>(messages.map((message) => message.id));
-    const selected = new Set(
-        state.numbering.slots.flatMap((slot) =>
-            slot.currentSeq !== null && slot.messageId !== null && messageIds.has(slot.messageId)
-                ? [slot.currentSeq]
-                : [],
-        ),
-    );
-    const exclusions = selectedExclusions(state, selected, cutoff);
-    const textIds = new Set(
-        exclusions.filter((entry) => entry.role !== "tool").map((entry) => entry.messageId),
-    );
-    const resultIds = new Set(
-        exclusions.filter((entry) => entry.role === "tool").map((entry) => entry.messageId),
-    );
-    const slots = new Map(state.numbering.slots.map((slot) => [slot.id, slot]));
-    const owners = new Map(
-        state.numbering.slots
-            .filter((slot) => slot.role === "assistant")
-            .map((slot) => [slot.sourceSeq, slot]),
-    );
-    const calls = new Map<string, Set<string>>();
-    for (const entry of exclusions) {
-        if (entry.role !== "tool" || entry.callId === null) continue;
-        const owner = owners.get(slots.get(entry.id)?.reservationSeq ?? -1);
-        if (owner?.messageId == null) continue;
-        const ids = calls.get(owner.messageId) ?? new Set<string>();
-        ids.add(entry.callId);
-        calls.set(owner.messageId, ids);
-    }
-    return messages.flatMap<Message>((message) => {
-        if (message.role === "tool" && resultIds.has(message.id)) return [];
-        const content = message.content.filter(
-            (block) =>
-                !(block.type === "text" && textIds.has(message.id)) &&
-                !(
-                    message.role === "assistant" &&
-                    block.type === "tool-call" &&
-                    calls.get(message.id)?.has(block.id)
-                ),
-        );
-        if (content.length === message.content.length) return [message];
-        if (content.length === 0) return [];
-        // Retained adapter state and nontext blocks are never altered or reassigned.
-        return [{ ...message, content }];
-    });
 }

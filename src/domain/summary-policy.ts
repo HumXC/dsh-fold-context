@@ -10,7 +10,6 @@ export const resolveSummaryPolicy = (value: Partial<SummaryPolicy> = {}): Readon
 export interface ProjectionPolicy {
     reasoning: SummaryPolicy["reasoning"];
     images: "native" | "references";
-    stampVersion: 1 | 2;
 }
 export function characterCount(text: string): number {
     let count = 0;
@@ -20,7 +19,7 @@ export function characterCount(text: string): number {
 export function projectionStamp(
     policy: Pick<SummaryPolicy, "reasoning">,
     compactionId: string,
-    images: "native" | "references" = "references",
+    images: ProjectionPolicy["images"],
 ): string {
     return `[fold-context-projection:2 ${JSON.stringify({ reasoning: policy.reasoning, images, compactionId })}]`;
 }
@@ -29,32 +28,21 @@ export function readProjectionStamp(
     compactionId: string,
 ): ProjectionPolicy | null | undefined {
     if (!text?.startsWith("[fold-context-projection:")) return undefined;
-    const version = text.startsWith("[fold-context-projection:1 ")
-        ? 1
-        : text.startsWith("[fold-context-projection:2 ")
-          ? 2
-          : null;
-    if (version === null || !text.endsWith("]")) return null;
+    const prefix = "[fold-context-projection:2 ";
+    if (!text.startsWith(prefix) || !text.endsWith("]")) return null;
     try {
-        const base = z.object({
-            reasoning: z.enum(["preserve", "omit-from-summary"]),
-            compactionId: z.string(),
-        });
-        const schema =
-            version === 1
-                ? base.strict()
-                : base.extend({ images: z.enum(["native", "references"]) }).strict();
-        const parsed = schema.safeParse(
-            JSON.parse(text.slice(`[fold-context-projection:${version} `.length, -1)),
-        );
+        const parsed = z
+            .object({
+                reasoning: z.enum(["preserve", "omit-from-summary"]),
+                images: z.enum(["native", "references"]),
+                compactionId: z.string(),
+            })
+            .strict()
+            .safeParse(JSON.parse(text.slice(prefix.length, -1)));
         if (!parsed.success || parsed.data.compactionId !== compactionId) return null;
         return {
             reasoning: parsed.data.reasoning,
-            images:
-                "images" in parsed.data
-                    ? (parsed.data.images as "native" | "references")
-                    : "native",
-            stampVersion: version,
+            images: parsed.data.images,
         };
     } catch {
         return null;
