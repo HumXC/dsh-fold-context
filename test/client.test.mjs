@@ -37,6 +37,10 @@ function client() {
     let language = "zh";
     plugin.apply({
         effect: (callback) => callback(),
+        inject(_dependencies, callback) {
+            return callback(this);
+        },
+        remote: { settings: {}, session: {} },
         locale: {
             register: (_ns, dicts) => {
                 assert.deepEqual(Object.keys(dicts).sort(), ["en", "zh"]);
@@ -100,9 +104,10 @@ const outcome = (toolName, args, value, extra = {}) => ({
 const queued = { accepted: true, queued: ["2"], settled: [], unknown: [], unsupported: [] };
 const normalize = (value) => JSON.parse(JSON.stringify(value));
 
-test("five tool seats and the release node mount without private Client imports", () => {
+test("five tool seats, release node and bundle settings mount without private Client imports", () => {
     const c = client();
-    assert.equal(c.views.size, 6);
+    assert.equal(c.views.size, 7);
+    assert.ok(c.views.has("dsh-fold-context"));
     assert.equal(c.definitions.length, 1);
     for (const name of [
         "context_release",

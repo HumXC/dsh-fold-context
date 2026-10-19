@@ -1,5 +1,7 @@
 # 放在所选 Agent preset 的 config.plugins 列表内，替换原 compaction 组。
-# 安装 bundle 只加载 uiOnly 展示；压缩引擎由用户自行接入 preset。
+# bundle 的根 uiOnly 条目同时提供插件页和 summaryModels 设置；引擎读取其最新列表。
+# 摘要模型列表请在插件页设置，不在这个组片段内重复维护。
+# 压缩引擎由用户自行接入 preset。
 # 这是组片段，不是顶层 profile 补丁，也不是完整 preset 声明。
 # 同一 scope 不要挂载第二个 compaction provider（如 compaction-basic）。
 # tool-result-pruner 可选共存，DSH 提供运行包；不需要时可省略末尾 pruner row。
@@ -48,7 +50,7 @@
           maxCandidates: 5
         summary:
           reasoning: omit-from-summary
-          images: auto # 能力未知或文本模型仅传引用；也可固定为 references
+          images: auto # 模型不支持图片时传引用；引用投影优先于原生前缀缓存复用
         release:
           catalogLimit: 32 # 按需目录 1–128；准入 notice 最多另附 8 条语义变化
     - id: command-compact

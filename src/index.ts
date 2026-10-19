@@ -1,9 +1,14 @@
-import type { Context } from "@deepseek-ai/cordis";
+import type { Context, Volatile } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import {
-    BasicCompactionEngine,
-    type BasicCompactionConfig,
-} from "@deepseek-ai/dsh-compaction-basic";
+    foldCompactionSchema,
+    summaryModelConfigSchema,
+    type FoldCompactionConfig,
+} from "./config.js";
+import { resolveSummaryModels, type SummaryModel } from "./domain/summary-models.js";
+import { FoldContextSettings } from "./integration/settings.js";
+import { policyOverridesSchema, selectPolicyOverrides } from "./settings-config.js";
+import type { PolicyOverrides } from "./domain/settings-catalog.js";
 import { resolveReleasePolicy, type ReleasePolicy } from "./domain/planner.js";
 import { resolveSummaryPolicy, type SummaryPolicy } from "./domain/summary-policy.js";
 import { resolveSchedulingPolicy, type SchedulingPolicy } from "./domain/scheduler.js";
@@ -30,7 +35,9 @@ export const inject = [
 export interface Config {
     /** Root-profile mount exposes the Client half without installing another engine. */
     uiOnly?: boolean;
-    compaction?: BasicCompactionConfig;
+    compaction?: FoldCompactionConfig;
+    summaryModels?: Volatile<SummaryModel[]>;
+    policyOverrides?: Volatile<PolicyOverrides>;
     release?: Partial<ReleasePolicy>;
     summary?: Partial<SummaryPolicy>;
     scheduling?: Partial<SchedulingPolicy>;
@@ -40,7 +47,9 @@ const schedulingDefaults = resolveSchedulingPolicy();
 
 export const Config = z.object({
     uiOnly: z.boolean().default(false),
-    compaction: BasicCompactionEngine.Config.default({}),
+    compaction: foldCompactionSchema.default({}),
+    summaryModels: z.array(summaryModelConfigSchema).max(32).default([]).volatile(),
+    policyOverrides: policyOverridesSchema.volatile(),
     reminders: z
         .object({
             enabled: z.boolean().default(true),
@@ -134,14 +143,33 @@ export const Config = z.object({
         .default({}),
 });
 export function apply(ctx: Context, config: Config = {}) {
-    if (config.uiOnly) return;
+    if (config.uiOnly) {
+        if (config.summaryModels === undefined)
+            throw new Error("fold-context: settings require validated Config");
+        new FoldContextSettings(ctx, config.summaryModels, config.policyOverrides);
+        return;
+    }
+    // Runtime policy is captured once; an in-flight native transaction keeps one configuration.
+    const policy = selectPolicyOverrides(
+        {
+            compaction: config.compaction ?? {},
+            release: resolveReleasePolicy(config.release),
+            summary: resolveSummaryPolicy(config.summary),
+            scheduling: resolveSchedulingPolicy(config.scheduling),
+            reminders: resolveReminderPolicy(config.reminders),
+        },
+        ctx.get("foldContextSettings")?.policies(),
+    );
     const engine = new ContextCompressionEngine(
         ctx,
-        config.compaction ?? {},
-        resolveReleasePolicy(config.release),
-        resolveSummaryPolicy(config.summary),
-        resolveSchedulingPolicy(config.scheduling),
-        resolveReminderPolicy(config.reminders),
+        policy.compaction,
+        policy.release,
+        policy.summary,
+        policy.scheduling,
+        policy.reminders,
+        () =>
+            ctx.get("foldContextSettings")?.current() ??
+            resolveSummaryModels(config.summaryModels?.get() ?? []),
     );
     registerCompressionTools(ctx, engine);
     registerRecoveryTools(ctx, engine);

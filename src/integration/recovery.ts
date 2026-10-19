@@ -23,6 +23,7 @@ import {
 import { EXPAND_TOOL, SEARCH_TOOL, idArgumentSchema } from "../domain/protocol.js";
 import "@deepseek-ai/dsh-session-query";
 import { expandAttachment, renderRecovered } from "./attachment-recovery.js";
+import { optionalItems, optionalParameter, optionalText } from "./tool-arguments.js";
 const idSchema = idArgumentSchema;
 const rolesSchema = z
     .array(z.enum(["user", "assistant", "tool"]))
@@ -75,17 +76,16 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                     type: "integer",
                     required: true,
                     description:
-                        "A positive session number from a declaration, search result, or context_status.",
+                        "A positive safe-integer session number from a declaration, search result, or context_status.",
                 },
-                offset: {
-                    type: "integer",
-                    description:
-                        "Unicode code-point offset; defaults to 0. Use the returned nextOffset for the next page.",
-                },
-                limit: {
-                    type: "integer",
-                    description: "Maximum Unicode code points, 1–16000; defaults to 4000.",
-                },
+                offset: optionalParameter(
+                    { type: "integer" },
+                    "Nonnegative safe-integer Unicode code-point offset; omit/null = 0. Use nextOffset to page.",
+                ),
+                limit: optionalParameter(
+                    { type: "integer" },
+                    "Maximum Unicode code points, 1–16000; omit/null = 4000.",
+                ),
             },
             output: {
                 schema: { type: "json" },
@@ -177,26 +177,25 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                     description:
                         "Literal content fragment, 1–200 characters. Regex syntax is treated literally.",
                 },
-                roles: {
-                    type: "array",
-                    items: { type: "string", enum: ["user", "assistant", "tool"] },
-                    description: "Optional roles to search; defaults to all three.",
-                },
-                tool: {
-                    type: "string",
-                    description:
-                        "Optional exact tool name; limits results to that tool's original result bodies.",
-                },
-                limit: {
-                    type: "integer",
-                    description:
-                        "Maximum hits, 1–20; defaults to 8. Snippets are capped at 160 Unicode code points plus ellipses.",
-                },
-                cursor: {
-                    type: "string",
-                    description:
-                        "The returned nextCursor for the same query and filters. New messages after the first page are excluded until a new search.",
-                },
+                roles: optionalParameter(
+                    {
+                        type: "array",
+                        items: { type: "string", enum: ["user", "assistant", "tool"] },
+                    },
+                    "Filter by 1–3 roles; omit/null/[] searches all three.",
+                ),
+                tool: optionalParameter(
+                    { type: "string" },
+                    'Exact tool name, 1–256 characters; omit/null/"" disables this filter.',
+                ),
+                limit: optionalParameter(
+                    { type: "integer" },
+                    "Maximum hits, 1–20; omit/null = 8. Snippets are capped at 160 Unicode code points plus ellipses.",
+                ),
+                cursor: optionalParameter(
+                    { type: "string" },
+                    'Returned nextCursor, 1–2048 characters; omit/null/"" starts a new search. Keep the query and filters unchanged when paging.',
+                ),
             },
             output: {
                 schema: { type: "json" },
@@ -207,12 +206,13 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                 const agent = owner(exec);
                 const query = z.string().min(1).max(200).parse(args.query);
                 const roles = [
-                    ...new Set(rolesSchema.parse(args.roles ?? ["user", "assistant", "tool"])),
+                    ...new Set(
+                        rolesSchema.parse(
+                            optionalItems(args.roles) ?? ["user", "assistant", "tool"],
+                        ),
+                    ),
                 ];
-                const tool =
-                    args.tool === undefined
-                        ? undefined
-                        : z.string().min(1).max(256).parse(args.tool);
+                const tool = z.string().min(1).max(256).optional().parse(optionalText(args.tool));
                 const limit = z
                     .number()
                     .int()
@@ -224,8 +224,9 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                 const currentSeq = agent.session.seq - 1;
                 let throughSeq = currentSeq;
                 let afterSeq = -1;
-                if (args.cursor !== undefined) {
-                    const cursor = z.string().min(1).max(2048).parse(args.cursor);
+                const cursorValue = optionalText(args.cursor);
+                if (cursorValue !== undefined) {
+                    const cursor = z.string().min(1).max(2048).parse(cursorValue);
                     let decoded: unknown;
                     try {
                         decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));

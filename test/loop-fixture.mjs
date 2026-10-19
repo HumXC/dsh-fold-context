@@ -143,6 +143,12 @@ export async function loopFixture(root, options = {}) {
             ...options.compaction,
         },
         summary: { reasoning: options.reasoning ?? "omit-from-summary" },
+        summaryModels: {
+            get: () =>
+                options.summaryModels ?? [
+                    { provider: "test", model: "summary-mock", preferWhenSessionMatches: true },
+                ],
+        },
         release: { catalogLimit: 32 },
         scheduling: options.scheduling ?? {},
     });

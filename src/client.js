@@ -134,6 +134,49 @@ window.__ModuleLoader__.load({
             copyId: "复制编号",
             copied: "已复制",
             noPreview: "未记录内容预览",
+            summarySettingsTitle: "摘要模型",
+            summarySettingsDescription:
+                "按列表顺序尝试摘要模型，失败时尝试下一项。匹配当前会话且开启优先的项会提前。",
+            summarySettingsEmpty: "列表为空时，使用当前会话模型和思考强度进行摘要。",
+            summarySettingsRow: "摘要模型 {index}",
+            summarySettingsProvider: "供应商",
+            summarySettingsModel: "模型",
+            summarySettingsEffort: "思考强度",
+            summarySettingsChooseProvider: "选择供应商",
+            summarySettingsChooseModel: "选择模型",
+            summarySettingsAuto: "自动（同模型沿用会话，否则使用供应商默认值）",
+            summarySettingsPrefer: "匹配会话时优先",
+            summarySettingsPreferHelp:
+                "当前会话使用相同供应商和模型时优先尝试此项，否则按列表顺序尝试。",
+            summarySettingsAdd: "添加模型",
+            summarySettingsUp: "上移",
+            summarySettingsDown: "下移",
+            summarySettingsDelete: "删除",
+            summarySettingsUnavailable: "当前不可用",
+            summarySettingsUnavailableHelp:
+                "此供应商或模型未出现在当前目录中；已保存的配置仍会保留。",
+            summarySettingsInvalidEffort: "此模型不支持已选思考强度，请明确选择其他强度或自动。",
+            summarySettingsIncomplete: "请选择供应商和模型。",
+            summarySettingsLoading: "正在读取摘要配置…",
+            summarySettingsLoadFailed: "无法读取摘要配置",
+            summarySettingsMissing:
+                "尚未找到 fold 的可编辑摘要配置，请确认根条目已提供 summaryModels。",
+            summarySettingsAmbiguous: "发现多个 fold 配置条目，无法安全确定保存目标。",
+            summarySettingsInvalid: "摘要配置格式无效，未覆盖现有配置。",
+            summarySettingsCatalogLoading: "正在读取模型目录…",
+            summarySettingsCatalogFailed: "无法读取模型目录；已有配置仍会保留。",
+            summarySettingsCatalogPartial: "部分供应商目录读取失败；已有配置仍会保留。",
+            summarySettingsRefreshCatalog: "刷新模型目录",
+            summarySettingsRetry: "重试读取配置",
+            summarySettingsReload: "重新加载并放弃未保存修改",
+            summarySettingsReadOnly: "当前配置只读。",
+            summarySettingsSave: "保存",
+            summarySettingsSaving: "正在保存…",
+            summarySettingsSaved: "已保存；下一次摘要使用此配置。",
+            summarySettingsSaveFailed: "保存失败",
+            summarySettingsConflict: "配置已被其他页面修改。草稿已保留，请重新加载后再编辑。",
+            summarySettingsTransport: "配置连接暂不可用。",
+            summarySettingsResponse: "服务器返回了无法识别的配置响应。",
         };
         const en = {
             release: "Mark context for release",
@@ -261,10 +304,958 @@ window.__ModuleLoader__.load({
             copyId: "Copy ID",
             copied: "Copied",
             noPreview: "No recorded preview",
+            summarySettingsTitle: "Summary models",
+            summarySettingsDescription:
+                "Try models in list order and fall back on failure. Matching session models with priority enabled move first.",
+            summarySettingsEmpty:
+                "An empty list follows the current session model and reasoning effort.",
+            summarySettingsRow: "Summary model {index}",
+            summarySettingsProvider: "Provider",
+            summarySettingsModel: "Model",
+            summarySettingsEffort: "Reasoning effort",
+            summarySettingsChooseProvider: "Choose a provider",
+            summarySettingsChooseModel: "Choose a model",
+            summarySettingsAuto:
+                "Automatic (inherit matching session effort, otherwise provider default)",
+            summarySettingsPrefer: "Prioritize when matching the session",
+            summarySettingsPreferHelp:
+                "Try this entry first when the current session uses the same provider and model; otherwise follow list order.",
+            summarySettingsAdd: "Add model",
+            summarySettingsUp: "Move up",
+            summarySettingsDown: "Move down",
+            summarySettingsDelete: "Delete",
+            summarySettingsUnavailable: "Currently unavailable",
+            summarySettingsUnavailableHelp:
+                "This provider or model is absent from the current catalog; its saved configuration is retained.",
+            summarySettingsInvalidEffort:
+                "This model does not support the selected effort. Explicitly choose another effort or Automatic.",
+            summarySettingsIncomplete: "Choose a provider and model.",
+            summarySettingsLoading: "Loading summary settings…",
+            summarySettingsLoadFailed: "Could not load summary settings",
+            summarySettingsMissing:
+                "Editable fold summary settings are unavailable. The root entry must expose summaryModels.",
+            summarySettingsAmbiguous:
+                "Multiple fold settings entries were found; the save target is ambiguous.",
+            summarySettingsInvalid:
+                "Invalid summary settings; existing configuration has not been overwritten.",
+            summarySettingsCatalogLoading: "Loading model catalog…",
+            summarySettingsCatalogFailed:
+                "Could not load the model catalog; existing configuration is retained.",
+            summarySettingsCatalogPartial:
+                "Some provider catalogs failed to load; existing configuration is retained.",
+            summarySettingsRefreshCatalog: "Refresh model catalog",
+            summarySettingsRetry: "Retry loading settings",
+            summarySettingsReload: "Reload and discard unsaved changes",
+            summarySettingsReadOnly: "These settings are read-only.",
+            summarySettingsSave: "Save",
+            summarySettingsSaving: "Saving…",
+            summarySettingsSaved: "Saved. The next summary will use these settings.",
+            summarySettingsSaveFailed: "Could not save settings",
+            summarySettingsConflict:
+                "Another page changed these settings. Your draft is retained; reload before editing again.",
+            summarySettingsTransport: "The settings connection is unavailable.",
+            summarySettingsResponse: "The server returned an unrecognized settings response.",
         };
         const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+        /*__FOLD_POLICY_SETTINGS__*/
         const text = (v) => (typeof v === "string" ? v : "");
         const list = (v) => (Array.isArray(v) ? v : []);
+        const settingsProblem = (key, message = "", code = "") =>
+            Object.assign(new Error(message), { key, code });
+        const settingsValue = (response) => {
+            if (response?.ok === true) return response.value;
+            if (response?.ok === false)
+                throw settingsProblem(
+                    "",
+                    text(response.error?.message),
+                    text(response.error?.code),
+                );
+            throw settingsProblem("summarySettingsResponse");
+        };
+        function summarySettingsNamespace(description) {
+            const candidates = list(description?.namespaces).filter(
+                (entry) =>
+                    (entry.ns === "fold-context-ui" ||
+                        text(entry.ns).endsWith(":fold-context-ui")) &&
+                    object(entry.value) &&
+                    Object.hasOwn(entry.value, "summaryModels"),
+            );
+            const exact = candidates.filter((entry) => entry.ns === "fold-context-ui");
+            const matches = exact.length ? exact : candidates;
+            if (matches.length !== 1)
+                throw settingsProblem(
+                    matches.length ? "summarySettingsAmbiguous" : "summarySettingsMissing",
+                );
+            if (!Number.isSafeInteger(matches[0].revision) || matches[0].revision < 0)
+                throw settingsProblem("summarySettingsInvalid");
+            return matches[0];
+        }
+        function summarySettingsRows(value) {
+            if (!Array.isArray(value) || value.length > 32)
+                throw settingsProblem("summarySettingsInvalid");
+            return value.map((row) => {
+                if (
+                    !object(row) ||
+                    !text(row.provider) ||
+                    !text(row.model) ||
+                    (row.reasoningEffort !== undefined && !text(row.reasoningEffort)) ||
+                    (row.preferWhenSessionMatches !== undefined &&
+                        typeof row.preferWhenSessionMatches !== "boolean")
+                )
+                    throw settingsProblem("summarySettingsInvalid");
+                return {
+                    provider: row.provider,
+                    model: row.model,
+                    ...(row.reasoningEffort === undefined
+                        ? {}
+                        : { reasoningEffort: row.reasoningEffort }),
+                    preferWhenSessionMatches: row.preferWhenSessionMatches ?? true,
+                };
+            });
+        }
+        function summarySettingsCatalog(value) {
+            if (!Array.isArray(value?.groups) || !Array.isArray(value.failures))
+                throw settingsProblem("summarySettingsResponse");
+            const groups = value.groups.map((group) => {
+                if (!text(group.id) || !text(group.name) || !Array.isArray(group.models))
+                    throw settingsProblem("summarySettingsResponse");
+                return {
+                    id: group.id,
+                    name: group.name,
+                    models: group.models.map((model) => {
+                        if (
+                            !text(model.id) ||
+                            !text(model.name) ||
+                            (model.reasoning !== undefined &&
+                                !Array.isArray(model.reasoning?.efforts))
+                        )
+                            throw settingsProblem("summarySettingsResponse");
+                        const efforts = list(model.reasoning?.efforts).map((effort) => {
+                            if (!text(effort.id) || !text(effort.name))
+                                throw settingsProblem("summarySettingsResponse");
+                            return {
+                                id: effort.id,
+                                name: effort.name,
+                                description: text(effort.description),
+                            };
+                        });
+                        return { id: model.id, name: model.name, efforts };
+                    }),
+                };
+            });
+            return {
+                groups,
+                failures: value.failures.map((failure) => ({
+                    id: text(failure.id),
+                    name: text(failure.name),
+                    message: text(failure.message),
+                })),
+            };
+        }
+        function summarySettingsRowState(row, groups, catalogStatus) {
+            const provider = groups.find((group) => group.id === row.provider);
+            const model = provider?.models.find((candidate) => candidate.id === row.model);
+            const incomplete = !row.provider || !row.model;
+            return {
+                provider,
+                model,
+                incomplete,
+                unavailable: !incomplete && catalogStatus === "ready" && !model,
+                invalidEffort:
+                    !!model &&
+                    row.reasoningEffort !== undefined &&
+                    !model.efforts.some((effort) => effort.id === row.reasoningEffort),
+            };
+        }
+        // A page-owned staged editor. It never writes until the user presses Save.
+        class SummarySettingsController {
+            constructor(remote) {
+                this.remote = remote;
+                this.listeners = new Set();
+                this.active = false;
+                this.settingsGeneration = 0;
+                this.catalogGeneration = 0;
+                this.saveGeneration = 0;
+                this.keySequence = 0;
+                this.state = {
+                    settingsStatus: "loading",
+                    catalogStatus: "loading",
+                    namespace: null,
+                    revision: null,
+                    writable: false,
+                    rows: [],
+                    rowKeys: [],
+                    baseRows: [],
+                    supportsPolicies: false,
+                    policyOverrides: null,
+                    basePolicyOverrides: null,
+                    policyRowKeys: [],
+                    dirty: false,
+                    conflicted: false,
+                    saving: false,
+                    saved: false,
+                    settingsError: null,
+                    catalogError: null,
+                    saveError: null,
+                    groups: [],
+                    failures: [],
+                };
+            }
+            getSnapshot() {
+                return this.state;
+            }
+            subscribe(listener) {
+                this.listeners.add(listener);
+                return () => this.listeners.delete(listener);
+            }
+            publish(patch) {
+                if (!this.active) return;
+                this.state = { ...this.state, ...patch };
+                for (const listener of this.listeners) listener();
+            }
+            async start() {
+                this.active = true;
+                await Promise.all([this.loadSettings(), this.loadCatalog()]);
+            }
+            stop() {
+                this.active = false;
+                this.settingsGeneration += 1;
+                this.catalogGeneration += 1;
+                this.saveGeneration += 1;
+            }
+            async reconnect() {
+                if (!this.active) return;
+                this.settingsGeneration += 1;
+                this.catalogGeneration += 1;
+                this.saveGeneration += 1;
+                // A new connection may point at another Host with an unrelated revision sequence.
+                this.publish({
+                    saving: false,
+                    saved: false,
+                    conflicted: this.state.dirty,
+                    groups: [],
+                    failures: [],
+                    saveError: null,
+                });
+                await Promise.all([this.loadSettings(), this.loadCatalog()]);
+            }
+            async loadSettings(discard = false) {
+                if (!this.active || this.state.saving) return;
+                const generation = ++this.settingsGeneration;
+                this.publish({ settingsStatus: "loading", settingsError: null });
+                try {
+                    if (!this.remote?.settings?.describe)
+                        throw settingsProblem("summarySettingsTransport");
+                    const description = settingsValue(await this.remote.settings.describe());
+                    if (!this.active || generation !== this.settingsGeneration) return;
+                    const entry = summarySettingsNamespace(description);
+                    const rows = summarySettingsRows(entry.value.summaryModels);
+                    const supportsPolicies = Object.hasOwn(entry.value, "policyOverrides");
+                    const policyOverrides = supportsPolicies
+                        ? normalizePolicyOverrides(entry.value.policyOverrides)
+                        : null;
+                    const { state } = this;
+                    if (
+                        !discard &&
+                        state.dirty &&
+                        (JSON.stringify(rows) !== JSON.stringify(state.rows) ||
+                            supportsPolicies !== state.supportsPolicies ||
+                            JSON.stringify(policyOverrides) !==
+                                JSON.stringify(state.policyOverrides))
+                    ) {
+                        this.publish({
+                            settingsStatus: "ready",
+                            writable: description.writable === true,
+                            conflicted:
+                                state.conflicted ||
+                                entry.ns !== state.namespace ||
+                                entry.revision !== state.revision,
+                        });
+                        return;
+                    }
+                    this.publish({
+                        settingsStatus: "ready",
+                        namespace: entry.ns,
+                        revision: entry.revision,
+                        writable: description.writable === true,
+                        rows,
+                        baseRows: rows,
+                        supportsPolicies,
+                        policyOverrides,
+                        basePolicyOverrides: policyOverrides,
+                        policyRowKeys: (policyOverrides?.compaction.values.modelPolicies ?? []).map(
+                            () => ++this.keySequence,
+                        ),
+                        rowKeys: rows.map(() => ++this.keySequence),
+                        dirty: false,
+                        conflicted: false,
+                        saveError: null,
+                        saved: false,
+                    });
+                } catch (error) {
+                    if (generation === this.settingsGeneration)
+                        this.publish({ settingsStatus: "error", settingsError: error });
+                }
+            }
+            async loadCatalog() {
+                if (!this.active) return;
+                const generation = ++this.catalogGeneration;
+                this.publish({ catalogStatus: "loading", catalogError: null });
+                try {
+                    if (!this.remote?.session?.modelCatalog)
+                        throw settingsProblem("summarySettingsTransport");
+                    const value = settingsValue(await this.remote.session.modelCatalog());
+                    if (!this.active || generation !== this.catalogGeneration) return;
+                    this.publish({ ...summarySettingsCatalog(value), catalogStatus: "ready" });
+                } catch (error) {
+                    if (generation === this.catalogGeneration)
+                        this.publish({ catalogStatus: "error", catalogError: error });
+                }
+            }
+            canEdit() {
+                return (
+                    this.active &&
+                    this.state.settingsStatus === "ready" &&
+                    this.state.writable &&
+                    !this.state.saving &&
+                    !this.state.conflicted
+                );
+            }
+            edit(rows, rowKeys = this.state.rowKeys) {
+                if (!this.canEdit()) return;
+                this.publish({
+                    rows,
+                    rowKeys,
+                    dirty:
+                        JSON.stringify(rows) !== JSON.stringify(this.state.baseRows) ||
+                        (this.state.supportsPolicies &&
+                            policyDraftDirty(
+                                this.state.policyOverrides,
+                                this.state.basePolicyOverrides,
+                            )),
+                    saved: false,
+                    saveError: null,
+                });
+            }
+            add() {
+                if (
+                    !this.canEdit() ||
+                    this.state.catalogStatus !== "ready" ||
+                    this.state.rows.length >= 32 ||
+                    !this.state.groups.some((g) => g.models.length)
+                )
+                    return;
+                this.edit(
+                    [
+                        ...this.state.rows,
+                        { provider: "", model: "", preferWhenSessionMatches: true },
+                    ],
+                    [...this.state.rowKeys, ++this.keySequence],
+                );
+            }
+            remove(index) {
+                this.edit(
+                    this.state.rows.filter((_row, i) => i !== index),
+                    this.state.rowKeys.filter((_key, i) => i !== index),
+                );
+            }
+            move(index, offset) {
+                const target = index + offset;
+                if (
+                    ![-1, 1].includes(offset) ||
+                    index < 0 ||
+                    index >= this.state.rows.length ||
+                    target < 0 ||
+                    target >= this.state.rows.length
+                )
+                    return;
+                const rows = [...this.state.rows],
+                    keys = [...this.state.rowKeys];
+                [rows[index], rows[target]] = [rows[target], rows[index]];
+                [keys[index], keys[target]] = [keys[target], keys[index]];
+                this.edit(rows, keys);
+            }
+            change(index, field, value) {
+                if (
+                    !this.state.rows[index] ||
+                    !["provider", "model", "reasoningEffort", "preferWhenSessionMatches"].includes(
+                        field,
+                    )
+                )
+                    return;
+                const row = { ...this.state.rows[index] };
+                if (field === "preferWhenSessionMatches") row[field] = value === true;
+                else if (field === "reasoningEffort" && value === "") delete row.reasoningEffort;
+                else if (typeof value === "string") {
+                    if (field === "provider" && value !== row.provider) row.model = "";
+                    row[field] = value;
+                } else return;
+                // Preserve explicit efforts across route changes until the user changes them.
+                this.edit(this.state.rows.map((old, i) => (i === index ? row : old)));
+            }
+            editPolicies(policyOverrides, policyRowKeys = this.state.policyRowKeys) {
+                if (!this.canEdit() || !this.state.supportsPolicies) return;
+                this.publish({
+                    policyOverrides,
+                    policyRowKeys,
+                    dirty:
+                        JSON.stringify(this.state.rows) !== JSON.stringify(this.state.baseRows) ||
+                        policyDraftDirty(policyOverrides, this.state.basePolicyOverrides),
+                    saved: false,
+                    saveError: null,
+                });
+            }
+            setPolicyMode(group, enabled) {
+                const entry = this.state.policyOverrides?.[group];
+                if (!entry || typeof enabled !== "boolean") return;
+                this.editPolicies({
+                    ...this.state.policyOverrides,
+                    [group]: { ...entry, enabled },
+                });
+            }
+            changePolicy(group, key, value) {
+                const entry = this.state.policyOverrides?.[group];
+                if (
+                    !entry ||
+                    !POLICY_GROUPS.find((item) => item.key === group)?.fields.some(
+                        (field) => field.key === key,
+                    )
+                )
+                    return;
+                this.editPolicies({
+                    ...this.state.policyOverrides,
+                    [group]: { ...entry, values: { ...entry.values, [key]: value } },
+                });
+            }
+            resetPolicy(group) {
+                const entry = this.state.policyOverrides?.[group];
+                if (!entry) return;
+                const defaults = normalizePolicyOverrides({})[group];
+                this.editPolicies(
+                    {
+                        ...this.state.policyOverrides,
+                        [group]: { ...defaults, enabled: entry.enabled },
+                    },
+                    group === "compaction" ? [] : this.state.policyRowKeys,
+                );
+            }
+            policyError() {
+                if (!this.state.supportsPolicies) return null;
+                try {
+                    policyDraftPayload(this.state.policyOverrides);
+                    return null;
+                } catch (error) {
+                    return error;
+                }
+            }
+            editPolicyModels(rows, keys = this.state.policyRowKeys) {
+                const entry = this.state.policyOverrides?.compaction;
+                if (!entry) return;
+                this.editPolicies(
+                    {
+                        ...this.state.policyOverrides,
+                        compaction: { ...entry, values: { ...entry.values, modelPolicies: rows } },
+                    },
+                    keys,
+                );
+            }
+            addPolicyModel() {
+                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                if (
+                    !rows ||
+                    rows.length >= 128 ||
+                    this.state.catalogStatus !== "ready" ||
+                    !this.state.groups.some((group) => group.models.length)
+                )
+                    return;
+                this.editPolicyModels(
+                    [...rows, { provider: "", model: "" }],
+                    [...this.state.policyRowKeys, ++this.keySequence],
+                );
+            }
+            removePolicyModel(index) {
+                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                if (rows)
+                    this.editPolicyModels(
+                        rows.filter((_row, i) => i !== index),
+                        this.state.policyRowKeys.filter((_key, i) => i !== index),
+                    );
+            }
+            movePolicyModel(index, offset) {
+                const rows = [
+                    ...(this.state.policyOverrides?.compaction.values.modelPolicies ?? []),
+                ];
+                const keys = [...this.state.policyRowKeys];
+                const target = index + offset;
+                if (
+                    ![-1, 1].includes(offset) ||
+                    index < 0 ||
+                    index >= rows.length ||
+                    target < 0 ||
+                    target >= rows.length
+                )
+                    return;
+                [rows[index], rows[target]] = [rows[target], rows[index]];
+                [keys[index], keys[target]] = [keys[target], keys[index]];
+                this.editPolicyModels(rows, keys);
+            }
+            changePolicyModel(index, key, value) {
+                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                if (
+                    !rows?.[index] ||
+                    ![
+                        "provider",
+                        "model",
+                        ...POLICY_GROUPS[0].fields
+                            .filter((field) => field.key !== "auto")
+                            .map((field) => field.key),
+                    ].includes(key)
+                )
+                    return;
+                const row = { ...rows[index], [key]: value };
+                if (key === "provider" && row.provider !== rows[index].provider) row.model = "";
+                this.editPolicyModels(rows.map((old, i) => (i === index ? row : old)));
+            }
+            canSave() {
+                return (
+                    this.canEdit() &&
+                    this.state.dirty &&
+                    this.state.rows.length <= 32 &&
+                    this.policyError() === null &&
+                    this.state.rows.every((row) => {
+                        const detail = summarySettingsRowState(
+                            row,
+                            this.state.groups,
+                            this.state.catalogStatus,
+                        );
+                        return !detail.incomplete && !detail.invalidEffort;
+                    })
+                );
+            }
+            async save() {
+                if (!this.canSave()) return false;
+                const generation = ++this.saveGeneration;
+                ++this.settingsGeneration;
+                const { namespace, revision, rows, supportsPolicies } = this.state;
+                const value = rows.map((row) => ({ ...row }));
+                const operations = [{ op: "set", path: ["summaryModels"], value }];
+                if (supportsPolicies)
+                    operations.push({
+                        op: "set",
+                        path: ["policyOverrides"],
+                        value: policyDraftPayload(this.state.policyOverrides),
+                    });
+                this.publish({ saving: true, saved: false, saveError: null });
+                try {
+                    if (!this.remote?.settings?.mutate)
+                        throw settingsProblem("summarySettingsTransport");
+                    const entry = settingsValue(
+                        await this.remote.settings.mutate(namespace, operations, revision),
+                    );
+                    if (!this.active || generation !== this.saveGeneration) return false;
+                    if (
+                        entry?.ns !== namespace ||
+                        !Number.isSafeInteger(entry.revision) ||
+                        entry.revision < revision
+                    )
+                        throw settingsProblem("summarySettingsResponse");
+                    const accepted = summarySettingsRows(entry.value?.summaryModels);
+                    if (supportsPolicies && !Object.hasOwn(entry.value ?? {}, "policyOverrides"))
+                        throw settingsProblem("summarySettingsResponse");
+                    const acceptedPolicies = supportsPolicies
+                        ? normalizePolicyOverrides(entry.value.policyOverrides)
+                        : null;
+                    this.publish({
+                        rows: accepted,
+                        baseRows: accepted,
+                        policyOverrides: acceptedPolicies,
+                        basePolicyOverrides: acceptedPolicies,
+                        policyRowKeys: (
+                            acceptedPolicies?.compaction.values.modelPolicies ?? []
+                        ).map(
+                            (_row, index) => this.state.policyRowKeys[index] ?? ++this.keySequence,
+                        ),
+                        revision: entry.revision,
+                        rowKeys: accepted.map(
+                            (_row, index) => this.state.rowKeys[index] ?? ++this.keySequence,
+                        ),
+                        dirty: false,
+                        conflicted: false,
+                        saving: false,
+                        saved: true,
+                    });
+                    return true;
+                } catch (error) {
+                    if (generation === this.saveGeneration)
+                        this.publish({
+                            saving: false,
+                            saveError: error,
+                            conflicted: error?.code === "settings/conflict",
+                        });
+                    return false;
+                }
+            }
+        }
+        const summarySettingsCss = `
+.fc-settings{display:grid;gap:16px;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.55}
+.fc-settings h3,.fc-settings p{margin:0}.fc-settings h3{font-size:15px;font-weight:500}.fc-settings-note{color:var(--dsw-alias-label-secondary)}
+.fc-settings-list{display:grid;gap:12px;list-style:none;padding:0;margin:0}.fc-settings-list>li{min-width:0}.fc-settings-row{min-width:0;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 16px;margin:0;background:var(--dsw-alias-bg-layer-1)}
+.fc-settings-row legend{font-weight:500;padding:0 5px}.fc-settings-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fc-settings-field{display:grid;gap:5px;min-width:0}.fc-settings-effort{grid-column:1/-1}.fc-settings select{box-sizing:border-box;min-width:0;max-width:100%;width:100%;padding:7px 9px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit}
+.fc-settings button{padding:6px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer}.fc-settings button:disabled,.fc-settings select:disabled{opacity:.55;cursor:default}.fc-settings :is(button,select,input):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}.fc-settings-primary{font-weight:500}
+.fc-settings-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.fc-settings-row-actions{justify-content:flex-end;margin-top:12px}.fc-settings-priority{display:flex;gap:8px;align-items:center;margin-top:12px}.fc-settings-priority input{margin:0;accent-color:var(--dsw-alias-brand-primary)}.fc-settings-help{font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:5px!important}.fc-settings-error{color:var(--dsw-alias-state-error-primary)}.fc-settings-warning{color:var(--dsw-alias-state-warn-primary)}@media(max-width:560px){.fc-settings-fields{grid-template-columns:minmax(0,1fr)}}`;
+        function renderSummarySettings(controller, state, t, id) {
+            const editable = controller.canEdit();
+            const errorText = (error) =>
+                [error?.key ? t(error.key) : "", text(error?.message)].filter(Boolean).join(": ");
+            const message = (key, role = "status", detail = "") =>
+                h(
+                    "p",
+                    {
+                        role,
+                        className: role === "alert" ? "fc-settings-error" : "fc-settings-note",
+                    },
+                    t(key),
+                    detail ? ` ${detail}` : "",
+                );
+            return h(
+                "section",
+                {
+                    className: "fc-settings",
+                    "aria-labelledby": `${id}-title`,
+                    "aria-busy": state.saving || state.settingsStatus === "loading",
+                },
+                h("style", null, `${summarySettingsCss}\n${policySettingsCss}`),
+                h(
+                    "h3",
+                    { id: `${id}-title` },
+                    t(state.supportsPolicies ? "policySettingsTitle" : "summarySettingsTitle"),
+                ),
+                state.supportsPolicies ? h("h4", null, t("summarySettingsTitle")) : null,
+                h("p", { className: "fc-settings-note" }, t("summarySettingsDescription")),
+                h("p", { className: "fc-settings-note" }, t("summarySettingsEmpty")),
+                state.settingsStatus === "loading" ? message("summarySettingsLoading") : null,
+                state.settingsError
+                    ? message("summarySettingsLoadFailed", "alert", errorText(state.settingsError))
+                    : null,
+                state.settingsStatus === "ready" && !state.writable
+                    ? message("summarySettingsReadOnly")
+                    : null,
+                state.catalogStatus === "loading" ? message("summarySettingsCatalogLoading") : null,
+                state.catalogError
+                    ? message(
+                          "summarySettingsCatalogFailed",
+                          "alert",
+                          errorText(state.catalogError),
+                      )
+                    : null,
+                state.catalogStatus === "ready" && state.failures.length
+                    ? h(
+                          "div",
+                          { role: "status", className: "fc-settings-warning" },
+                          h("p", null, t("summarySettingsCatalogPartial")),
+                          h(
+                              "ul",
+                              null,
+                              ...state.failures.map((failure, index) =>
+                                  h(
+                                      "li",
+                                      { key: `${failure.id}:${index}` },
+                                      `${failure.name || failure.id}: ${failure.message}`,
+                                  ),
+                              ),
+                          ),
+                      )
+                    : null,
+                state.conflicted ? message("summarySettingsConflict", "alert") : null,
+                state.saveError && !state.conflicted
+                    ? message("summarySettingsSaveFailed", "alert", errorText(state.saveError))
+                    : null,
+                h(
+                    "ol",
+                    { className: "fc-settings-list" },
+                    ...state.rows.map((row, index) => {
+                        const detail = summarySettingsRowState(
+                            row,
+                            state.groups,
+                            state.catalogStatus,
+                        );
+                        const rowTitle = t("summarySettingsRow").replace(
+                            "{index}",
+                            String(index + 1),
+                        );
+                        const rowId = `${id}-row-${state.rowKeys[index]}`;
+                        const options = (values) =>
+                            values.map((value) =>
+                                h(
+                                    "option",
+                                    {
+                                        key: value.id,
+                                        value: value.id,
+                                        title: value.description || undefined,
+                                    },
+                                    value.name,
+                                ),
+                            );
+                        const field = (fieldName, label, selected, children, disabled = false) =>
+                            h(
+                                "label",
+                                {
+                                    className: `fc-settings-field${fieldName === "reasoningEffort" ? " fc-settings-effort" : ""}`,
+                                    htmlFor: `${rowId}-${fieldName}`,
+                                },
+                                h("span", null, t(label)),
+                                h(
+                                    "select",
+                                    {
+                                        id: `${rowId}-${fieldName}`,
+                                        value: selected,
+                                        disabled: !editable || disabled,
+                                        "aria-label": `${rowTitle} · ${t(label)}`,
+                                        "aria-invalid":
+                                            fieldName === "reasoningEffort" && detail.invalidEffort
+                                                ? true
+                                                : undefined,
+                                        "aria-describedby":
+                                            fieldName === "reasoningEffort" && detail.invalidEffort
+                                                ? `${rowId}-effort-error`
+                                                : undefined,
+                                        onChange: (event) =>
+                                            controller.change(index, fieldName, event.target.value),
+                                    },
+                                    ...children,
+                                ),
+                            );
+                        const providers = [
+                            h("option", { key: "", value: "" }, t("summarySettingsChooseProvider")),
+                        ];
+                        if (row.provider && !detail.provider)
+                            providers.push(
+                                h(
+                                    "option",
+                                    { key: row.provider, value: row.provider },
+                                    `${row.provider} (${t("summarySettingsUnavailable")})`,
+                                ),
+                            );
+                        providers.push(...options(state.groups));
+                        const models = [
+                            h("option", { key: "", value: "" }, t("summarySettingsChooseModel")),
+                        ];
+                        if (row.model && !detail.model)
+                            models.push(
+                                h(
+                                    "option",
+                                    { key: row.model, value: row.model },
+                                    `${row.model} (${t("summarySettingsUnavailable")})`,
+                                ),
+                            );
+                        models.push(...options(detail.provider?.models ?? []));
+                        const efforts = [
+                            h("option", { key: "", value: "" }, t("summarySettingsAuto")),
+                        ];
+                        if (
+                            row.reasoningEffort !== undefined &&
+                            !detail.model?.efforts.some(
+                                (effort) => effort.id === row.reasoningEffort,
+                            )
+                        )
+                            efforts.push(
+                                h(
+                                    "option",
+                                    { key: row.reasoningEffort, value: row.reasoningEffort },
+                                    `${row.reasoningEffort} (${t("summarySettingsUnavailable")})`,
+                                ),
+                            );
+                        efforts.push(...options(detail.model?.efforts ?? []));
+                        return h(
+                            "li",
+                            { key: state.rowKeys[index] },
+                            h(
+                                "fieldset",
+                                { className: "fc-settings-row" },
+                                h("legend", null, rowTitle),
+                                h(
+                                    "div",
+                                    { className: "fc-settings-fields" },
+                                    field(
+                                        "provider",
+                                        "summarySettingsProvider",
+                                        row.provider,
+                                        providers,
+                                        state.catalogStatus !== "ready",
+                                    ),
+                                    field(
+                                        "model",
+                                        "summarySettingsModel",
+                                        row.model,
+                                        models,
+                                        !detail.provider || state.catalogStatus !== "ready",
+                                    ),
+                                    field(
+                                        "reasoningEffort",
+                                        "summarySettingsEffort",
+                                        row.reasoningEffort ?? "",
+                                        efforts,
+                                    ),
+                                ),
+                                detail.unavailable
+                                    ? h(
+                                          "p",
+                                          { className: "fc-settings-help fc-settings-warning" },
+                                          t("summarySettingsUnavailableHelp"),
+                                      )
+                                    : null,
+                                detail.invalidEffort
+                                    ? h(
+                                          "p",
+                                          {
+                                              id: `${rowId}-effort-error`,
+                                              className: "fc-settings-help fc-settings-error",
+                                              role: "alert",
+                                          },
+                                          t("summarySettingsInvalidEffort"),
+                                      )
+                                    : null,
+                                detail.incomplete
+                                    ? h(
+                                          "p",
+                                          { className: "fc-settings-help" },
+                                          t("summarySettingsIncomplete"),
+                                      )
+                                    : null,
+                                h(
+                                    "label",
+                                    {
+                                        className: "fc-settings-priority",
+                                        htmlFor: `${rowId}-priority`,
+                                    },
+                                    h("input", {
+                                        type: "checkbox",
+                                        role: "switch",
+                                        id: `${rowId}-priority`,
+                                        checked: row.preferWhenSessionMatches,
+                                        "aria-checked": row.preferWhenSessionMatches,
+                                        "aria-label": `${rowTitle} · ${t("summarySettingsPrefer")}`,
+                                        "aria-describedby": `${rowId}-priority-help`,
+                                        disabled: !editable,
+                                        onChange: (event) =>
+                                            controller.change(
+                                                index,
+                                                "preferWhenSessionMatches",
+                                                event.target.checked,
+                                            ),
+                                    }),
+                                    h("span", null, t("summarySettingsPrefer")),
+                                ),
+                                h(
+                                    "p",
+                                    { id: `${rowId}-priority-help`, className: "fc-settings-help" },
+                                    t("summarySettingsPreferHelp"),
+                                ),
+                                h(
+                                    "div",
+                                    { className: "fc-settings-actions fc-settings-row-actions" },
+                                    ...[
+                                        [
+                                            "summarySettingsUp",
+                                            () => controller.move(index, -1),
+                                            index === 0,
+                                        ],
+                                        [
+                                            "summarySettingsDown",
+                                            () => controller.move(index, 1),
+                                            index === state.rows.length - 1,
+                                        ],
+                                        [
+                                            "summarySettingsDelete",
+                                            () => controller.remove(index),
+                                            false,
+                                        ],
+                                    ].map(([key, action, disabled]) =>
+                                        h(
+                                            "button",
+                                            {
+                                                key,
+                                                type: "button",
+                                                "aria-label": `${rowTitle} · ${t(key)}`,
+                                                disabled: !editable || disabled,
+                                                onClick: action,
+                                            },
+                                            t(key),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        );
+                    }),
+                ),
+                renderPolicySettings(controller, state, t, id),
+                h(
+                    "div",
+                    { className: "fc-settings-actions fc-settings-footer" },
+                    h(
+                        "button",
+                        {
+                            type: "button",
+                            disabled:
+                                !editable ||
+                                state.catalogStatus !== "ready" ||
+                                state.rows.length >= 32 ||
+                                !state.groups.some((group) => group.models.length),
+                            onClick: () => controller.add(),
+                        },
+                        t("summarySettingsAdd"),
+                    ),
+                    h(
+                        "button",
+                        {
+                            type: "button",
+                            disabled: state.catalogStatus === "loading" || state.saving,
+                            onClick: () => controller.loadCatalog(),
+                        },
+                        t("summarySettingsRefreshCatalog"),
+                    ),
+                    state.settingsStatus === "error"
+                        ? h(
+                              "button",
+                              {
+                                  type: "button",
+                                  disabled: state.saving,
+                                  onClick: () => controller.loadSettings(),
+                              },
+                              t("summarySettingsRetry"),
+                          )
+                        : null,
+                    state.dirty || state.conflicted
+                        ? h(
+                              "button",
+                              {
+                                  type: "button",
+                                  disabled: state.saving || state.settingsStatus === "loading",
+                                  onClick: () => controller.loadSettings(true),
+                              },
+                              t("summarySettingsReload"),
+                          )
+                        : null,
+                    h(
+                        "button",
+                        {
+                            type: "button",
+                            className: "fc-settings-primary",
+                            disabled: !controller.canSave(),
+                            onClick: () => controller.save(),
+                        },
+                        t(state.saving ? "summarySettingsSaving" : "summarySettingsSave"),
+                    ),
+                ),
+                state.saved
+                    ? message(
+                          state.supportsPolicies
+                              ? "summarySettingsSavedAll"
+                              : "summarySettingsSaved",
+                      )
+                    : null,
+            );
+        }
         const inputId = (v) => Number.isSafeInteger(v) && v > 0;
         const storedId = (v) => typeof v === "string" && /^[1-9]\d*$/.test(v) && inputId(Number(v));
         const ids = (v) => Array.isArray(v) && v.every(storedId);
@@ -531,6 +1522,15 @@ window.__ModuleLoader__.load({
             releaseDefinition,
             reportOf,
             artwork,
+            summarySettingsNamespace,
+            summarySettingsRows,
+            summarySettingsCatalog,
+            summarySettingsRowState,
+            POLICY_GROUPS,
+            normalizePolicyOverrides,
+            policyDraftPayload,
+            SummarySettingsController,
+            renderSummarySettings,
             apply(ctx) {
                 ctx.effect(() => ctx.locale.register("fold-context", { zh, en }));
                 const translate = ctx.locale.bind("fold-context");
@@ -1060,6 +2060,63 @@ window.__ModuleLoader__.load({
                         h("p", { className: "fc-note" }, t("retained")),
                     );
                 }
+                // Only the settings surface waits for its Remote services; tool views remain independent.
+                ctx.inject(["remote", "remote.settings", "remote.session"], (settingsCtx) => {
+                    const controllers = new Set();
+                    settingsCtx.effect(() => () => {
+                        for (const controller of controllers) controller.stop();
+                        controllers.clear();
+                    });
+                    function SummarySettings() {
+                        const t = useText();
+                        const id = React.useId();
+                        const [controller] = React.useState(
+                            () => new SummarySettingsController(settingsCtx.remote),
+                        );
+                        const state = React.useSyncExternalStore(
+                            (listener) => controller.subscribe(listener),
+                            () => controller.getSnapshot(),
+                        );
+                        React.useEffect(() => {
+                            controllers.add(controller);
+                            controller.start();
+                            const dispose = [];
+                            if (settingsCtx.remote.$on) {
+                                dispose.push(
+                                    settingsCtx.remote.$on("settings/document-updated", (ns) => {
+                                        if (
+                                            ns === "fold-context-ui" ||
+                                            text(ns).endsWith(":fold-context-ui")
+                                        )
+                                            controller.loadSettings();
+                                        else controller.loadCatalog();
+                                    }),
+                                );
+                                dispose.push(
+                                    settingsCtx.remote.$on("llm/adapters-updated", () =>
+                                        controller.loadCatalog(),
+                                    ),
+                                );
+                            }
+                            dispose.push(
+                                settingsCtx.on("connection/reset", () => controller.reconnect()),
+                            );
+                            return () => {
+                                controller.stop();
+                                controllers.delete(controller);
+                                for (const cleanup of dispose)
+                                    if (typeof cleanup === "function") cleanup();
+                            };
+                        }, [controller]);
+                        return renderSummarySettings(controller, state, t, id);
+                    }
+                    settingsCtx.slots.inject("plugins.bundle.config", () =>
+                        settingsCtx.slots.register(
+                            { name: "plugins.bundle.config", key: "dsh-fold-context" },
+                            SummarySettings,
+                        ),
+                    );
+                });
                 ctx.uiConversation.events.register(releaseDefinition);
                 for (const key of Object.keys(TOOLS)) {
                     ctx.slots.inject("tool.call.toolview", () =>

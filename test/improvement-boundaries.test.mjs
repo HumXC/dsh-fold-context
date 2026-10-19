@@ -35,9 +35,8 @@ for (const queued of [false, true]) {
                 auto: true,
                 thresholdRatio: 0.99,
                 retainTokens: 512,
-                summarizationProvider: "test",
-                summarizationModel: "auxiliary",
             },
+            summaryModels: [{ provider: "test", model: "auxiliary" }],
             scheduling: { enabled: true, proactive: !queued },
         });
         t.after(f.close);

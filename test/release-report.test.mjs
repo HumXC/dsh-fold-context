@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "@deepseek-ai/dsh-session";
+import { Context } from "@deepseek-ai/cordis";
 import { fixture } from "./fixture.mjs";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { apply } from "../lib/index.js";
+import { apply, Config } from "../lib/index.js";
 import { commitForcedReleases } from "./release-batch-fixture.mjs";
 
 const reportOf = (event) =>
@@ -127,6 +128,10 @@ test("small releases retain an estimated increase instead of inventing savings",
     assert.ok(report.tokenEstimate.afterTokens > report.tokenEstimate.beforeTokens);
 });
 
-test("the profile UI mount has no engine side effects", () => {
-    assert.doesNotThrow(() => apply({}, { uiOnly: true }));
+test("the profile mount owns settings without installing an engine", async () => {
+    const ctx = new Context();
+    apply(ctx, Config({ uiOnly: true }));
+    assert.deepEqual(ctx.foldContextSettings.current(), []);
+    assert.equal(ctx.get("compaction"), undefined);
+    await ctx.fiber.dispose();
 });

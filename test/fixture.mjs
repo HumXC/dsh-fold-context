@@ -14,6 +14,7 @@ import {
 import foldContext from "../lib/index.js";
 import { LocalSessionQuery } from "./query-fixture.mjs";
 import { installPtcStub } from "./ptc-fixture.mjs";
+import { FoldContextSettings } from "../lib/integration/settings.js";
 
 /** Fresh Cordis world, RAM sessions and mock stream only: no network, storage backend, profile or Web. */
 export async function fixture(options = {}) {
@@ -64,8 +65,15 @@ export async function fixture(options = {}) {
         const { ToolResultPruner } = await import("@deepseek-ai/dsh-compaction-tool-result-pruner");
         new ToolResultPruner(ctx, options.pruner);
     }
+    if (options.profileSettings)
+        new FoldContextSettings(
+            ctx,
+            { get: () => options.profileSettings.summaryModels ?? [] },
+            { get: () => options.profileSettings.policyOverrides },
+        );
     const fiber = ctx.plugin(foldContext, {
         compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
+        summaryModels: options.summaryModels ?? [{ provider: "test", model: "summary-fixture" }],
         release: { catalogLimit: 32 },
         scheduling: options.scheduling ?? {},
         reminders: options.reminders ?? {},

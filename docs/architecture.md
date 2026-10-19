@@ -8,7 +8,7 @@
 
 - `src/domain`：纯数字 ID、归档索引、释放账本、提醒、合批计划、摘要选区、预算和经济估算。
 - `src/integration`：工具注册、每请求控制消息、会话事件、官方压缩事务、原文恢复与附件校验。
-- [client.js](../src/client.js)：DSH 原生工具行与释放完成行，独立于 Host 的摘要和释放决策。
+- [client.js](../src/client.js)：DSH 原生工具行、释放完成行及插件页摘要模型列表；配置草稿、修订号冲突和模型目录状态由页面控制器处理。
 
 压缩事务由官方 `compaction` 服务提交。插件保留工具调用与结果配对、当前任务和安全尾部，通过 `sessionQuery` 恢复原始事件。会话持久化依赖官方 checkpoint policy；插件内部的释放意图、完成回执和摘要 checkpoint 各自承担不同职责。
 
@@ -32,16 +32,23 @@ next: 103
 attachments:
 102 101 1
 try_release: 12 18
+Review try_release now; call context_release for consumed items after preserving needed facts.
 ```
 
 - `prev`：上次请求分配的 ID。
 - `next`：本次请求预留的 ID。
 - `attachments`：有附件时才出现，每行是附件 ID、owner ID、附件在 owner 中的序号，序号从 1 开始。
-- `try_release`：触发提醒时才出现，只列候选 ID。
+- `try_release`：触发提醒时才出现，候选行只列 ID，下一行提示模型及时检查并标记已消费内容。
 
 控制消息以 `source.kind = 'fold-context-allocation'` 识别。消费端根据 source 元数据处理，不用正则匹配正文来判断消息类型。source 同时承载持久化所需的分配和提醒状态。
 
-控制消息参与实际主请求，其 token 计入压力。摘要输入、图片能力判断和辅助摘要预算从按来源过滤后的历史投影构建，因此控制消息本身不会进入摘要。纯 release 清理通知和内部状态记录也按各自来源元数据过滤。
+控制消息参与实际主请求，其 token 计入压力。数据投影路径按来源过滤控制消息、release 清理通知与内部状态；同模型原生前缀路径保留请求历史以争取缓存，由追加的摘要指令要求忽略管理信息。图片能力检查始终忽略控制通知的附件。
+
+## 工具参数契约
+
+可选参数通过宿主 DSL 的 `oneOf` 显式接受原类型或 `null`，缺省与 `null` 使用相同默认行为。查询入口归一化兼容占位：`context_search` 的空 `tool`、空 `cursor` 和空 `roles` 数组分别对应无工具筛选、新搜索与全部角色；`context_status` 的空 `ids` 数组对应默认有界目录。归一化后的角色与工具筛选参与游标指纹，翻页仍绑定同一会话、查询、筛选及归档快照。
+
+必填参数保持严格校验。释放 ID 数组必须包含 1–128 个正安全整数；释放与摘要请求的原因去除首尾空白后须为 1–1000 个字符。显式数值必须满足整数及范围约束，`0` 不作为 `limit` 的缺省值。宿主 DSL 未提供的长度和数值约束写入参数说明，由执行入口校验。
 
 ## 释放账本
 
@@ -99,7 +106,13 @@ pressure -> release -> remeasure -> summary if still needed
 
 摘要覆盖较旧的连续历史前缀，保留开头的 system 与近期安全尾部。切点须保持工具调用与结果完整；原生 assistant 回放的规划成本参考同一 provider/model 的 output usage。最新主请求 input usage 校准总压力，历史请求的完整 input usage 不累加到选区成本。
 
-摘要投影先剔除带来源元数据的控制消息和管理通知，再处理 reasoning 策略和图片策略。默认 `summary.reasoning: omit-from-summary`；`preserve` 可保留 reasoning 文字。`summary.images: auto` 只向明确支持图片的摘要路由传原图，`references` 固定保留引用。普通历史来源 ID 设为 null，附件保留归档引用。
+摘要路由由 fold 自有 `summaryModels` 有序列表决定；`preferWhenSessionMatches` 默认 true，供应商与模型都匹配会话的开启项稳定提前，其余项保持顺序。空列表跟随会话。显式强度覆盖该项请求；未指定强度时，同模型沿用会话强度，其他模型交给供应商默认值。profile 根 `uiOnly` 条目提供 `foldContextSettings` 服务，保存 `.volatile()` 列表，preset 内的引擎在每次摘要时读取；没有根服务时使用引擎本地配置。页面只通过 settings Remote 的修订号保护 `mutate` 写入该字段。
+
+引擎保留 `BasicCompactionEngine` 继承和官方事务，只替换辅助摘要实现。同模型且没有选区排除或图片引用要求时，原样转交历史消息、原生签名、工具定义和 toolHistory，追加最后一条摘要指令，复用 `sessionId` 并标记 `purpose: compaction`。该流直接调用 LLM，不进入 Agent turn/inbox；只有成功 checkpoint 由原事务提交。缓存命中是供应商行为，不作保证。
+
+需要过滤释放内容、处理图片引用或改用其他模型时，生成历史数据投影：剔除来源标记的控制信息，默认省略 reasoning，附件保留归档引用；`preserve` 可保留 reasoning 文字。`summary.images: auto` 只向明确支持图片的路由传原图。checkpoint stamp 记录实际策略：原生前缀为 preserve，数据投影使用配置策略。
+
+候选按顺序执行，模型或传输失败、供应商确认窗口不足、无效/空/截断输出只推进到下一项。用户取消、未分类的内部错误及事务错误直接终止；候选之间不提交失败输出。候选窗口已知时，按估计输入收紧输出预算；估算不足以拒绝输入，超限判断以供应商响应为准。全部失败时保留各候选错误并由官方流程关闭事务。
 
 辅助请求预算包括过滤后的历史、保留的 system、工具定义和 framing。固定输入、受保护尾部或摘要输出仍可能超过很小的模型窗口；预算规划只能预测，真实主请求 usage 验证结果。
 
@@ -139,7 +152,7 @@ scheduling:
 
 候选需要仍在当前上下文中且经过 `minAgeSteps`。默认至少 16000 候选 tokens，或 4000 tokens 停留 8 个业务步骤，或总压力达到有效阈值 80% 且候选至少 4000 tokens 时提醒。单个 8000 tokens 大结果优先排列。
 
-提醒只包含 ID，默认最多 5 个；这只限制展示，模型可以主动标记其他合法 ID。普通间隔 6 步、压力间隔 4 步，忽略后退避到 12、24 步，新增候选与实际释放进展可使提醒重新就绪。纯管理调用不推动业务年龄和提醒冷却。排队与已释放目标离开候选池。
+候选行只列 ID，默认最多 5 个，后附一句及时检查并标记已消费内容的提示；数量只限制展示，模型可以主动标记其他合法 ID。普通间隔 6 步、压力间隔 4 步，忽略后退避到 12、24 步，新增候选与实际释放进展可使提醒重新就绪。纯管理调用不推动业务年龄和提醒冷却。排队与已释放目标离开候选池。
 
 目标实际结算后，成功的直接 `context_release` 调用及结果可在后续模型请求前成对清理。调用组必须只包含该工具，结果必须与原始身份、内容和元数据一致，组内不能夹杂业务消息。所有 PTC 程序、结果及混合调用组按业务内容保留；嵌套释放通过工具派发事件提交意图。清理产生的 developer 替换记录不提供独立重建信用。
 
@@ -150,6 +163,14 @@ scheduling:
 图片恢复校验原始存储并确认当前模型支持图片后传入原图。文件恢复校验完整内容并返回可读句柄；句柄交付与模型已读取文件正文分别表示。缺少服务、存储丢失、校验失败、能力不足或文件路径映射失败须显式报告。
 
 归档是原始证据源，当前上下文的轻量占位与摘要只是投影。重启和 fork 需沿会话事件重建数字 ID、意图和状态，保留相同源记录的身份边界。
+
+## 配置所有权与生效
+
+profile 根条目 `fold-context-ui` 提供 `foldContextSettings`，持有 `summaryModels` 与 `policyOverrides` 两个 volatile 字段。运行策略分 compaction、release、summary、scheduling、reminders 五组，各组保存 `enabled` 与 `values`。`enabled: false` 代表继承该 Agent 预设；启用时整组使用界面值，防止根条目的默认值覆盖已有预设。
+
+策略目录集中记录 37 个字段及其双语说明、默认值和约束，并覆盖按模型策略的可选字段。Host schema 与 Client 共享同一个规范化校验器，Client 构建把目录与自包含校验器注入普通 JavaScript 工厂，不依赖 Harness Client 私有包。Host 在持久化前拒绝非法边界和递减的退避列表。
+
+页面用同一个 namespace revision 原子保存模型列表与全部策略，断线、冲突或异常回执保留草稿。新引擎从根服务选取运行策略并克隆快照，运行中的原生事务保持自己的配置；摘要模型仍在每次摘要时读取最新列表。
 
 ## Client 回执与行展示
 

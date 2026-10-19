@@ -106,16 +106,7 @@ test("same-owner replacement exposes its new attachment immediately and cannot r
 
 test("the exact conversation model policy controls summary image capability", async (t) => {
     const f = await attachmentFixture(t, {
-        compaction: {
-            modelPolicies: [
-                {
-                    provider: "test",
-                    model: "fixture",
-                    summarizationProvider: "test",
-                    summarizationModel: "text-summary",
-                },
-            ],
-        },
+        summaryModels: [{ provider: "test", model: "text-summary" }],
     });
     const requested = [];
     f.llm.resolveModelInfo = async (provider, model) => {

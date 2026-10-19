@@ -662,6 +662,10 @@ test("candidate previews stay in status and try_release contains bounded numeric
         `try_release: ${plan.candidates.map((candidate) => candidate.id).join(" ")}`,
     );
     assert.match(line, /^try_release: [1-9]\d*(?: [1-9]\d*)*$/);
+    assert.equal(
+        text.split("\n").at(-1),
+        "Review try_release now; call context_release for consumed items after preserving needed facts.",
+    );
     assert.equal(JSON.stringify(stateOf(f)), before);
 });
 
@@ -675,7 +679,7 @@ test("disabled reminders never establish a cooldown or cause release", async (t)
     assert.equal(plan.thresholdTokens, null);
     const decision = await propose(f);
     const notice = noticeOf(decision);
-    assert.doesNotMatch(textOf(notice), /try_release:/);
+    assert.doesNotMatch(textOf(notice), /try_release:|Review try_release/);
     await commit(f, decision, true);
     assert.equal(stateOf(f).reminderState.lastReminderStep, null);
     assert.equal(entryFor(f, id).status, "available");

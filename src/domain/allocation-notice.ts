@@ -14,6 +14,11 @@ export function allocationNoticeText(
             lines.push(`${item.id} ${item.ownerId} ${item.ordinal}`);
         }
     }
-    if (candidates.length > 0) lines.push(`try_release: ${candidates.join(" ")}`);
+    if (candidates.length > 0) {
+        lines.push(`try_release: ${candidates.join(" ")}`);
+        lines.push(
+            "Review try_release now; call context_release for consumed items after preserving needed facts.",
+        );
+    }
     return lines.join("\n");
 }

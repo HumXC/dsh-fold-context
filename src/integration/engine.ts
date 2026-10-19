@@ -1,9 +1,13 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import { BasicCompactionEngine } from "@deepseek-ai/dsh-compaction-basic";
+import { resolveFoldCompactionConfig, type FoldCompactionConfig } from "../config.js";
 import {
-    BasicCompactionEngine,
-    type BasicCompactionConfig,
-} from "@deepseek-ai/dsh-compaction-basic";
+    summaryCandidates,
+    sameSummaryRoute,
+    type SummaryModel,
+} from "../domain/summary-models.js";
+import { conversationRoute, isSummaryModelFailure, requestSummary } from "./summarizer.js";
 import { toolPairingBalancedBefore, type CompactionTrigger } from "@deepseek-ai/dsh-compaction";
 import type { ContentBlock, Message, TokenUsage, ToolSchema } from "@deepseek-ai/dsh-llm";
 import { estimateMessage } from "@deepseek-ai/dsh-token-meter/estimate";
@@ -89,17 +93,18 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
     readonly reminderPolicy: Readonly<ReminderPolicy>;
     constructor(
         ctx: Context,
-        compaction: BasicCompactionConfig,
+        compaction: FoldCompactionConfig,
         releasePolicy: Readonly<ReleasePolicy>,
         summaryPolicy: Readonly<SummaryPolicy> = resolveSummaryPolicy(),
         scheduling: Partial<SchedulingPolicy> = {},
         reminders: Partial<ReminderPolicy> = {},
+        private readonly readSummaryModels: () => SummaryModel[] = () => [],
     ) {
         ctx.sessionProjections.register(ledgerProjection);
         ctx.sessionProjections.register(releaseControlProjection);
         ctx.sessionProjections.register(createPressureProjection(estimateMessage));
         // The base owns overflow retry handling, including when ordinary automation is disabled.
-        super(ctx, { ...compaction, auto: true });
+        super(ctx, { ...resolveFoldCompactionConfig(compaction), auto: true });
         this.autoEnabled = compaction.auto ?? true;
         this.releasePolicy = releasePolicy;
         this.summaryPolicy = summaryPolicy;
@@ -739,19 +744,20 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             const message = event === undefined ? null : session.deriveEventMessage(event);
             return message === null ? [] : [message];
         });
-        const input = (
-            firstSystemSeq !== undefined && head !== null ? [head, ...region] : region
-        ).filter((message) => !isSummaryControlNotice(message));
-        const images = await this.summaryImages(input, agent, signal);
+        const input = firstSystemSeq !== undefined && head !== null ? [head, ...region] : region;
+        const candidates = summaryCandidates(this.readSummaryModels(), conversationRoute(agent));
+        const target = candidates[0]!;
+        const images = await this.summaryImages(
+            input.filter((message) => !isSummaryControlNotice(message)),
+            target,
+            signal,
+        );
         signal?.throwIfAborted();
         if (session.seq !== revision) return wait("state_changed");
         const projected =
             selection === null
                 ? []
-                : projectSummaryInput(state, input, revision, {
-                      reasoning: this.summaryPolicy.reasoning,
-                      images,
-                  });
+                : this.summaryProjection(input, agent, revision, target, images).messages;
         // Include the preserved system head and request envelope in the auxiliary call estimate.
         // The fixed allowance covers the official instruction and checkpoint framing.
         const projectedTokens = projected.reduce(
@@ -782,9 +788,6 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                   ? "uncached"
                   : "cached";
         const requested = this.hasSummaryRequest(session);
-        const override = this.config.modelPolicies.find(
-            (policy) => policy.provider === routed.provider && policy.model === routed.model,
-        );
         const preflight = estimateInlineReleases(this.ctx, session, state);
         const measuredNodes = new Map(
             measurement.nodes.map((node) => [Number(node.seq), node.tokens]),
@@ -820,9 +823,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                         model: routed.model,
                         maxTokens: routed.maxTokens ?? null,
                     },
-                    summaryProvider:
-                        override?.summarizationProvider ?? this.config.summarizationProvider,
-                    summaryModel: override?.summarizationModel ?? this.config.summarizationModel,
+                    summaryModels: candidates,
                     images,
                 }),
                 cacheState,
@@ -850,27 +851,65 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             failure,
         };
     }
-    private async summaryImages(messages: readonly Message[], agent: Agent, signal?: AbortSignal) {
-        let images: "native" | "references" = "references";
+    private async summaryImages(
+        messages: readonly Message[],
+        target: SummaryModel,
+        signal?: AbortSignal,
+    ) {
         if (
             this.summaryPolicy.images !== "auto" ||
             !messages.some((message) => message.content.some((block) => block.type === "image"))
         )
-            return images;
-        const routed = agent.session.requestHeader()?.config;
-        const conversation = routed?.provider && routed.model ? routed : agent.options;
-        const override = this.config.modelPolicies.find(
-            (policy) =>
-                policy.provider === conversation.provider && policy.model === conversation.model,
-        );
-        const provider = override?.summarizationProvider ?? this.config.summarizationProvider;
-        const model = override?.summarizationModel ?? this.config.summarizationModel;
-        const target = provider ? { provider, model } : conversation;
-        if (target.provider && target.model) {
+            return "references" as const;
+        try {
             const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal);
-            if (info.inputModalities?.includes("image")) images = "native";
+            return info.inputModalities?.includes("image")
+                ? ("native" as const)
+                : ("references" as const);
+        } catch (error) {
+            signal?.throwIfAborted();
+            if (!isSummaryModelFailure(error)) throw error;
+            // Capability lookup failure must not prevent later candidates from being attempted.
+            return "references" as const;
         }
-        return images;
+    }
+    private summaryProjection(
+        input: readonly Message[],
+        agent: Agent,
+        cutoff: number,
+        target: SummaryModel,
+        images: "native" | "references",
+    ) {
+        const state = this.state(agent.session);
+        const selected = new Set(
+            input.flatMap((message) =>
+                state.numbering.slots
+                    .filter(
+                        (slot) =>
+                            slot.messageId === message.id &&
+                            slot.role === message.role &&
+                            slot.currentSeq !== null,
+                    )
+                    .map((slot) => slot.currentSeq!),
+            ),
+        );
+        const exclusions = selectedExclusions(state, selected, cutoff, "transcript");
+        const needsImageProjection = input.some((message) =>
+            message.content.some(
+                (block) => block.type === "image" && (images !== "native" || block.offloaded),
+            ),
+        );
+        // Native signed responses and tool pairs stay untouched on the cache-reuse path.
+        // Filtering wins when a selected exclusion or reference-only image requires a data projection.
+        if (
+            sameSummaryRoute(target, conversationRoute(agent)) &&
+            exclusions.length === 0 &&
+            !needsImageProjection
+        ) {
+            return { messages: [...input], policy: { reasoning: "preserve" as const, images } };
+        }
+        const policy = { reasoning: this.summaryPolicy.reasoning, images };
+        return { messages: projectSummaryInput(state, input, cutoff, policy), policy };
     }
     protected override async summarize(
         input: SummaryInput,
@@ -878,32 +917,69 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         signal?: AbortSignal,
     ): Promise<SummaryResult> {
         const state = this.state(agent.session);
-        if (state.activeStart === null)
+        if (state.activeStart === null || state.activeCompactionId === null)
             throw new Error(
                 "fold-context: summarization requires an official compaction transaction",
             );
-        const summaryInput = input.messages.filter((message) => !isSummaryControlNotice(message));
-        const images = await this.summaryImages(summaryInput, agent, signal);
-        const projectionPolicy = { reasoning: this.summaryPolicy.reasoning, images };
-        const messages = projectSummaryInput(
-            state,
-            summaryInput,
-            state.activeStart,
-            projectionPolicy,
+        const current = conversationRoute(agent);
+        const candidates = summaryCandidates(this.readSummaryModels(), current);
+        const cap =
+            this.config.modelPolicies.find((policy) => sameSummaryRoute(policy, current))
+                ?.maxTokens ?? this.config.maxTokens;
+        const failures: Error[] = [];
+        for (const target of candidates) {
+            signal?.throwIfAborted();
+            try {
+                const images = await this.summaryImages(
+                    input.messages.filter((message) => !isSummaryControlNotice(message)),
+                    target,
+                    signal,
+                );
+                const projected = this.summaryProjection(
+                    input.messages,
+                    agent,
+                    state.activeStart,
+                    target,
+                    images,
+                );
+                const result = await requestSummary(
+                    this.ctx,
+                    { ...input, messages: projected.messages },
+                    agent,
+                    target,
+                    current,
+                    cap,
+                    signal,
+                );
+                signal?.throwIfAborted();
+                return {
+                    ...result,
+                    summary: [
+                        {
+                            type: "text",
+                            text: projectionStamp(
+                                projected.policy,
+                                state.activeCompactionId,
+                                images,
+                            ),
+                        },
+                        ...result.summary,
+                    ],
+                };
+            } catch (error) {
+                signal?.throwIfAborted();
+                if (!isSummaryModelFailure(error)) throw error;
+                failures.push(
+                    new Error(
+                        `${target.provider}/${target.model}${target.reasoningEffort ? ` (${target.reasoningEffort})` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+                        { cause: error },
+                    ),
+                );
+            }
+        }
+        throw new AggregateError(
+            failures,
+            `fold-context: all summary models failed: ${failures.map((error) => error.message).join("; ")}`,
         );
-        const result = await super.summarize({ ...input, messages }, agent, signal);
-        signal?.throwIfAborted();
-        if (state.activeCompactionId === null)
-            throw new Error("fold-context: missing compaction identity");
-        return {
-            ...result,
-            summary: [
-                {
-                    type: "text",
-                    text: projectionStamp(this.summaryPolicy, state.activeCompactionId, images),
-                },
-                ...result.summary,
-            ],
-        };
     }
 }

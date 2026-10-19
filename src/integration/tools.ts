@@ -3,6 +3,7 @@ import { defineTool, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { z } from "zod";
 import type { ContextCompressionEngine } from "./engine.js";
 import { catalog, planRelease } from "../domain/planner.js";
+import { optionalItems, optionalParameter } from "./tool-arguments.js";
 import {
     COMPACT_TOOL,
     RECEIPT_KEY,
@@ -49,7 +50,8 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 reason: {
                     type: "string",
                     required: true,
-                    description: "Why this content is no longer needed; 1–1000 characters.",
+                    description:
+                        "Why this content is no longer needed; 1–1000 characters after trimming.",
                 },
             },
             output: {
@@ -91,7 +93,8 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 reason: {
                     type: "string",
                     required: true,
-                    description: "Why a checkpoint is useful now; 1–1000 characters.",
+                    description:
+                        "Why a checkpoint is useful now; 1–1000 characters after trimming.",
                 },
             },
             output: {
@@ -124,17 +127,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             description:
                 "Inspect numbered content, releases and summary coverage. Reports compaction blockers, next actions, protected input, pressure verification and payback estimates. Query exact IDs or an owner ID for attachments.",
             parameters: {
-                ids: {
-                    type: "array",
-                    items: { type: "integer" },
-                    description:
-                        "Optional 1–128 positive session numbers. Omit to inspect the bounded catalog.",
-                },
-                limit: {
-                    type: "integer",
-                    description:
-                        "Maximum returned entries, 1–128; defaults to the configured catalog limit.",
-                },
+                ids: optionalParameter(
+                    { type: "array", items: { type: "integer" } },
+                    "1–128 positive safe-integer session numbers; omit/null/[] inspects the bounded catalog.",
+                ),
+                limit: optionalParameter(
+                    { type: "integer" },
+                    "Maximum entries, 1–128; omit/null uses the configured catalog limit.",
+                ),
             },
             output: {
                 schema: { type: "json" },
@@ -143,11 +143,14 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
             isConcurrencySafe: () => true,
             execute: async (args, exec) => {
                 const agent = actor(exec);
-                const ids = args.ids === undefined ? undefined : idsSchema.parse(args.ids);
-                const limit =
-                    args.limit === undefined
-                        ? engine.releasePolicy.catalogLimit
-                        : z.number().int().min(1).max(128).parse(args.limit);
+                const requestedIds = optionalItems(args.ids);
+                const ids = requestedIds === undefined ? undefined : idsSchema.parse(requestedIds);
+                const limit = z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(128)
+                    .parse(args.limit ?? engine.releasePolicy.catalogLimit);
                 const reminder = await engine.releaseReminder(agent, exec.signal);
                 const view = catalog(
                     engine.state(agent.session),
