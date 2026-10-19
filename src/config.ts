@@ -23,7 +23,22 @@ const policyFields = {
     compactionRetries: z.number().step(1).min(0),
     maxOverflowRetries: z.number().step(1).min(0),
 };
-export const foldCompactionSchema = z.object({
+// Keep mapped inputs named instead of exposing a transitive Dict import in declarations.
+type ModelPolicyFields = typeof policyFields & {
+    provider: Schemastery<string, string, "defined">;
+    model: Schemastery<string, string, "defined">;
+};
+type CompactionFields = typeof policyFields & {
+    auto: Schemastery<boolean>;
+    modelPolicies: Schemastery<
+        Schemastery.ObjectS<ModelPolicyFields>[],
+        Schemastery.ObjectT<ModelPolicyFields>[]
+    >;
+};
+export const foldCompactionSchema: Schemastery<
+    Schemastery.ObjectS<CompactionFields>,
+    Schemastery.ObjectT<CompactionFields>
+> = z.object({
     ...policyFields,
     auto: z.boolean(),
     modelPolicies: z.array(

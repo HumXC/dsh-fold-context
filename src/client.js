@@ -13,12 +13,22 @@ window.__ModuleLoader__.load({
             context_status: ["status", "list"],
         };
         const zh = {
-            release: "标记弃用上下文",
+            release: "标记释放",
             expand: "恢复上下文",
             search: "搜索上下文",
             compact: "请求压缩上下文",
             status: "查看上下文状态",
             completed: "已释放上下文",
+            missingMarkReason: "未提供标记原因",
+            moreIds: "展开其余 {count} 项",
+            collapseIds: "收起编号",
+            expandReason: "展开完整原因",
+            collapseReason: "收起原因",
+            itemDetails: "查看编号详情",
+            closeDetails: "关闭详情",
+            attachmentOwner: "附件所属消息",
+            waitingReason: "等待原因",
+            releaseReason: "释放原因",
             tokenReduction: "预计减少 {count} tokens",
             tokenIncrease: "预计增加 {count} tokens",
             preparing: "准备中",
@@ -185,6 +195,16 @@ window.__ModuleLoader__.load({
             compact: "Request context compaction",
             status: "Inspect context status",
             completed: "Context released",
+            missingMarkReason: "No marking reason provided",
+            moreIds: "Show {count} remaining IDs",
+            collapseIds: "Collapse IDs",
+            expandReason: "Show full reason",
+            collapseReason: "Collapse reason",
+            itemDetails: "View details for ID",
+            closeDetails: "Close details",
+            attachmentOwner: "Attachment owner",
+            waitingReason: "Waiting reason",
+            releaseReason: "Release reason",
             tokenReduction: "Estimated reduction: {count} tokens",
             tokenIncrease: "Estimated increase: {count} tokens",
             preparing: "Preparing",
@@ -360,6 +380,7 @@ window.__ModuleLoader__.load({
         /*__FOLD_POLICY_SETTINGS__*/
         const text = (v) => (typeof v === "string" ? v : "");
         const list = (v) => (Array.isArray(v) ? v : []);
+        /*__FOLD_RELEASE_VIEWS__*/
         const settingsProblem = (key, message = "", code = "") =>
             Object.assign(new Error(message), { key, code });
         const settingsValue = (response) => {
@@ -1437,7 +1458,8 @@ window.__ModuleLoader__.load({
                 ...artwork[name].map((d, key) => h("path", { d, key })),
             );
         }
-        const css = `
+        const css =
+            `
 .fc-card{font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.55;min-width:0;color:var(--dsw-alias-label-tertiary)}
 .fc-row{display:flex;align-items:center;width:100%;height:calc(24px + var(--dsh-content-font-delta,0px));min-width:0;padding:0;border:0;background:none;color:inherit;text-align:left;font:inherit;line-height:calc(24px + var(--dsh-content-font-delta,0px));cursor:pointer;transition:color .1s}
 .fc-row:disabled{cursor:default}.fc-row:is(:hover,:focus-visible):not(:disabled){color:var(--dsw-alias-label-secondary)}
@@ -1450,7 +1472,7 @@ window.__ModuleLoader__.load({
 .fc-body dl{display:grid;grid-template-columns:minmax(70px,max-content) minmax(0,1fr);gap:7px 16px;margin:0 0 12px}.fc-body dt{color:var(--dsw-alias-label-secondary)}.fc-body dd{margin:0;min-width:0}
 .fc-section{margin:12px 0 6px;font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary)}.fc-items{display:grid;gap:0}.fc-item{padding:8px 0;border-top:1px solid var(--dsw-alias-border-l1)}.fc-item:first-child{border-top:0}.fc-item-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}.fc-id{font-family:ui-monospace,monospace;white-space:nowrap}.fc-muted{color:var(--dsw-alias-label-secondary);font-size:12px}.fc-preview{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.fc-original{white-space:pre-wrap;overflow:auto;max-height:440px;margin:6px 0;font:12px/1.65 ui-monospace,monospace;tab-size:4}.fc-note{margin:10px 0 0;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .fc-error{color:var(--dsw-alias-state-error-primary)}.fc-warn{color:var(--dsw-alias-state-warn-primary)}.fc-action{border:1px solid var(--dsw-alias-border-l1);border-radius:5px;color:inherit;background:var(--dsw-alias-bg-layer-2);padding:3px 8px;cursor:pointer;font:inherit;font-size:12px}.fc-actions{display:flex;gap:8px;margin-top:12px}.fc-image{display:block;max-width:100%;max-height:360px;object-fit:contain;margin-top:8px;border-radius:5px}.fc-live .fc-title{animation:fc-pulse 1.6s ease-in-out infinite}@keyframes fc-pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){.fc-live .fc-title{animation:none}.fc-row,.fc-icon-idle,.fc-chevron-hover{transition:none}}
-`;
+` + releaseCss;
         function reportOf(event) {
             if (event.type !== "compaction/prune") return null;
             const r = event.data?.[REPORT];
@@ -1521,6 +1543,8 @@ window.__ModuleLoader__.load({
             toolModel,
             releaseDefinition,
             reportOf,
+            groupReleaseItems,
+            releaseRowLimit,
             artwork,
             summarySettingsNamespace,
             summarySettingsRows,
@@ -1689,25 +1713,7 @@ window.__ModuleLoader__.load({
                             }),
                             model.raw ? h("pre", { className: "fc-original" }, model.raw) : null,
                         );
-                    if (model.title === "release")
-                        return h(
-                            React.Fragment,
-                            null,
-                            h(Fields, {
-                                t,
-                                values: [
-                                    ["result", t(model.label)],
-                                    ["reason", model.args.reason],
-                                ],
-                            }),
-                            ...[
-                                ["queued", "pending"],
-                                ["settled", "settled"],
-                                ["unknown", "unknown"],
-                                ["unsupported", "unsupported"],
-                            ].map(([key, title]) => h(Items, { key, t, title, items: v[key] })),
-                            h("p", { className: "fc-note" }, t("retained")),
-                        );
+                    if (model.title === "release") return h(ReleaseRequestDetails, { model, t });
                     if (model.title === "compact")
                         return h(Fields, {
                             t,
@@ -1743,6 +1749,14 @@ window.__ModuleLoader__.load({
                                     ],
                                 ],
                             }),
+                            typeof v.releaseReason === "string" && v.releaseReason.trim()
+                                ? h(
+                                      "div",
+                                      { className: "fc-recovery-release-reason" },
+                                      h("div", { className: "fc-section" }, t("releaseReason")),
+                                      h(ReleaseReason, { reason: v.releaseReason, t }),
+                                  )
+                                : null,
                             typeof v.text === "string" && v.text
                                 ? h("pre", { className: "fc-original" }, v.text)
                                 : null,
@@ -1909,6 +1923,7 @@ window.__ModuleLoader__.load({
                     toggle,
                     disabled,
                     state,
+                    releaseStyle = false,
                     children,
                     id,
                     t,
@@ -1916,7 +1931,7 @@ window.__ModuleLoader__.load({
                     return h(
                         "div",
                         {
-                            className: `fc-card${state === "start" ? " fc-live" : ""}`,
+                            className: `fc-card${state === "start" ? " fc-live" : ""}${releaseStyle ? " fc-release-card" : ""}`,
                             "data-fold-context": title,
                         },
                         h("style", null, css),
@@ -1992,6 +2007,7 @@ window.__ModuleLoader__.load({
                         Row,
                         {
                             ...model,
+                            releaseStyle: model.title === "release" && !!model.value,
                             summary,
                             t,
                             id,
@@ -2042,6 +2058,7 @@ window.__ModuleLoader__.load({
                         Row,
                         {
                             title: "completed",
+                            releaseStyle: true,
                             icon: "archiveCheck",
                             t,
                             id,
@@ -2055,9 +2072,7 @@ window.__ModuleLoader__.load({
                                 .filter(Boolean)
                                 .join(" · "),
                         },
-                        h(Items, { t, title: "released", items: r.released }),
-                        h(Items, { t, title: "pending", items: r.pending }),
-                        h("p", { className: "fc-note" }, t("retained")),
+                        h(ReleaseReportDetails, { report: r, t }),
                     );
                 }
                 // Only the settings surface waits for its Remote services; tool views remain independent.

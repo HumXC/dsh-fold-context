@@ -45,7 +45,32 @@ export interface Config {
 }
 const schedulingDefaults = resolveSchedulingPolicy();
 
-export const Config = z.object({
+type DefaultFields<T extends object> = {
+    [K in keyof T]: Schemastery<T[K], T[K], "defined">;
+};
+type DefaultGroup<T extends object> = Schemastery<
+    Schemastery.ObjectS<DefaultFields<T>>,
+    Schemastery.ObjectT<DefaultFields<T>>,
+    "defined"
+>;
+type ConfigFields = {
+    uiOnly: Schemastery<boolean, boolean, "defined">;
+    compaction: ReturnType<typeof foldCompactionSchema.default>;
+    summaryModels: Schemastery<
+        Schemastery.TypeS<typeof summaryModelConfigSchema>[],
+        Schemastery.TypeT<typeof summaryModelConfigSchema>[],
+        "volatile-defined"
+    >;
+    policyOverrides: ReturnType<typeof policyOverridesSchema.volatile>;
+    reminders: DefaultGroup<ReminderPolicy>;
+    scheduling: DefaultGroup<SchedulingPolicy>;
+    summary: DefaultGroup<SummaryPolicy>;
+    release: DefaultGroup<ReleasePolicy>;
+};
+export const Config: Schemastery<
+    Schemastery.ObjectS<ConfigFields>,
+    Schemastery.ObjectT<ConfigFields>
+> = z.object({
     uiOnly: z.boolean().default(false),
     compaction: foldCompactionSchema.default({}),
     summaryModels: z.array(summaryModelConfigSchema).max(32).default([]).volatile(),
@@ -188,4 +213,10 @@ export function apply(ctx: Context, config: Config = {}) {
 }
 export { ContextCompressionEngine } from "./integration/engine.js";
 export { ledgerProjection, type LedgerState } from "./domain/ledger.js";
-export default { name, inject, Config, apply };
+const plugin: {
+    name: string;
+    inject: typeof inject;
+    Config: typeof Config;
+    apply: typeof apply;
+} = { name, inject, Config, apply };
+export default plugin;

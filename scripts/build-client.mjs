@@ -10,13 +10,19 @@ const { POLICY_GROUPS, normalizePolicyOverrides } = await import(
 );
 const original = await readFile(resolve(root, "src/client.js"), "utf8");
 const marker = "/*__FOLD_POLICY_SETTINGS__*/";
+const releaseMarker = "/*__FOLD_RELEASE_VIEWS__*/";
 if (original.split(marker).length !== 2)
     throw new Error("Expected one policy settings injection point");
+if (original.split(releaseMarker).length !== 2)
+    throw new Error("Expected one release views injection point");
 const policyClient = await readFile(resolve(root, "src/client-policy.js"), "utf8");
-const source = original.replace(
-    marker,
-    `const POLICY_GROUPS = ${JSON.stringify(POLICY_GROUPS)};\nconst normalizePolicyOverrides = ${normalizePolicyOverrides.toString()};\n${policyClient}`,
-);
+const releaseClient = await readFile(resolve(root, "src/client-release.js"), "utf8");
+const source = original
+    .replace(
+        marker,
+        `const POLICY_GROUPS = ${JSON.stringify(POLICY_GROUPS)};\nconst normalizePolicyOverrides = ${normalizePolicyOverrides.toString()};\n${policyClient}`,
+    )
+    .replace(releaseMarker, () => releaseClient);
 new Script(source, { filename: "dsh-fold-context/client.js" });
 await mkdir(dirname(target), { recursive: true });
 await writeFile(target, source);

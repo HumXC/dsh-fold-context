@@ -11,6 +11,7 @@ import {
 } from "../domain/attachment-numbering.js";
 import type { LedgerState } from "../domain/ledger.js";
 import "@deepseek-ai/dsh-attachment";
+import { recoveryReleaseMetadata } from "../domain/release-metadata.js";
 
 export const ATTACHMENT_RECOVERY_SOURCE = "fold-context-attachment-recovery";
 declare module "@deepseek-ai/dsh-llm" {
@@ -58,7 +59,7 @@ export async function expandAttachment(
         blockIndex: slot.blockIndex,
         currentSeq: slot.currentSeq,
         bindingStatus: slot.status,
-        releaseStatus: state.entries.find((item) => item.id === slot.id)?.status ?? null,
+        ...recoveryReleaseMetadata(state, slot.id),
         restoresSurface: false,
     };
     const window = await ctx.sessionQuery.readEvent(

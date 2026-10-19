@@ -24,6 +24,7 @@ import { EXPAND_TOOL, SEARCH_TOOL, idArgumentSchema } from "../domain/protocol.j
 import "@deepseek-ai/dsh-session-query";
 import { expandAttachment, renderRecovered } from "./attachment-recovery.js";
 import { optionalItems, optionalParameter, optionalText } from "./tool-arguments.js";
+import { recoveryReleaseMetadata } from "../domain/release-metadata.js";
 const idSchema = idArgumentSchema;
 const rolesSchema = z
     .array(z.enum(["user", "assistant", "tool"]))
@@ -45,13 +46,18 @@ function owner(exec: ToolRunContext) {
     return exec.agent;
 }
 
-function metadata(state: LedgerState, slot: NumberSlot) {
+function metadata(state: LedgerState, slot: NumberSlot, includeReason = true) {
     const tool = slot.tool === null ? null : characterPage(slot.tool, 0, 128);
     return {
         id: slot.id,
         role: slot.role,
         status: slot.status,
-        releaseStatus: state.entries.find((entry) => entry.id === slot.id)?.status ?? null,
+        ...(includeReason
+            ? recoveryReleaseMetadata(state, slot.id)
+            : {
+                  releaseStatus:
+                      state.entries.find((entry) => entry.id === slot.id)?.status ?? null,
+              }),
         sourceSeq: slot.sourceSeq,
         currentSeq: slot.currentSeq,
         tool: tool?.text ?? null,
@@ -308,7 +314,7 @@ export function registerRecoveryTools(ctx: Context, engine: ContextCompressionEn
                         const attachmentCandidates =
                             matchingAttachments.length > 0 ? matchingAttachments : allAttachments;
                         hits.push({
-                            ...metadata(state, slot),
+                            ...metadata(state, slot, false),
                             snippet: matchSnippet(content, match.index),
                             attachments: attachmentCandidates.slice(0, 8).map((item) => ({
                                 id: item.id,

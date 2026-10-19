@@ -54,9 +54,11 @@ const groups = Object.fromEntries(
 );
 
 /** A profile-wide override is opt-in per group, preserving existing preset policy. */
-export const policyOverridesSchema = z
-    .transform(z.object(groups), normalizePolicyOverrides, true)
-    .default({});
+export const policyOverridesSchema: Schemastery<
+    Schemastery.ObjectS<typeof groups>,
+    PolicyOverrides,
+    "defined"
+> = z.transform(z.object(groups), normalizePolicyOverrides, true).default({});
 
 export function selectPolicyOverrides(
     base: PolicyValues,

@@ -122,6 +122,7 @@ test("a manual checkpoint excludes one image occurrence and sends only its sibli
     assert.deepEqual(f.session.eventAt(original.seq).data.content, original.data.content);
     const outcome = await f.invoke("context_expand", { id: 2 });
     assert.equal(outputValue(outcome).representation, "native-image");
+    assert.equal(outputValue(outcome).releaseReason, "First occurrence consumed");
     assert.equal(outcome.content.filter((block) => block.type === "image").length, 1);
 });
 
@@ -176,6 +177,9 @@ test("file recovery verifies all bytes and returns a host-mapped handle, never n
         false,
     );
     await f.engine.compactNow(f.agent, signal());
+    const recoveredAfterRelease = outputValue(await f.invoke("context_expand", { id: 2 }));
+    assert.equal(recoveredAfterRelease.releaseStatus, "released");
+    assert.equal(recoveredAfterRelease.releaseReason, "File consumed");
     // The independently recovered control-tool copy remains unmarked evidence.
     assert.equal(
         f.calls[0].messages

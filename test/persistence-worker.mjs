@@ -174,6 +174,7 @@ if (mode === "write") {
         assert.equal(recovered.text, expected.original);
         assert.equal(recovered.sourceSeq, expected.originalSeq);
         assert.equal(recovered.releaseStatus, "released");
+        assert.equal(recovered.releaseReason, "Consumed before restart");
         assert.equal(recovered.restoresSurface, false);
         assert.deepEqual(session.surface.nodes, expected.surface);
         const found = await invoke(f, parent, "context_search", {

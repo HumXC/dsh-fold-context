@@ -14,6 +14,8 @@ function client() {
         useSyncExternalStore: (_subscribe, get) => get(),
         useState: (initial) => [initial, () => {}],
         useEffect: () => {},
+        useLayoutEffect: () => {},
+        useRef: (initial) => ({ current: initial }),
     };
     runInNewContext(source, {
         window: {
@@ -158,7 +160,7 @@ test("valid presentation metadata wins; unrecognized metadata falls back to reco
     assert.equal(plugin.toolModel(props).error, "Recorded failure");
 });
 
-test("release cards explain individual outcomes, reason and preview in both locales", () => {
+test("release cards show compact outcome categories and the shared reason in both locales", () => {
     const c = client();
     const props = outcome(
         "context_release",
@@ -167,7 +169,7 @@ test("release cards explain individual outcomes, reason and preview in both loca
     );
     const view = c.views.get("context_release");
     const zh = c.visibleText(c.render({ type: view, props }));
-    assert.match(zh, /标记弃用上下文/);
+    assert.match(zh, /标记释放/);
     assert.match(zh, /等待处理/);
     assert.match(zh, /编号不存在/);
     assert.match(zh, /Evidence used/);
@@ -432,7 +434,8 @@ test("only paired, completed replacements produce replayable standalone release 
         }),
     );
     assert.match(rendered, /已释放上下文/);
-    assert.match(rendered, /prior evidence/);
+    assert.doesNotMatch(rendered, /prior evidence/);
+    assert.match(rendered, /Used/);
     assert.match(rendered, /受协议保护/);
     assert.match(rendered, /\b2\b/);
     assert.doesNotMatch(rendered, /§|\b[UATIF]\d+R?\b/);
