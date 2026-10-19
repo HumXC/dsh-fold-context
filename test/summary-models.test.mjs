@@ -56,69 +56,74 @@ test("fold owns its Config schema and the profile settings owner never mounts co
     assert.ok(!schema.includes("summarizationModel"));
 });
 
-test("matching summary reuses native history, signed replay, session identity and effort without adding dialogue", async (t) => {
-    const f = await fixture({ summaryModels: [model("different"), model("fixture")] });
-    t.after(f.close);
-    f.session.append("request/header", {
-        header: { config: { ...route, maxTokens: 1024, reasoningEffort: "high" } },
-        reason: "changed",
-    });
-    f.llm.resolveModelInfo = async () => ({
-        ...route,
-        id: route.model,
-        name: "Mock",
-        context: { contextWindow: 131072 },
-        reasoning: { efforts: [{ id: "high", name: "High" }] },
-    });
-    const user = f.appendUser("Preserve the active objective. ".repeat(600));
-    f.session.append("step/start", { turn: 1, step: 1 });
-    const assistant = createAssistantMessage({
-        source: { ...route, replayState: { response: { signed: "native-signature" } } },
-        content: [
-            { type: "reasoning", text: "Private historical reasoning." },
-            { type: "text", text: "Verified conclusion. ".repeat(300) },
-        ],
-    });
-    f.session.append(
-        "assistant/message",
-        { turn: 1, step: 1, message: assistant, stream: [] },
-        { surfaceOp: "append" },
-    );
-    f.session.append("step/end", { turn: 1, step: 1 });
-    f.appendUser("Keep working.");
-    const beforeDialogue = f.session
-        .snapshotEvents()
-        .filter((event) => ["assistant/message", "user/message"].includes(event.type)).length;
-    const result = await compact(f);
-    assert.ok(result);
-    assert.equal(f.calls.length, 1);
-    const request = f.calls[0];
-    assert.equal(request.model, "fixture");
-    assert.equal(request.reasoningEffort, "high");
-    assert.equal(request.sessionId, f.session.id);
-    assert.equal(request.purpose, "compaction");
-    assert.deepEqual(
-        request.messages.find((message) => message.id === user.data.id),
-        user.data,
-    );
-    assert.deepEqual(
-        request.messages.find((message) => message.id === assistant.id),
-        assistant,
-    );
-    const dialogue = f.session
-        .snapshotEvents()
-        .filter((event) => ["assistant/message", "user/message"].includes(event.type));
-    assert.equal(
-        dialogue.length,
-        beforeDialogue + 1,
-        "only the committed checkpoint enters dialogue",
-    );
-    assert.ok(
-        !dialogue.some((event) =>
-            JSON.stringify(event.data).includes("Create a concise checkpoint"),
-        ),
-    );
-    assert.equal(f.engine.state(f.session).lastSummary.projection.reasoning, "preserve");
+test("matching and nonmatching summaries use independent projected requests without adding dialogue", async (t) => {
+    for (const target of ["fixture", "different"]) {
+        await t.test(target, async (t) => {
+            const f = await fixture({ summaryModels: [model(target)] });
+            t.after(f.close);
+            f.session.append("request/header", {
+                header: { config: { ...route, maxTokens: 1024, reasoningEffort: "high" } },
+                reason: "changed",
+            });
+            const user = f.appendUser("Preserve the active objective. ".repeat(600));
+            f.session.append("step/start", { turn: 1, step: 1 });
+            const assistant = createAssistantMessage({
+                source: { ...route, replayState: { response: { signed: "native-signature" } } },
+                content: [
+                    { type: "reasoning", text: "Private historical reasoning." },
+                    { type: "text", text: "Verified conclusion. ".repeat(300) },
+                ],
+            });
+            const originalAssistant = f.session.append(
+                "assistant/message",
+                { turn: 1, step: 1, message: assistant, stream: [] },
+                { surfaceOp: "append" },
+            );
+            f.session.append("step/end", { turn: 1, step: 1 });
+            f.appendUser("Keep working.");
+            const beforeDialogue = f.session
+                .snapshotEvents()
+                .filter((event) =>
+                    ["assistant/message", "user/message"].includes(event.type),
+                ).length;
+            assert.ok(await compact(f));
+            assert.equal(f.calls.length, 1);
+            const request = f.calls[0];
+            assert.equal(request.model, target);
+            assert.equal(Object.hasOwn(request, "reasoningEffort"), false);
+            assert.equal(Object.hasOwn(request, "sessionId"), false);
+            assert.equal(request.purpose, "compaction");
+            assert.equal(
+                request.messages.some(
+                    (message) => message.id === user.data.id || message.id === assistant.id,
+                ),
+                false,
+            );
+            const projected = JSON.stringify(request.messages);
+            assert.ok(projected.includes("Preserve the active objective."));
+            assert.ok(projected.includes("Verified conclusion."));
+            assert.ok(!projected.includes("Private historical reasoning."));
+            assert.ok(!projected.includes("native-signature"));
+            assert.deepEqual(f.session.eventAt(originalAssistant.seq).data.message, assistant);
+            const dialogue = f.session
+                .snapshotEvents()
+                .filter((event) => ["assistant/message", "user/message"].includes(event.type));
+            assert.equal(
+                dialogue.length,
+                beforeDialogue + 1,
+                "only the committed checkpoint enters dialogue",
+            );
+            assert.ok(
+                !dialogue.some((event) =>
+                    JSON.stringify(event.data).includes("Create a concise checkpoint"),
+                ),
+            );
+            assert.equal(
+                f.engine.state(f.session).lastSummary.projection.reasoning,
+                "omit-from-summary",
+            );
+        });
+    }
 });
 
 test("a disabled match priority respects list order and explicit summary effort", async (t) => {
@@ -267,9 +272,13 @@ test("existing engines read the profile owner's latest snapshot at each summary"
     assert.equal(f.calls.at(-1).model, "second");
 });
 
-test("following the session still filters selected releases before attempting cache reuse", async (t) => {
+test("following the session uses ordinary projection and model defaults", async (t) => {
     const f = await fixture({ summaryModels: [] });
     t.after(f.close);
+    f.session.append("request/header", {
+        header: { config: { ...route, maxTokens: 1024, reasoningEffort: "high" } },
+        reason: "changed",
+    });
     f.appendUser("Preserve the user goal. ".repeat(600));
     const result = f.toolRound("read", "DISCARD_NATIVE_SECRET ".repeat(600));
     f.toolRound("grep", "Keep this evidence. ".repeat(600));
@@ -280,11 +289,13 @@ test("following the session still filters selected releases before attempting ca
     f.appendUser("Next phase.");
     await compact(f);
     assert.equal(f.calls[0].model, "fixture");
+    assert.equal(Object.hasOwn(f.calls[0], "sessionId"), false);
+    assert.equal(Object.hasOwn(f.calls[0], "reasoningEffort"), false);
     assert.ok(!JSON.stringify(f.calls[0].messages).includes("DISCARD_NATIVE_SECRET"));
     assert.equal(f.engine.state(f.session).lastSummary.projection.reasoning, "omit-from-summary");
 });
 
-test("same-model fallback reuses native history even when its priority switch is off", async (t) => {
+test("same-model fallback uses ordinary projection when its priority switch is off", async (t) => {
     const f = await fixture({
         summaryModels: [model("missing"), model("fixture", { preferWhenSessionMatches: false })],
     });
@@ -294,14 +305,16 @@ test("same-model fallback reuses native history even when its priority switch is
         if (name === "missing") throw new LlmError("Unavailable", "NO_ADAPTER");
         return resolve(provider, name, signal);
     };
-    const user = f.appendUser("Preserve the original request prefix. ".repeat(600));
+    const user = f.appendUser("Preserve the active task. ".repeat(600));
     f.toolRound("read", "Verified task evidence. ".repeat(600));
     f.appendUser("Continue.");
     await compact(f);
     assert.equal(f.calls[0].model, "fixture");
-    assert.deepEqual(
-        f.calls[0].messages.find((message) => message.id === user.data.id),
-        user.data,
+    assert.equal(Object.hasOwn(f.calls[0], "sessionId"), false);
+    assert.equal(
+        f.calls[0].messages.some((message) => message.id === user.data.id),
+        false,
     );
-    assert.equal(f.engine.state(f.session).lastSummary.projection.reasoning, "preserve");
+    assert.ok(JSON.stringify(f.calls[0].messages).includes("Preserve the active task."));
+    assert.equal(f.engine.state(f.session).lastSummary.projection.reasoning, "omit-from-summary");
 });

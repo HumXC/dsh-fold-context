@@ -387,7 +387,7 @@ test("page controls have distinct accessible names, matching labels and stable b
     f.client.setLanguage("zh");
     const chinese = f.client.render(f.controller);
     assert.match(visibleText(chinese), /匹配会话时优先/);
-    assert.match(visibleText(chinese), /自动（同模型沿用会话/);
+    assert.match(visibleText(chinese), /自动（供应商默认值）/);
     assert.ok(button(chinese, "摘要模型 1 · 删除"));
     assert.doesNotMatch(visibleText(chinese), /summarySettings[A-Z]/);
 });

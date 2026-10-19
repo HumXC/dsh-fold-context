@@ -10,7 +10,6 @@ import {
     type ToolSchema,
 } from "@deepseek-ai/dsh-llm";
 import type { SummaryModel, SummaryRoute } from "../domain/summary-models.js";
-import { sameSummaryRoute } from "../domain/summary-models.js";
 
 export interface SummaryInput {
     readonly tools?: readonly ToolSchema[];
@@ -38,9 +37,6 @@ export function conversationRoute(agent: Agent): SummaryRoute {
     return {
         provider: current.provider,
         model: current.model,
-        ...(current.reasoningEffort === undefined
-            ? {}
-            : { reasoningEffort: current.reasoningEffort }),
     };
 }
 
@@ -59,16 +55,13 @@ export async function requestSummary(
     input: SummaryInput,
     agent: Agent,
     target: SummaryModel,
-    current: SummaryRoute,
     maxTokens: number,
     signal?: AbortSignal,
 ) {
     signal?.throwIfAborted();
     const info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal);
     signal?.throwIfAborted();
-    const reasoningEffort =
-        target.reasoningEffort ??
-        (sameSummaryRoute(target, current) ? current.reasoningEffort : undefined);
+    const reasoningEffort = target.reasoningEffort;
     if (
         reasoningEffort !== undefined &&
         !info.reasoning?.efforts.some((effort) => effort.id === reasoningEffort)
@@ -87,7 +80,6 @@ export async function requestSummary(
         ...(input.tools === undefined ? {} : { tools: [...input.tools] }),
         toolHistory: agent.session.toolHistory(),
         maxTokens,
-        sessionId: agent.session.id,
         purpose: "compaction",
         ...(signal === undefined ? {} : { signal }),
     };
@@ -103,7 +95,7 @@ export async function requestSummary(
                 : Math.ceil(JSON.stringify(options.tools).length / 3)) +
             256;
         const available = Math.floor(window - promptTokens);
-        // TokenMeter is an estimate, especially for native replay. Only the provider can reject input as too large.
+        // TokenMeter is an estimate. Only the provider can reject input as too large.
         options.maxTokens = Math.min(maxTokens, available > 0 ? available : window);
     }
     const assembler = new BlockAssembler();

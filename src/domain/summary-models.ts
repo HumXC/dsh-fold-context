@@ -8,7 +8,7 @@ export const summaryModelSchema = z.object({
     preferWhenSessionMatches: z.boolean().default(true),
 });
 export type SummaryModel = z.infer<typeof summaryModelSchema>;
-export type SummaryRoute = Pick<LlmCallConfig, "provider" | "model" | "reasoningEffort">;
+export type SummaryRoute = Pick<LlmCallConfig, "provider" | "model">;
 export const sameSummaryRoute = (
     left: Pick<SummaryRoute, "provider" | "model">,
     right: Pick<SummaryRoute, "provider" | "model">,

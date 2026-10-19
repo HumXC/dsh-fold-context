@@ -757,7 +757,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const projected =
             selection === null
                 ? []
-                : this.summaryProjection(input, agent, revision, target, images).messages;
+                : this.summaryProjection(input, agent, revision, images).messages;
         // Include the preserved system head and request envelope in the auxiliary call estimate.
         // The fixed allowance covers the official instruction and checkpoint framing.
         const projectedTokens = projected.reduce(
@@ -877,37 +877,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         input: readonly Message[],
         agent: Agent,
         cutoff: number,
-        target: SummaryModel,
         images: "native" | "references",
     ) {
         const state = this.state(agent.session);
-        const selected = new Set(
-            input.flatMap((message) =>
-                state.numbering.slots
-                    .filter(
-                        (slot) =>
-                            slot.messageId === message.id &&
-                            slot.role === message.role &&
-                            slot.currentSeq !== null,
-                    )
-                    .map((slot) => slot.currentSeq!),
-            ),
-        );
-        const exclusions = selectedExclusions(state, selected, cutoff, "transcript");
-        const needsImageProjection = input.some((message) =>
-            message.content.some(
-                (block) => block.type === "image" && (images !== "native" || block.offloaded),
-            ),
-        );
-        // Native signed responses and tool pairs stay untouched on the cache-reuse path.
-        // Filtering wins when a selected exclusion or reference-only image requires a data projection.
-        if (
-            sameSummaryRoute(target, conversationRoute(agent)) &&
-            exclusions.length === 0 &&
-            !needsImageProjection
-        ) {
-            return { messages: [...input], policy: { reasoning: "preserve" as const, images } };
-        }
         const policy = { reasoning: this.summaryPolicy.reasoning, images };
         return { messages: projectSummaryInput(state, input, cutoff, policy), policy };
     }
@@ -939,7 +911,6 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                     input.messages,
                     agent,
                     state.activeStart,
-                    target,
                     images,
                 );
                 const result = await requestSummary(
@@ -947,7 +918,6 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                     { ...input, messages: projected.messages },
                     agent,
                     target,
-                    current,
                     cap,
                     signal,
                 );

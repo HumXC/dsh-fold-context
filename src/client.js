@@ -147,14 +147,15 @@ window.__ModuleLoader__.load({
             summarySettingsTitle: "摘要模型",
             summarySettingsDescription:
                 "按列表顺序尝试摘要模型，失败时尝试下一项。匹配当前会话且开启优先的项会提前。",
-            summarySettingsEmpty: "列表为空时，使用当前会话模型和思考强度进行摘要。",
+            summarySettingsEmpty:
+                "列表为空时，使用当前会话的供应商和模型；思考强度使用供应商默认值。",
             summarySettingsRow: "摘要模型 {index}",
             summarySettingsProvider: "供应商",
             summarySettingsModel: "模型",
             summarySettingsEffort: "思考强度",
             summarySettingsChooseProvider: "选择供应商",
             summarySettingsChooseModel: "选择模型",
-            summarySettingsAuto: "自动（同模型沿用会话，否则使用供应商默认值）",
+            summarySettingsAuto: "自动（供应商默认值）",
             summarySettingsPrefer: "匹配会话时优先",
             summarySettingsPreferHelp:
                 "当前会话使用相同供应商和模型时优先尝试此项，否则按列表顺序尝试。",
@@ -328,15 +329,14 @@ window.__ModuleLoader__.load({
             summarySettingsDescription:
                 "Try models in list order and fall back on failure. Matching session models with priority enabled move first.",
             summarySettingsEmpty:
-                "An empty list follows the current session model and reasoning effort.",
+                "An empty list uses the current session provider and model with provider-default reasoning effort.",
             summarySettingsRow: "Summary model {index}",
             summarySettingsProvider: "Provider",
             summarySettingsModel: "Model",
             summarySettingsEffort: "Reasoning effort",
             summarySettingsChooseProvider: "Choose a provider",
             summarySettingsChooseModel: "Choose a model",
-            summarySettingsAuto:
-                "Automatic (inherit matching session effort, otherwise provider default)",
+            summarySettingsAuto: "Automatic (provider default)",
             summarySettingsPrefer: "Prioritize when matching the session",
             summarySettingsPreferHelp:
                 "Try this entry first when the current session uses the same provider and model; otherwise follow list order.",

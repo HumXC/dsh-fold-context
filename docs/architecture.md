@@ -42,7 +42,7 @@ Review try_release now; call context_release for consumed items after preserving
 
 控制消息以 `source.kind = 'fold-context-allocation'` 识别。消费端根据 source 元数据处理，不用正则匹配正文来判断消息类型。source 同时承载持久化所需的分配和提醒状态。
 
-控制消息参与实际主请求，其 token 计入压力。数据投影路径按来源过滤控制消息、release 清理通知与内部状态；同模型原生前缀路径保留请求历史以争取缓存，由追加的摘要指令要求忽略管理信息。图片能力检查始终忽略控制通知的附件。
+控制消息参与实际主请求，其 token 计入压力。所有摘要请求统一使用历史数据投影，按来源过滤控制消息、release 清理通知与内部状态；图片能力检查始终忽略控制通知的附件。
 
 ## 工具参数契约
 
@@ -106,11 +106,11 @@ pressure -> release -> remeasure -> summary if still needed
 
 摘要覆盖较旧的连续历史前缀，保留开头的 system 与近期安全尾部。切点须保持工具调用与结果完整；原生 assistant 回放的规划成本参考同一 provider/model 的 output usage。最新主请求 input usage 校准总压力，历史请求的完整 input usage 不累加到选区成本。
 
-摘要路由由 fold 自有 `summaryModels` 有序列表决定；`preferWhenSessionMatches` 默认 true，供应商与模型都匹配会话的开启项稳定提前，其余项保持顺序。空列表跟随会话。显式强度覆盖该项请求；未指定强度时，同模型沿用会话强度，其他模型交给供应商默认值。profile 根 `uiOnly` 条目提供 `foldContextSettings` 服务，保存 `.volatile()` 列表，preset 内的引擎在每次摘要时读取；没有根服务时使用引擎本地配置。页面只通过 settings Remote 的修订号保护 `mutate` 写入该字段。
+摘要路由由 fold 自有 `summaryModels` 有序列表决定；`preferWhenSessionMatches` 默认 true，供应商与模型都匹配会话的开启项稳定提前，其余项保持顺序。空列表跟随会话的供应商和模型。显式强度覆盖该项摘要请求；未指定强度时使用摘要模型的供应商默认值。profile 根 `uiOnly` 条目提供 `foldContextSettings` 服务，保存 `.volatile()` 列表，preset 内的引擎在每次摘要时读取；没有根服务时使用引擎本地配置。页面只通过 settings Remote 的修订号保护 `mutate` 写入该字段。
 
-引擎保留 `BasicCompactionEngine` 继承和官方事务，只替换辅助摘要实现。同模型且没有选区排除或图片引用要求时，原样转交历史消息、原生签名、工具定义和 toolHistory，追加最后一条摘要指令，复用 `sessionId` 并标记 `purpose: compaction`。该流直接调用 LLM，不进入 Agent turn/inbox；只有成功 checkpoint 由原事务提交。缓存命中是供应商行为，不作保证。
+引擎保留 `BasicCompactionEngine` 继承和官方事务，只替换辅助摘要实现。所有候选统一生成历史数据投影，携带官方提供的 system、工具定义和 toolHistory，追加最后一条摘要指令，并标记 `purpose: compaction`。辅助请求不携带主会话的 `sessionId`，不隐式继承会话思考强度；匹配只参与候选排序。该流直接调用 LLM，不进入 Agent turn/inbox；只有成功 checkpoint 由原事务提交。
 
-需要过滤释放内容、处理图片引用或改用其他模型时，生成历史数据投影：剔除来源标记的控制信息，默认省略 reasoning，附件保留归档引用；`preserve` 可保留 reasoning 文字。`summary.images: auto` 只向明确支持图片的路由传原图。checkpoint stamp 记录实际策略：原生前缀为 preserve，数据投影使用配置策略。
+历史投影剔除来源标记的控制信息，过滤选区内可安全排除的释放目标，默认省略 reasoning，附件保留归档引用；`preserve` 可保留 reasoning 文字。`summary.images: auto` 只向明确支持图片的路由传原图。checkpoint stamp 统一记录配置实际使用的投影策略，预算估算与实际请求共用同一投影路径。
 
 候选按顺序执行，模型或传输失败、供应商确认窗口不足、无效/空/截断输出只推进到下一项。用户取消、未分类的内部错误及事务错误直接终止；候选之间不提交失败输出。候选窗口已知时，按估计输入收紧输出预算；估算不足以拒绝输入，超限判断以供应商响应为准。全部失败时保留各候选错误并由官方流程关闭事务。
 
