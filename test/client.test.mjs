@@ -42,7 +42,8 @@ function client() {
         inject(_dependencies, callback) {
             return callback(this);
         },
-        remote: { settings: {}, session: {} },
+        remote: { $on: () => () => {}, settings: {}, session: {} },
+        on: () => () => {},
         locale: {
             register: (_ns, dicts) => {
                 assert.deepEqual(Object.keys(dicts).sort(), ["en", "zh"]);
@@ -94,6 +95,9 @@ function client() {
 }
 const outcome = (toolName, args, value, extra = {}) => ({
     toolName,
+    callId: "client-test-call",
+    openFile() {},
+    loadImage: async () => "blob:client-test-image",
     phase: "result",
     useDisclosure: () => ({ expanded: true, toggle() {} }),
     block: {
@@ -284,19 +288,22 @@ test("search/status use structured lists and unknown old results remain inspecta
     );
 });
 
-test("status cards explain payback, cache assumptions and protected constraints in both locales", () => {
+test("status cards explain unit costs, start windows and protected constraints in both locales", () => {
     const c = client();
     const value = {
         entries: [],
         scheduling: {
             decision: "wait",
-            reason: "not_paid_back",
-            limits: { minimumPromptTokens: 1900 },
+            reason: "cost_deferred",
+            limits: { minimumPromptTokens: 1900, thresholdTokens: 170000, safetyTokens: 226800 },
             diagnostic: {
                 nextAction: "Continue working.",
                 economics: {
-                    breakEvenRequests: 17,
-                    expectedFutureRequests: 8,
+                    currentUnitCost: 0.8,
+                    bestUnitCost: 0.6,
+                    recommendedAtTokens: 180000,
+                    latestStartTokens: 220000,
+                    confidence: "observed_growth",
                     upfrontCost: 10980,
                     cacheBasis: "assumed_cached",
                 },
@@ -312,7 +319,10 @@ test("status cards explain payback, cache assumptions and protected constraints 
                 props: outcome("context_status", {}, value),
             }),
         );
-        assert.match(text, /17 \/ 8/);
+        assert.match(text, /0.8 \/ 0.6/);
+        assert.match(text, /180000 \/ 220000/);
+        assert.match(text, /170000 \/ 226800/);
+        assert.doesNotMatch(text, /payback|回本/);
         assert.match(text, /10980/);
         assert.match(text, /1900/);
         assert.doesNotMatch(text, /10,980|1,900/);

@@ -474,7 +474,7 @@ test("conversation IDs reject a mixed batch while numeric tool IDs are individua
         ).value.accepted,
         true,
     );
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     assert.equal(
         f.engine.state(f.session).entries.find((entry) => entry.id === toolId).status,
         "released",

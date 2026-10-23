@@ -29,7 +29,7 @@ const surfaceSnapshot = (f) => ({
     contentGeneration: f.session.surface.contentGeneration,
 });
 const boundary = async (f, abortSignal = signal()) => {
-    commitForcedReleases(f, abortSignal);
+    await commitForcedReleases(f, abortSignal);
     return null;
 };
 
@@ -92,7 +92,7 @@ function appendSignedRound(f, text) {
 }
 
 test("v8 tool release replaces only its body with an explicit user-compaction batch permit", async (t) => {
-    const f = await fixture({ compaction: { auto: false }, scheduling: { enabled: false } });
+    const f = await fixture({ compaction: { auto: false } });
     t.after(f.close);
     const user = f.appendUser("Keep this goal and the conversation around the evidence.");
     const original = f.toolRound("read", body("INLINE_ORIGINAL"));
@@ -252,7 +252,9 @@ test("inline release replays from JSON into a new Session and a fresh projection
         JSON.stringify(eventFor(replay, restoredEntry.currentSeq)).includes(`[released ${id}]`),
     );
     const beforeSeq = replay.seq;
-    await fresh.engine.compactIfNeeded({ ...fresh.agent, session: replay }, "pressure", signal());
+    await fresh.withSessionQuery(replay, async () =>
+        fresh.engine.compactIfNeeded({ ...fresh.agent, session: replay }, "pressure", signal()),
+    );
     assert.equal(replay.seq, beforeSeq);
     assert.equal(fresh.calls.length, 0);
 });

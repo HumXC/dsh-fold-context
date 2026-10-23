@@ -27,7 +27,7 @@ try {
             attachments: true,
             inputModalities: ["text", "image"],
             auto: false,
-            scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
+            compaction: { cacheReadRatio: 1 },
             responses: [
                 call("context_release", {
                     ids: [2, 4],

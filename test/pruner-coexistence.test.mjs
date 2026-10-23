@@ -45,7 +45,7 @@ for (const auto of [false, true]) {
         const f = await fixture({
             pruner: {},
             compaction: { auto },
-            scheduling: { enabled: false },
+            compaction: { auto: false },
         });
         t.after(f.close);
         const original = originalText();

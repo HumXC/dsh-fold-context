@@ -47,7 +47,7 @@ test("every recovered page carries the original release reason without restoring
     const queued = valueOf(await f.invoke("context_expand", { id, limit: 20 }));
     assert.equal(queued.releaseStatus, "queued");
     assert.equal("releaseReason" in queued, false);
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     const before = [...f.session.surface.nodes];
     let offset = 0,
         recovered = "";
@@ -81,7 +81,7 @@ test("replayed released evidence recovers its stored reason from the session log
     const event = f.toolRound("read", "Persistent original evidence");
     const id = Number(f.idFor(event));
     await f.invoke("context_release", { ids: [id], reason: "Saved before replay" });
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     const restored = f.sessions.create("restored-release-reason", {
         seed: f.session.snapshotEvents(),
         inheritedEventCount: f.session.seq,

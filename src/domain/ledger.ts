@@ -5,6 +5,7 @@ import {
     COMPACT_TOOL,
     CONTROL_TOOLS,
     RECEIPT_KEY,
+    PTC_INTENT_SOURCE,
     RELEASE_TOOL,
     previewContent,
     normalizeId,
@@ -85,7 +86,7 @@ const entrySchema = z.object({
     admittedAtBusinessStep: z.number().int().nonnegative().default(0),
 });
 export const intentSchema = z.object({
-    version: z.literal(8),
+    version: z.union([z.literal(8), z.literal(9)]),
     kind: z.enum(["release", "summary"]),
     sessionId: z.string(),
     ids: z.array(z.string().regex(ID_PATTERN)).max(128),
@@ -99,8 +100,13 @@ const summaryRequestSchema = z.object({
 });
 export const ledgerSchema = z.object({
     entries: z.array(entrySchema),
+    currentStep: z
+        .object({ turn: z.number().int().nonnegative(), step: z.number().int().nonnegative() })
+        .nullable()
+        .default(null),
     businessSteps: z.number().int().nonnegative().default(0),
     pendingBusinessStep: z.boolean().default(false),
+    sessionSummaryId: z.string().nullable().default(null),
     lastReleaseProgressSeq: z.number().int().nonnegative().default(0),
     reminderState: reminderStateSchema.default(initialReminderState),
     pendingInlineRelease: z
@@ -151,36 +157,37 @@ declare module "@deepseek-ai/dsh-session-projection/types" {
         contextCompression: LedgerState;
     }
 }
-function readIntent(event: SessionEvent, name: string) {
+function intentReceipt(value: unknown): unknown {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    return RECEIPT_KEY in value ? value[RECEIPT_KEY] : undefined;
+}
+function readResultIntent(event: Extract<SessionEvent, { type: "tool/result" }>, name: string) {
     if (name !== RELEASE_TOOL && name !== COMPACT_TOOL) return null;
-    if (event.type !== "tool/result" && event.type !== "tool/ptc-dispatch") return null;
-    if (event.type === "tool/result" ? event.data.message.isError : event.data.isError) return null;
-    let value: unknown = event.type === "tool/result" ? event.data.meta : undefined;
-    if (value === undefined) {
-        const blocks =
-            event.type === "tool/result" ? event.data.message.content : event.data.content;
-        try {
-            value = JSON.parse(
-                blocks
-                    .filter((block) => block.type === "text")
-                    .map((block) => block.text)
-                    .join(""),
-            );
-        } catch {
-            return null;
-        }
+    if (event.data.message.isError) return null;
+    const parsed = intentSchema.safeParse(intentReceipt(event.data.meta));
+    return parsed.success && parsed.data.version === 8 ? parsed.data : null;
+}
+function readPtcIntent(event: Extract<SessionEvent, { type: "tool/ptc-dispatch" }>) {
+    if (event.data.name !== RELEASE_TOOL && event.data.name !== COMPACT_TOOL) return null;
+    if (event.data.isError !== false) return null;
+    // Historical v8 PTC logs carry the public receipt and take its omitted reason
+    // from arguments. V9 intents are committed from final metadata in an empty
+    // native developer record; the lossy dispatch body must never apply them again.
+    const block = event.data.content[0];
+    if (event.data.content.length !== 1 || block?.type !== "text") return null;
+    const args = z
+        .object({ reason: z.string().trim().min(1).max(1000) })
+        .safeParse(event.data.arguments);
+    if (!args.success) return null;
+    let receipt: unknown;
+    try {
+        receipt = intentReceipt(JSON.parse(block.text));
+    } catch {
+        return null;
     }
-    if (value === null || typeof value !== "object" || !(RECEIPT_KEY in value)) return null;
-    let receipt = value[RECEIPT_KEY];
-    if (event.type === "tool/ptc-dispatch" && receipt !== null && typeof receipt === "object") {
-        const args = z
-            .object({ reason: z.string().trim().min(1).max(1000) })
-            .safeParse(event.data.arguments);
-        if (!args.success) return null;
-        receipt = { ...receipt, reason: args.data.reason };
-    }
-    const parsed = intentSchema.safeParse(receipt);
-    return parsed.success ? parsed.data : null;
+    if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+    const parsed = intentSchema.safeParse({ ...receipt, reason: args.data.reason });
+    return parsed.success && parsed.data.version === 8 ? parsed.data : null;
 }
 function withAttachmentEntries(state: LedgerState): LedgerState {
     const known = new Set(state.entries.map((entry) => entry.id));
@@ -217,12 +224,14 @@ function withAttachmentEntries(state: LedgerState): LedgerState {
 }
 export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     key: "contextCompression",
-    stateVersion: 17,
+    stateVersion: 20,
     stateSchema: ledgerSchema,
     init: () => ({
         entries: [],
+        currentStep: null,
         businessSteps: 0,
         pendingBusinessStep: false,
+        sessionSummaryId: null,
         lastReleaseProgressSeq: 0,
         reminderState: initialReminderState(),
         pendingInlineRelease: null,
@@ -238,8 +247,37 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
     apply(state, event) {
         // Only completed business steps advance reminder age/cooldown. Pure context
         // management calls (including explanatory text) cannot age their own backlog.
-        if (event.type === "step/start") state = { ...state, pendingBusinessStep: false };
-        if (event.type === "assistant/message" && event.surfaceOp === "append") {
+        if (
+            event.type === "user/message" &&
+            event.data.source.kind === "fold-context-session-summary"
+        ) {
+            const control = event.data.source.control;
+            if (control.phase === "request")
+                state = { ...state, sessionSummaryId: control.plan.checkpointId };
+            else if (
+                (control.phase === "cancelled" || control.phase === "failed") &&
+                control.checkpointId === state.sessionSummaryId
+            )
+                state = { ...state, sessionSummaryId: null };
+        }
+        if (event.type === "turn/end") state = { ...state, sessionSummaryId: null };
+        if (event.type === "step/start")
+            state = {
+                ...state,
+                currentStep: { turn: event.data.turn, step: event.data.step },
+                pendingBusinessStep: false,
+            };
+        if (
+            event.type === "step/end" ||
+            event.type === "turn/end" ||
+            event.type === "session/end-seed"
+        )
+            state = { ...state, currentStep: null };
+        if (
+            event.type === "assistant/message" &&
+            event.surfaceOp === "append" &&
+            state.sessionSummaryId === null
+        ) {
             const calls = event.data.message.content.filter((block) => block.type === "tool-call");
             const business =
                 calls.length > 0
@@ -341,7 +379,7 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 event.data.compactionId,
             );
             const excludedIds =
-                policy === null
+                policy === null || policy?.execution === "session"
                     ? []
                     : selectedExclusions(
                           state,
@@ -392,7 +430,7 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
             };
         }
         if (event.type === "tool/ptc-dispatch") {
-            const intent = readIntent(event, event.data.name);
+            const intent = readPtcIntent(event);
             return intent === null ? state : applyIntent(state, intent, event.seq);
         }
         if (event.surfaceOp === undefined) return state;
@@ -433,6 +471,7 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
             event.sourceEventSeqs?.some((seq) => seq === pending.seq) &&
             removed.length === pending.shadowedSeqs.length &&
             removed.every((seq, index) => seq === pending.shadowedSeqs[index]);
+        if (confirmed) state = { ...state, sessionSummaryId: null };
         const committedExclusions = confirmed ? new Set(pending.excludedIds) : new Set<string>();
         const message =
             event.type === "user/message"
@@ -455,10 +494,12 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 ? affected
                       .filter(
                           (entry) =>
-                              (entry.status === "queued" || entry.status === "released") &&
-                              entry.releaseMode === "inline" &&
+                              // A confirmed native prune/replacement is already a durable
+                              // release fact, even when its old ordinary intent is unreadable.
                               pendingRelease.ids.includes(entry.id) &&
-                              (entry.role === "tool" || entry.releasedBlockIndex !== null),
+                              (entry.role === "tool" ||
+                                  ((entry.role === "image" || entry.role === "file") &&
+                                      entry.releasedBlockIndex !== null)),
                       )
                       .map((entry) => entry.id)
                 : [],
@@ -478,6 +519,9 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 return {
                     ...entry,
                     status: "released" as const,
+                    releaseMode: inlineReleased.has(entry.id)
+                        ? ("inline" as const)
+                        : entry.releaseMode,
                     preview: "",
                     currentSeq: inlineReleased.has(entry.id) ? event.seq : null,
                 };
@@ -586,9 +630,25 @@ export const ledgerProjection: ProjectionDefinition<"contextCompression"> = {
                 next = { ...next, entries };
             }
             if (event.type === "tool/result") {
-                const intent = readIntent(event, binding?.tool ?? "unknown");
+                const intent = readResultIntent(event, binding?.tool ?? "unknown");
                 if (intent !== null) next = applyIntent(next, intent, event.seq);
             }
+        }
+        if (
+            event.type === "developer/message" &&
+            event.surfaceOp === "append" &&
+            event.data.message.content.length === 0 &&
+            event.data.message.source.kind === PTC_INTENT_SOURCE
+        ) {
+            const source = event.data.message.source;
+            const intent = intentSchema.safeParse(source.intent);
+            if (
+                intent.success &&
+                intent.data.version === 9 &&
+                ((source.tool === RELEASE_TOOL && intent.data.kind === "release") ||
+                    (source.tool === COMPACT_TOOL && intent.data.kind === "summary"))
+            )
+                next = applyIntent(next, intent.data, event.seq);
         }
         return next;
     },

@@ -6,368 +6,232 @@ import {
     reminderPolicySchema,
     resolveReminderPolicy,
 } from "../lib/domain/reminder.js";
+const candidate = (overrides = {}) => ({
+    id: "1",
+    tool: "read",
+    preview: "consumed evidence",
+    tokens: 16000,
+    ageSteps: 2,
+    seq: 1,
+    ...overrides,
+});
+const input = (overrides = {}) => ({
+    step: 0,
+    candidates: [candidate()],
+    previous: initialReminderState(),
+    progressSeq: 0,
+    pressure: null,
+    ...overrides,
+});
 
-function candidate(overrides = {}) {
-    return {
-        id: "1",
-        tool: "read",
-        preview: "finished evidence",
-        tokens: 16000,
-        ageSteps: 2,
-        seq: 1,
-        ...overrides,
-    };
-}
-
-function input(overrides = {}) {
-    return {
-        step: 0,
-        candidates: [candidate()],
-        previous: initialReminderState(),
-        progressSeq: 0,
-        pressure: null,
-        ...overrides,
-    };
-}
-
-function ignoredTwice() {
-    const first = planReleaseReminder(input());
-    const second = planReleaseReminder(input({ step: 6, previous: first.state }));
-    const third = planReleaseReminder(input({ step: 18, previous: second.state }));
-    assert.equal(third.decision, "remind");
-    assert.equal(third.state.ignoredCount, 2);
-    return third.state;
-}
-
-test("policy exposes the requested defaults and validates finite, bounded overrides", () => {
-    assert.deepEqual(resolveReminderPolicy(), {
-        enabled: true,
-        minAgeSteps: 2,
-        largeOutputTokens: 8000,
-        backlogTokens: 16000,
-        staleTokens: 4000,
-        staleSteps: 8,
-        pressureRatio: 0.8,
-        minIntervalSteps: 6,
-        pressureIntervalSteps: 4,
-        ignoredBackoffSteps: [12, 24],
-        rearmGrowthTokens: 8000,
-        maxCandidates: 5,
-    });
-    const policy = resolveReminderPolicy({ staleSteps: 3, ignoredBackoffSteps: [10, 20, 30] });
-    assert.equal(policy.staleSteps, 3);
-    assert.ok(Object.isFrozen(policy));
-    assert.ok(Object.isFrozen(policy.ignoredBackoffSteps));
+test("only advisory enablement is public policy; removed knobs are rejected", () => {
+    assert.deepEqual(resolveReminderPolicy(), { enabled: true });
+    assert.ok(Object.isFrozen(resolveReminderPolicy()));
     for (const invalid of [
-        { pressureRatio: 1.1 },
-        { pressureRatio: NaN },
-        { backlogTokens: Infinity },
-        { minAgeSteps: -1 },
-        { staleSteps: 1.5 },
-        { maxCandidates: 0 },
-        { ignoredBackoffSteps: [] },
-        { ignoredBackoffSteps: [24, 12] },
-        { ignoredBackoffSteps: [12, 0] },
-        { extra: true },
-    ]) {
+        { backlogTokens: 1 },
+        { minAgeSteps: 0 },
+        { maxCandidates: 2 },
+        { enabled: 1 },
+    ])
         assert.equal(reminderPolicySchema.safeParse(invalid).success, false);
-    }
 });
-
-test("cold-start mass triggers at exactly 16000 ready tokens without growth debt", () => {
-    const below = planReleaseReminder(input({ candidates: [candidate({ tokens: 15999 })] }));
-    assert.equal(below.decision, "wait");
-    assert.equal(below.state.lastReminderStep, null);
-    const boundary = planReleaseReminder(input());
-    assert.equal(boundary.decision, "remind");
-    assert.equal(boundary.reason, "backlog");
-    assert.equal(boundary.candidateTokens, 16000);
-    assert.equal(boundary.state.lastReminderStep, 0);
-    assert.equal(boundary.state.tokensAtLastReminder, 16000);
-    assert.equal(boundary.state.ignoredCount, 0);
-});
-
-test("age and positive token filters precede thresholds and large output is ranking only", () => {
+test("ready evidence remains age-gated and invalid/nonpositive estimates are excluded", () => {
     const plan = planReleaseReminder(
         input({
             candidates: [
-                candidate({ id: "young", ageSteps: 1, tokens: 100000 }),
-                candidate({ id: "empty", tokens: 0 }),
-                candidate({ id: "negative", tokens: -100 }),
-                candidate({ id: "nonfinite", tokens: NaN }),
-                candidate({ id: "ready", tokens: 8000 }),
+                candidate({ id: "young", ageSteps: 1 }),
+                candidate({ id: "zero", tokens: 0 }),
+                candidate({ id: "negative", tokens: -1 }),
+                candidate({ id: "nan", tokens: NaN }),
             ],
         }),
     );
-    assert.equal(plan.decision, "wait");
-    assert.equal(plan.candidateTokens, 8000);
-    assert.deepEqual(
-        plan.candidates.map((item) => item.id),
-        ["ready"],
-    );
-    assert.equal(
-        planReleaseReminder(input({ candidates: [candidate({ ageSteps: 1 })] })).reason,
-        "empty",
-    );
+    assert.equal(plan.reason, "empty");
+    assert.equal(plan.candidateTokens, 0);
+    assert.deepEqual(plan.candidates, []);
 });
-
-test("stale trigger requires 4000 tokens continuously for eight business steps", () => {
-    const candidates = [candidate({ tokens: 4000 })];
-    const first = planReleaseReminder(input({ step: 10, candidates }));
-    assert.equal(first.state.backlogSinceStep, 10);
-    const early = planReleaseReminder(input({ step: 17, candidates, previous: first.state }));
-    assert.equal(early.decision, "wait");
-    assert.equal(early.state.lastReminderStep, null);
-    const stale = planReleaseReminder(input({ step: 18, candidates, previous: early.state }));
-    assert.equal(stale.decision, "remind");
-    assert.equal(stale.reason, "stale");
-    const dipped = planReleaseReminder(
-        input({ step: 17, candidates: [candidate({ tokens: 3999 })], previous: first.state }),
-    );
-    assert.equal(dipped.state.backlogSinceStep, null);
-    const restarted = planReleaseReminder(input({ step: 18, candidates, previous: dipped.state }));
-    assert.equal(restarted.decision, "wait");
-    assert.equal(restarted.state.backlogSinceStep, 18);
-    assert.equal(
-        planReleaseReminder(input({ step: 26, candidates, previous: restarted.state })).reason,
-        "stale",
-    );
+test("a large ready pool can prompt review without knowing model capacity", () => {
+    const plan = planReleaseReminder(input());
+    assert.equal(plan.reason, "backlog");
+    assert.equal(plan.decision, "remind");
+    assert.equal(plan.state.ignoredCount, 0);
 });
-
-test("pressure uses the official-threshold ratio and the 4000-token floor", () => {
-    const candidates = [candidate({ tokens: 4000 })];
-    assert.equal(planReleaseReminder(input({ candidates, pressure: 0.799999 })).decision, "wait");
-    assert.equal(planReleaseReminder(input({ candidates, pressure: null })).decision, "wait");
-    const boundary = planReleaseReminder(input({ candidates, pressure: 0.8 }));
-    assert.equal(boundary.decision, "remind");
-    assert.equal(boundary.reason, "pressure");
+test("small unchanged backlog never becomes urgent just because time passes", () => {
+    const candidates = [candidate({ tokens: 1000 })];
+    const first = planReleaseReminder(input({ candidates }));
+    const later = planReleaseReminder(input({ candidates, step: 100000, previous: first.state }));
+    assert.equal(later.reason, "below_threshold");
+    assert.equal(later.state.lastReminderStep, null);
+});
+test("benefit and suffix position prefer recent cheap releases, without authorizing them", () => {
+    const recent = candidate({ id: "recent", tokens: 4000, suffixTokens: 20 });
+    const old = candidate({ id: "old", tokens: 6000, suffixTokens: 100000 });
+    const plan = planReleaseReminder(input({ candidates: [old, recent] }));
+    assert.equal(plan.reason, "benefit");
+    assert.equal(plan.candidates[0].id, "recent");
+    assert.equal(planReleaseReminder(input({ candidates: [old] })).decision, "wait");
     assert.equal(
-        planReleaseReminder(input({ candidates: [candidate({ tokens: 3999 })], pressure: 2 }))
-            .decision,
+        planReleaseReminder(input({ candidates: [recent], cacheReadRatio: 0 })).decision,
         "wait",
     );
     assert.equal(
-        planReleaseReminder(input({ candidates, pressure: 0.7 }), { pressureRatio: 0.7 }).decision,
+        planReleaseReminder(input({ candidates: [old], cacheReadRatio: 1 })).decision,
         "remind",
     );
 });
-
-test("normal cooldown is six steps and pressure cooldown is four", () => {
-    const first = planReleaseReminder(input());
-    const early = planReleaseReminder(input({ step: 5, previous: first.state }));
-    assert.equal(early.reason, "min_interval");
-    assert.equal(early.state.lastReminderStep, 0);
-    assert.equal(early.state.ignoredCount, 0);
-    assert.equal(planReleaseReminder(input({ step: 6, previous: early.state })).decision, "remind");
-    const candidates = [candidate({ tokens: 4000 })];
-    const pressure = planReleaseReminder(input({ candidates, pressure: 0.8 }));
+test("pressure and pool thresholds scale to the soft target", () => {
+    const candidates = [candidate({ tokens: 1000 })];
     assert.equal(
-        planReleaseReminder(input({ step: 3, candidates, pressure: 0.8, previous: pressure.state }))
-            .reason,
-        "min_interval",
+        planReleaseReminder(input({ candidates, targetTokens: 10000, pressure: 0.5 })).decision,
+        "wait",
     );
     assert.equal(
-        planReleaseReminder(input({ step: 4, candidates, pressure: 0.8, previous: pressure.state }))
-            .decision,
-        "remind",
-    );
-});
-
-test("ignored reminders back off to twelve then twenty-four steps without wait-call inflation", () => {
-    const first = planReleaseReminder(input());
-    const duplicate = planReleaseReminder(input({ previous: first.state }));
-    assert.equal(duplicate.decision, "wait");
-    assert.deepEqual(duplicate.state, first.state);
-    const second = planReleaseReminder(input({ step: 6, previous: first.state }));
-    assert.equal(second.state.ignoredCount, 1);
-    let previous = second.state;
-    for (let step = 7; step < 18; step++) {
-        const waiting = planReleaseReminder(input({ step, previous }));
-        assert.equal(waiting.reason, "ignored_backoff");
-        assert.equal(waiting.state.ignoredCount, 1);
-        assert.equal(waiting.state.lastReminderStep, 6);
-        previous = waiting.state;
-    }
-    const third = planReleaseReminder(input({ step: 18, previous }));
-    assert.equal(third.state.ignoredCount, 2);
-    assert.equal(planReleaseReminder(input({ step: 41, previous: third.state })).decision, "wait");
-    const fourth = planReleaseReminder(input({ step: 42, previous: third.state }));
-    assert.equal(fourth.state.ignoredCount, 3);
-    const later = planReleaseReminder(input({ step: 66, previous: fourth.state }));
-    assert.equal(later.decision, "remind");
-    assert.equal(later.state.ignoredCount, 3);
-    assert.equal(planReleaseReminder(input({ step: 89, previous: later.state })).decision, "wait");
-});
-
-test("pressure cannot bypass ignored-reminder backoff", () => {
-    const previous = ignoredTwice();
-    assert.equal(
-        planReleaseReminder(input({ step: 22, pressure: 1, previous })).reason,
-        "ignored_backoff",
+        planReleaseReminder(input({ candidates, targetTokens: 10000, pressure: 1 })).reason,
+        "pressure",
     );
     assert.equal(
-        planReleaseReminder(input({ step: 42, pressure: 1, previous })).decision,
-        "remind",
+        planReleaseReminder(input({ candidates, targetTokens: 200000, pressure: 1 })).decision,
+        "wait",
     );
-});
-
-test("only a larger semantic progress sequence resets ignored state, while preserving cooldown", () => {
-    const previous = ignoredTwice();
-    const progressed = planReleaseReminder(input({ step: 19, previous, progressSeq: 7 }));
-    assert.equal(progressed.decision, "wait");
-    assert.equal(progressed.state.ignoredCount, 0);
-    assert.equal(progressed.state.lastFingerprint, null);
-    assert.equal(progressed.state.lastReminderStep, 18);
-    assert.equal(progressed.state.lastProgressSeq, 7);
-    const repeated = planReleaseReminder(
-        input({ step: 23, previous: progressed.state, progressSeq: 7 }),
-    );
-    assert.equal(repeated.decision, "wait");
-    const next = planReleaseReminder(input({ step: 24, previous: repeated.state, progressSeq: 7 }));
-    assert.equal(next.decision, "remind");
-    assert.equal(next.state.ignoredCount, 0);
-    const noOp = planReleaseReminder(input({ step: 30, previous: next.state, progressSeq: 7 }));
-    assert.equal(noOp.state.ignoredCount, 1);
-    assert.equal(
-        planReleaseReminder(input({ step: 36, previous: noOp.state, progressSeq: 7 })).reason,
-        "ignored_backoff",
-    );
-    const older = planReleaseReminder(input({ step: 36, previous: noOp.state, progressSeq: 6 }));
-    assert.equal(older.state.lastProgressSeq, 7);
-    assert.equal(older.reason, "ignored_backoff");
-});
-
-test("eight thousand new candidate tokens rearms backoff but still requires the ordinary interval", () => {
-    const previous = ignoredTwice();
     assert.equal(
         planReleaseReminder(
-            input({ step: 24, previous, candidates: [candidate({ tokens: 23999 })] }),
+            input({ candidates: [candidate({ tokens: 3000 })], targetTokens: 40000 }),
         ).reason,
-        "ignored_backoff",
+        "backlog",
     );
-    const candidates = [candidate({ tokens: 24000 })];
-    const early = planReleaseReminder(input({ step: 22, previous, candidates, pressure: 1 }));
-    assert.equal(early.decision, "wait");
-    assert.equal(early.state.ignoredCount, 0);
-    assert.equal(early.state.lastReminderStep, 18);
-    const boundary = planReleaseReminder(
-        input({ step: 24, previous: early.state, candidates, pressure: 1 }),
-    );
-    assert.equal(boundary.decision, "remind");
-    assert.equal(boundary.state.ignoredCount, 0);
-    assert.equal(boundary.state.tokensAtLastReminder, 24000);
 });
-
-test("candidate identity churn without growth or semantic progress does not rearm", () => {
-    const previous = ignoredTwice();
-    const changed = planReleaseReminder(
-        input({ step: 24, previous, candidates: [candidate({ id: "999", seq: 999 })] }),
-    );
-    assert.equal(changed.reason, "ignored_backoff");
-    assert.equal(changed.state.ignoredCount, 2);
-    assert.equal(changed.state.lastFingerprint, previous.lastFingerprint);
-});
-
-test("empty pool resets backlog but preserves reminder history and cooldown", () => {
+test("identical reminders and ID churn never rearm from elapsed time", () => {
     const first = planReleaseReminder(input());
-    const empty = planReleaseReminder(input({ step: 1, previous: first.state, candidates: [] }));
-    assert.equal(empty.reason, "empty");
-    assert.equal(empty.candidateTokens, 0);
-    assert.deepEqual(empty.candidates, []);
-    assert.deepEqual(empty.state, { ...first.state, backlogSinceStep: null });
-    assert.equal(
-        planReleaseReminder(input({ step: 2, previous: empty.state })).reason,
-        "min_interval",
+    for (const step of [0, 4, 100, 100000]) {
+        const next = planReleaseReminder(input({ step, previous: first.state }));
+        assert.equal(next.reason, "unchanged");
+        assert.deepEqual(next.state, first.state);
+    }
+    const churn = planReleaseReminder(
+        input({ step: 100, previous: first.state, candidates: [candidate({ id: "different" })] }),
     );
-    const backedOff = ignoredTwice();
-    const gap = planReleaseReminder(input({ step: 19, previous: backedOff, candidates: [] }));
+    assert.equal(churn.reason, "unchanged");
+    assert.equal(churn.state.ignoredCount, 0);
+});
+test("pressure escalation rearms once and oscillation does not repeat a notified band", () => {
+    const first = planReleaseReminder(input());
+    const early = planReleaseReminder(input({ step: 1, previous: first.state, pressure: 1 }));
+    assert.equal(early.reason, "min_interval");
+    const urgent = planReleaseReminder(input({ step: 4, previous: early.state, pressure: 1 }));
+    assert.equal(urgent.reason, "pressure");
+    assert.equal(urgent.state.ignoredCount, 1);
+    const lower = planReleaseReminder(input({ step: 100, previous: urgent.state, pressure: 0.5 }));
+    assert.equal(lower.reason, "unchanged");
     assert.equal(
-        planReleaseReminder(input({ step: 24, previous: gap.state })).reason,
-        "ignored_backoff",
+        planReleaseReminder(input({ step: 200, previous: lower.state, pressure: 1 })).reason,
+        "unchanged",
     );
 });
-
-test("disabled and active compaction never emit reminders or advance lastReminderStep", () => {
-    const disabled = planReleaseReminder(input(), { enabled: false });
-    assert.equal(disabled.reason, "disabled");
-    assert.equal(disabled.state.lastReminderStep, null);
+test("meaningful growth rearms with bounded backoff; previews do not inflate ignores", () => {
+    let state = planReleaseReminder(input()).state;
+    let tokens = 16000;
+    for (let index = 0; index < 6; index++) {
+        tokens *= 2;
+        const pending = planReleaseReminder(
+            input({
+                step: state.lastReminderStep + 1,
+                previous: state,
+                candidates: [candidate({ tokens })],
+            }),
+        );
+        assert.equal(pending.decision, "wait");
+        assert.equal(pending.state.ignoredCount, state.ignoredCount);
+        const next = planReleaseReminder(
+            input({
+                step: state.lastReminderStep + 24,
+                previous: pending.state,
+                candidates: [candidate({ tokens })],
+            }),
+        );
+        assert.equal(next.decision, "remind");
+        assert.equal(next.state.ignoredCount, Math.min(index + 1, 3));
+        state = next.state;
+    }
+});
+test("only semantic progress resets outstanding state and still observes admission spacing", () => {
+    const first = planReleaseReminder(input());
+    const progressed = planReleaseReminder(
+        input({ step: 1, previous: first.state, progressSeq: 7 }),
+    );
+    assert.equal(progressed.reason, "min_interval");
+    assert.equal(progressed.state.lastFingerprint, null);
+    assert.equal(progressed.state.lastProgressSeq, 7);
+    const next = planReleaseReminder(
+        input({ step: 4, previous: progressed.state, progressSeq: 7 }),
+    );
+    assert.equal(next.decision, "remind");
+    assert.equal(next.state.ignoredCount, 0);
+    for (const progressSeq of [6, 7])
+        assert.equal(
+            planReleaseReminder(input({ step: 100, previous: next.state, progressSeq })).reason,
+            "unchanged",
+        );
+});
+test("empty, disabled and active-compaction states preserve outstanding history", () => {
+    const first = planReleaseReminder(input());
+    const empty = planReleaseReminder(input({ step: 10, previous: first.state, candidates: [] }));
+    assert.equal(empty.reason, "empty");
+    assert.equal(empty.state.backlogSinceStep, null);
+    assert.equal(
+        planReleaseReminder(input({ step: 100, previous: empty.state })).reason,
+        "unchanged",
+    );
+    assert.equal(planReleaseReminder(input(), { enabled: false }).reason, "disabled");
     const active = planReleaseReminder(input({ activeCompaction: true }));
     assert.equal(active.reason, "active_compaction");
     assert.equal(active.state.lastReminderStep, null);
+});
+test("ranking is deterministic, output bounded, canonical digest covers the entire pool", () => {
+    const candidates = Array.from({ length: 1000 }, (_, i) =>
+        candidate({ id: String(i + 1), seq: i, tokens: 100 }),
+    );
+    const plan = planReleaseReminder(input({ candidates }));
+    assert.equal(plan.candidates.length, 5);
+    assert.equal(plan.candidateTokens, 100000);
+    assert.equal(plan.state.lastFingerprint.length, 64);
     assert.equal(
-        planReleaseReminder(input({ step: 1, previous: active.state })).decision,
-        "remind",
+        planReleaseReminder(
+            input({
+                candidates: [...candidates].reverse().map((c) => ({ ...c, preview: "changed" })),
+            }),
+        ).state.lastFingerprint,
+        plan.state.lastFingerprint,
     );
+    const changed = candidates.map((c, i) => (i === 0 ? { ...c, id: "new" } : c));
+    assert.notEqual(
+        planReleaseReminder(input({ candidates: changed })).state.lastFingerprint,
+        plan.state.lastFingerprint,
+    );
+    assert.ok(JSON.stringify(plan.state).length < 300);
+    assert.deepEqual(JSON.parse(JSON.stringify(plan.state)), plan.state);
 });
-
-test("ranking prefers reclaim then newer sequence and caps suggestions without capping totals", () => {
-    const candidates = [
-        candidate({ id: "older", tokens: 8000, seq: 1 }),
-        candidate({ id: "small", tokens: 1000, seq: 9 }),
-        candidate({ id: "newer", tokens: 8000, seq: 5 }),
-        candidate({ id: "largest", tokens: 9000, seq: 0 }),
-        candidate({ id: "tie-b", tokens: 8000, seq: 5 }),
-        candidate({ id: "tie-a", tokens: 8000, seq: 5 }),
-    ];
-    const result = planReleaseReminder(input({ candidates }), { maxCandidates: 3 });
-    assert.equal(result.candidateTokens, 42000);
-    assert.deepEqual(
-        result.candidates.map((item) => item.id),
-        ["largest", "newer", "tie-a"],
-    );
-    assert.deepEqual(
-        planReleaseReminder(input({ candidates: [...candidates].reverse() }), { maxCandidates: 3 }),
-        result,
-    );
-});
-
-test("fingerprints use canonical IDs of the full ready pool, bounded independently of pool size", () => {
-    const candidates = Array.from({ length: 1000 }, (_, index) =>
-        candidate({ id: String(index + 1), seq: index, tokens: 100 }),
-    );
-    const original = planReleaseReminder(input({ candidates }));
-    assert.equal(original.candidates.length, 5);
-    assert.equal(original.state.lastFingerprint.length, 64);
-    const reordered = planReleaseReminder(
-        input({
-            candidates: [...candidates].reverse().map((item) => ({ ...item, preview: "changed" })),
-        }),
-        { maxCandidates: 1 },
-    );
-    assert.equal(reordered.state.lastFingerprint, original.state.lastFingerprint);
-    const changed = planReleaseReminder(
-        input({
-            candidates: candidates.map((item, index) =>
-                index === 0 ? { ...item, id: "new" } : item,
-            ),
-        }),
-    );
-    assert.notEqual(changed.state.lastFingerprint, original.state.lastFingerprint);
-    assert.ok(JSON.stringify(original.state).length < 300);
-    assert.deepEqual(JSON.parse(JSON.stringify(original.state)), original.state);
-});
-
-test("planner is deterministic and leaves frozen input, policy and previous state unchanged", () => {
+test("planner leaves frozen inputs untouched", () => {
     const previous = Object.freeze(initialReminderState());
     const candidates = Object.freeze([Object.freeze(candidate())]);
     const value = Object.freeze(input({ previous, candidates }));
-    const config = Object.freeze({ ignoredBackoffSteps: Object.freeze([12, 24]) });
-    const before = JSON.stringify({ value, config });
-    const first = planReleaseReminder(value, config);
-    assert.deepEqual(planReleaseReminder(value, config), first);
-    assert.notEqual(first.state, previous);
-    assert.notEqual(first.candidates, candidates);
-    assert.equal(JSON.stringify({ value, config }), before);
-    assert.notEqual(initialReminderState(), initialReminderState());
+    const config = Object.freeze({ enabled: true });
+    const before = JSON.stringify(value);
+    assert.deepEqual(planReleaseReminder(value, config), planReleaseReminder(value, config));
+    assert.equal(JSON.stringify(value), before);
 });
-
-test("unsafe clocks, duplicate ready identities and overflowing totals fail explicitly", () => {
-    for (const step of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+test("invalid clocks, estimates, pressure and duplicate identities fail explicitly", () => {
+    for (const step of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1])
         assert.throws(() => planReleaseReminder(input({ step })), RangeError);
-    }
-    for (const pressure of [-1, NaN, Infinity]) {
+    for (const pressure of [-1, NaN, Infinity])
         assert.throws(() => planReleaseReminder(input({ pressure })), RangeError);
-    }
+    for (const targetTokens of [0, -1, Infinity, 0.5])
+        assert.throws(() => planReleaseReminder(input({ targetTokens })), RangeError);
+    for (const cacheReadRatio of [-1, 2, NaN])
+        assert.throws(() => planReleaseReminder(input({ cacheReadRatio })), RangeError);
+    assert.throws(
+        () => planReleaseReminder(input({ candidates: [candidate({ suffixTokens: -1 })] })),
+        RangeError,
+    );
     assert.throws(
         () => planReleaseReminder(input({ candidates: [candidate(), candidate()] })),
         /unique/,

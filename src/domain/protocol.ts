@@ -3,19 +3,27 @@ import { z } from "zod";
 
 /** Ordinals identify allocations, never event positions. */
 export const RECEIPT_KEY = "dshContextCompression";
+export const PTC_INTENT_SOURCE = "fold-context-ptc-intent";
 export const RELEASE_TOOL = "context_release";
 export const COMPACT_TOOL = "context_compact";
 export const STATUS_TOOL = "context_status";
 export const EXPAND_TOOL = "context_expand";
 export const SEARCH_TOOL = "context_search";
+export const SUBMIT_SUMMARY_TOOL = "context_submit_summary";
 export const CONTROL_TOOLS = new Set([
     RELEASE_TOOL,
     COMPACT_TOOL,
     STATUS_TOOL,
     EXPAND_TOOL,
     SEARCH_TOOL,
+    SUBMIT_SUMMARY_TOOL,
 ]);
-export const SUMMARY_CONTROL_TOOLS = new Set([RELEASE_TOOL, COMPACT_TOOL, STATUS_TOOL]);
+export const SUMMARY_CONTROL_TOOLS = new Set([
+    RELEASE_TOOL,
+    COMPACT_TOOL,
+    STATUS_TOOL,
+    SUBMIT_SUMMARY_TOOL,
+]);
 export const ID_PATTERN = /^[1-9]\d*$/;
 export const idArgumentSchema = z.number().int().positive().safe().transform(String);
 export function normalizeId(id: string): string {
@@ -32,7 +40,7 @@ export function inlineReleaseContent(id: string): { type: "text"; text: string }
     ];
 }
 export interface Intent {
-    version: 8;
+    version: 8 | 9;
     kind: "release" | "summary";
     sessionId: string;
     ids: string[];

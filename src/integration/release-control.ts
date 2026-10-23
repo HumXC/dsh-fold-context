@@ -2,6 +2,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { createDeveloperMessage, type ContextFormed } from "@deepseek-ai/dsh-llm";
 import { SessionSeq, type Session } from "@deepseek-ai/dsh-session";
 import type { ContextCompressionEngine } from "./engine.js";
+import { observeSessionCut } from "./session-cut.js";
 import { RELEASE_CLEANUP_SOURCE, type ReleaseControlState } from "../domain/release-controls.js";
 
 export { RELEASE_CLEANUP_SOURCE } from "../domain/release-controls.js";
@@ -21,14 +22,29 @@ function controls(ctx: Context, session: Session): ReleaseControlState {
 
 /** Native empty developer records are durable but derive to no model message. */
 export function registerReleaseControlCleanup(ctx: Context, engine: ContextCompressionEngine) {
+    let enabled = true;
+    ctx.effect(() => () => {
+        enabled = false;
+    });
     ctx.on("agent/request", async ({ agent, turn, step, signal }, next) => {
         const config = await next();
+        if (!enabled) return config;
         signal.throwIfAborted();
         const session = agent.session;
+        using cut = await observeSessionCut(ctx, session, signal);
+        signal.throwIfAborted();
+        if (!enabled || !cut.current(session)) return config;
         const ledger = engine.state(session);
-        if (ledger.activeStart !== null) return config;
+        if (ledger.activeStart !== null || engine.hasSessionSummaryWork(session)) return config;
         const entries = new Map(ledger.entries.map((entry) => [entry.id, entry]));
         let changed = false;
+        let revision = cut.revision;
+        const emptyNodes = new Set<number>();
+        const messageAt = (seq: number) => {
+            if (emptyNodes.has(seq)) return null;
+            const event = cut.events.get(seq);
+            return event === undefined ? undefined : session.deriveEventMessage(event);
+        };
         for (const group of [...controls(ctx, session).groups].reverse()) {
             if (
                 !group.calls.every(
@@ -55,25 +71,19 @@ export function registerReleaseControlCleanup(ctx: Context, engine: ContextCompr
             const seqs = nodes.slice(startIndex, endIndex + 1);
             const expected = new Set([SessionSeq(group.assistantSeq), ...resultSeqs]);
             // Preserve every interleaved business message, including other plugin context.
-            if (
-                seqs.some(
-                    (seq) =>
-                        !expected.has(seq) &&
-                        session.deriveEventMessage(session.eventAt(seq)!) !== null,
-                )
-            )
-                continue;
+            if (seqs.some((seq) => !expected.has(seq) && messageAt(seq) !== null)) continue;
+            if (!enabled || signal.aborted || session.seq !== revision) break;
             const start = seqs[0]!;
             const end = seqs.at(-1)!;
             session.append("compaction/prune", {
                 shadowedRange: { start, end },
                 shadowedSeqs: seqs,
                 shadowedTokenCount: seqs.reduce((sum, seq) => {
-                    const message = session.deriveEventMessage(session.eventAt(seq)!);
-                    return sum + (message === null ? 0 : ctx.tokenMeter.estimateMessage(message));
+                    const message = messageAt(seq);
+                    return sum + (message ? ctx.tokenMeter.estimateMessage(message) : 0);
                 }, 0),
             });
-            session.append(
+            const replacement = session.append(
                 "developer/message",
                 {
                     turn,
@@ -88,6 +98,8 @@ export function registerReleaseControlCleanup(ctx: Context, engine: ContextCompr
                     sourceEventSeqs: seqs,
                 },
             );
+            emptyNodes.add(replacement.seq);
+            revision += 2;
             changed = true;
         }
         if (changed) {

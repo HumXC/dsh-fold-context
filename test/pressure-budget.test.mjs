@@ -2,61 +2,46 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { planPressureBudget } from "../lib/domain/pressure-budget.js";
 import { fixture } from "./fixture.mjs";
-
-const policy = { thresholdRatio: 0.8, retainRatio: 0.16 };
 const signal = () => new AbortController().signal;
-
-test("window budgets cover tiny, DeepSeek and maximum safe capacities", () => {
-    for (const [window, threshold, retain] of [
-        [1, 1, 0],
-        [2, 1, 0],
-        [1024, 819, 163],
-        [252000, 201600, 40320],
-        [322000, 257600, 51520],
-        [1000000, 800000, 160000],
-    ]) {
-        assert.deepEqual(planPressureBudget(window, policy), { threshold, retain });
-    }
-    const maximum = planPressureBudget(Number.MAX_SAFE_INTEGER, policy);
-    assert.ok(Number.isSafeInteger(maximum.threshold));
-    assert.ok(Number.isSafeInteger(maximum.retain));
-    assert.ok(maximum.retain < maximum.threshold);
-    assert.ok(maximum.threshold <= Number.MAX_SAFE_INTEGER);
-});
-
-test("window budgets stay ordered and bounded across ratios and tail targets", () => {
-    const windows = [1, 2, 3, 16, 1024, 65536, 252000, 322000, 1000000, Number.MAX_SAFE_INTEGER];
-    for (const thresholdRatio of [Number.MIN_VALUE, 0.001, 0.5, 0.8, 1]) {
-        for (const retainTokens of [undefined, 0, 512, Number.MAX_SAFE_INTEGER]) {
-            let previousThreshold = 0;
-            for (const window of windows) {
-                const budget = planPressureBudget(window, {
-                    ...policy,
-                    thresholdRatio,
-                    retainTokens,
-                });
-                assert.ok(Number.isSafeInteger(budget.threshold));
-                assert.ok(Number.isSafeInteger(budget.retain));
-                assert.ok(0 <= budget.retain && budget.retain < budget.threshold);
-                assert.ok(budget.threshold >= previousThreshold && budget.threshold <= window);
-                previousThreshold = budget.threshold;
-            }
+test("target and safety remain ordered across model sizes and overrides", () => {
+    for (const window of [4, 16, 1024, 4096, 252000, 1000000, Number.MAX_SAFE_INTEGER]) {
+        for (const targetTokens of [undefined, 1, 170000, Number.MAX_SAFE_INTEGER]) {
+            const plan = planPressureBudget(window, { targetTokens });
+            assert.ok(plan.retain >= 0 && plan.retain < plan.threshold);
+            assert.ok(plan.threshold < plan.safety && plan.safety < window);
+            assert.ok(Number.isSafeInteger(plan.threshold) && Number.isSafeInteger(plan.safety));
+            if (targetTokens !== undefined && targetTokens < plan.safety)
+                assert.equal(plan.threshold, targetTokens);
         }
     }
-    assert.deepEqual(planPressureBudget(1024, { ...policy, retainTokens: 10000 }), {
-        threshold: 819,
-        retain: 818,
-    });
 });
-
-test("missing and invalid windows remain unavailable", () => {
-    for (const window of [undefined, 0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])
-        assert.equal(planPressureBudget(window, policy), null);
+test("252k with a 170k preference has a separate safety boundary", () => {
+    const plan = planPressureBudget(252000, { targetTokens: 170000 });
+    assert.equal(plan.threshold, 170000);
+    assert.equal(plan.safety, 226800);
+    assert.equal(plan.targetClamped, false);
+    assert.equal(planPressureBudget(252000, { targetTokens: 300000 }).targetClamped, true);
 });
-
+test("invalid capacity and impossible tiny windows cannot invent room", () => {
+    for (const window of [
+        undefined,
+        0,
+        1,
+        2,
+        3,
+        -1,
+        NaN,
+        Infinity,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+    ])
+        assert.equal(planPressureBudget(window), null);
+    for (const targetTokens of [0, -1, Infinity, 1.5])
+        assert.throws(() => planPressureBudget(252000, { targetTokens }));
+});
 for (const window of [1024, 4096, 252000, 322000, 1000000]) {
     test(`automatic compaction uses a ${window}-token window despite large output limits`, async (t) => {
-        const f = await fixture({ compaction: { auto: true, headroomTokens: 65536 } });
+        const f = await fixture({ compaction: { auto: true, summaryMaxTokens: 1024 } });
         t.after(f.close);
         f.llm.resolveModelInfo = async () => ({
             context: { contextWindow: window },
@@ -75,7 +60,7 @@ for (const window of [1024, 4096, 252000, 322000, 1000000]) {
             "Preserve the current user task and continue working. ".repeat(Math.ceil(window / 64)),
         );
         const before = f.meter.measure(f.session).totalTokens;
-        const threshold = Math.floor(window * policy.thresholdRatio);
+        const threshold = planPressureBudget(window, { summaryMaxTokens: 1024 }).threshold;
         assert.ok(before > threshold);
         assert.equal(
             (await f.engine.schedulingStatus(f.agent, signal())).pressure.thresholdTokens,
@@ -95,23 +80,14 @@ for (const window of [1024, 4096, 252000, 322000, 1000000]) {
     });
 }
 
-test("model tail policies override defaults and oversized tails are clipped", async (t) => {
-    const cases = [
-        { global: { retainTokens: 700 }, override: { retainRatio: 0.1 }, expected: 102 },
-        { global: { retainRatio: 0.16 }, override: { retainTokens: 10000 }, expected: 818 },
-        { global: { retainTokens: 10000 }, override: {}, expected: 818 },
-        { global: { retainRatio: 0.16 }, override: { retainTokens: 123 }, expected: 123 },
-    ];
-    for (const { global, override, expected } of cases) {
-        const f = await fixture({
-            compaction: {
-                auto: true,
-                ...global,
-                modelPolicies: [{ provider: "test", model: "fixture", ...override }],
-            },
-        });
-        t.after(f.close);
-        f.llm.resolveModelInfo = async () => ({ context: { contextWindow: 1024 } });
-        assert.equal((await f.engine.pressureBudget(f.agent, signal())).retain, expected);
-    }
+test("per-model target overrides the global target without changing primary output", async (t) => {
+    const f = await fixture({
+        compaction: {
+            targetTokens: 50000,
+            modelPolicies: [{ provider: "test", model: "fixture", targetTokens: 17000 }],
+        },
+    });
+    t.after(f.close);
+    assert.equal((await f.engine.pressureBudget(f.agent, signal())).threshold, 17000);
+    assert.equal(f.session.requestHeader().config.maxTokens, 1024);
 });

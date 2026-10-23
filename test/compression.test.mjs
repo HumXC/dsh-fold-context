@@ -11,8 +11,8 @@ import { commitForcedReleases } from "./release-batch-fixture.mjs";
 const longText = (label) => `${label} `.repeat(1500);
 const signal = () => new AbortController().signal;
 const smallCheckpoint = {
-    compaction: { retainTokens: 0 },
-    scheduling: { minIntervalSteps: 0, minSavingsTokens: 1, paybackTurns: 128 },
+    compaction: { targetTokens: 2048, cacheReadRatio: 1 },
+    scheduling: { summaryInputRatio: 0.01, summaryOutputRatio: 0.01 },
 };
 
 test("v8 queued release settles in a manual checkpoint transaction and remains replayable", async (t) => {
@@ -226,7 +226,7 @@ test("a failed summary retains settled releases and exact recovery evidence whil
     const id = f.idFor(result);
     await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed" });
     await f.invoke("context_compact", { reason: "Checkpoint" });
-    f.appendUser("Continue the next milestone after the pending checkpoint.");
+    f.appendUser("Continue the next milestone after the pending checkpoint. ".repeat(100));
     const before = [...f.session.surface.nodes];
     await assert.rejects(
         f.engine.compactIfNeeded(f.agent, "pressure", signal()),
@@ -356,7 +356,7 @@ test("ledger fold checkpoint is pure JSON and deterministic from the full event 
     t.after(f.close);
     const result = f.toolRound("read", longText("LOG"));
     await f.invoke("context_release", { ids: [Number(f.idFor(result))], reason: "Done" });
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     let state = ledgerProjection.init(f.session.header, 0);
     for (const event of f.session.snapshotEvents()) state = ledgerProjection.apply(state, event);
     assert.deepEqual(state, f.engine.state(f.session));
@@ -375,6 +375,7 @@ test("the full plugin registers its tools and admits one plain notice with no ru
         "context_release",
         "context_search",
         "context_status",
+        "context_submit_summary",
     ]);
     assert.ok(!assembly.contexts.some((context) => context.name === "fold-context:ledger"));
     const input = createUserMessage({
@@ -431,7 +432,9 @@ test("resume and fork seed boundaries abandon orphan summary locks and allow que
             },
         });
         assert.deepEqual(f.engine.state(live), restored);
-        await f.engine.compactNow({ ...f.agent, session: live }, signal());
+        await f.withSessionQuery(live, async () =>
+            f.engine.compactNow({ ...f.agent, session: live }, signal()),
+        );
         assert.equal(f.engine.state(live).entries[0].status, "released");
     }
     assert.equal(f.engine.state(f.session).entries[0].status, "queued");
@@ -450,13 +453,13 @@ test("cancellation before a boundary preserves queued intent and never rewrites 
     assert.equal(f.engine.state(f.session).entries[0].status, "queued");
 });
 
-test("an explicit tiny release still replaces its body with a bounded recoverable marker", async (t) => {
+test("the committer reports exact placeholder cost even for a tiny original under a test permit", async (t) => {
     const f = await fixture();
     t.after(f.close);
     const result = f.toolRound("read", "ok");
     await f.invoke("context_release", { ids: [Number(f.idFor(result))], reason: "Done" });
     const before = f.session.seq;
-    assert.equal(commitForcedReleases(f), 1);
+    assert.equal(await commitForcedReleases(f), 1);
     assert.ok(f.session.seq > before);
     assert.equal(f.engine.state(f.session).entries[0].status, "released");
     const current = f.session

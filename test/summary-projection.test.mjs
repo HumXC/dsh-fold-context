@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { Session } from "@deepseek-ai/dsh-session";
 import { fixture } from "./fixture.mjs";
+import { withSessionCut } from "../lib/integration/session-cut.js";
 import { recordLegacyRelease } from "./legacy-release-fixture.mjs";
 import { catalog } from "../lib/domain/planner.js";
 import { ledgerProjection, ledgerSchema } from "../lib/domain/ledger.js";
@@ -10,6 +11,7 @@ import { projectSummaryInput } from "../lib/domain/summary-projection.js";
 import {
     projectionStamp,
     readProjectionStamp,
+    readSessionSummaryIdentity,
     resolveSummaryPolicy,
 } from "../lib/domain/summary-policy.js";
 
@@ -45,6 +47,49 @@ async function compact(f) {
     const nodes = f.session.surface.nodes;
     return f.engine.compactRegion(nodes[0], nodes.at(-1), f.agent);
 }
+
+test("the independent summary writer commits v3 without a checkpoint identity", async (t) => {
+    const f = await fixture({ images: "references" });
+    t.after(f.close);
+    f.session.append("turn/start", { turn: 1 });
+    f.appendUser("Evidence for an independent summary. ".repeat(300));
+    assistant(f, [{ type: "text", text: "Keep the business conclusion." }]);
+    await compact(f);
+    assert.equal(f.calls.length, 1);
+    const events = await withSessionCut(f.ctx, f.session, (cut) => [...cut.events.values()]);
+    const summaries = events.filter((event) => event.type === "compaction/summary");
+    assert.equal(summaries.length, 1);
+    const summary = summaries[0];
+    const start = events.find(
+        (event) =>
+            event.type === "compaction/start" &&
+            event.data.compactionId === summary.data.compactionId,
+    );
+    assert.ok(start);
+    const stamp = summary.data.summary[0];
+    assert.equal(stamp.type, "text");
+    const prefix = "[fold-context-projection:3 ";
+    assert.ok(stamp.text.startsWith(prefix));
+    assert.ok(stamp.text.endsWith("]"));
+    assert.deepEqual(JSON.parse(stamp.text.slice(prefix.length, -1)), {
+        reasoning: "omit-from-summary",
+        images: "references",
+        execution: "independent",
+        compactionId: start.data.compactionId,
+    });
+    assert.deepEqual(readProjectionStamp(stamp.text, summary.data.compactionId), {
+        reasoning: "omit-from-summary",
+        images: "references",
+        execution: "independent",
+    });
+    assert.equal(readSessionSummaryIdentity(stamp.text, summary.data.compactionId), null);
+    const report = f.engine.state(f.session).lastSummary;
+    assert.ok(report);
+    assert.equal(report.projection.reasoning, "omit-from-summary");
+    assert.equal(report.projection.images, "references");
+    const restored = Session.create(f.session.id, events, f.session.header);
+    assert.deepEqual(f.engine.state(restored).lastSummary, report);
+});
 
 test("default transcript omits signed assistant reasoning, records it separately and retains exact source", async (t) => {
     const f = await fixture();
@@ -324,6 +369,7 @@ test("policy stamp validates transaction identity and refuses unsupported recipe
     assert.deepEqual(readProjectionStamp(stamp, "compaction"), {
         reasoning: policy.reasoning,
         images: "references",
+        execution: "independent",
     });
     assert.equal(readProjectionStamp(stamp, "different"), null);
     assert.equal(readProjectionStamp("[fold-context-projection:2 {}]", "compaction"), null);

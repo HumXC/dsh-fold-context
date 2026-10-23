@@ -6,6 +6,7 @@ export const summaryModelSchema = z.object({
     model: z.string().min(1),
     reasoningEffort: z.string().min(1).optional(),
     preferWhenSessionMatches: z.boolean().default(true),
+    useSessionAgent: z.boolean().default(false),
 });
 export type SummaryModel = z.infer<typeof summaryModelSchema>;
 export type SummaryRoute = Pick<LlmCallConfig, "provider" | "model">;
@@ -26,7 +27,12 @@ export function summaryCandidates(
 ): SummaryModel[] {
     if (models.length === 0)
         return [
-            { provider: current.provider, model: current.model, preferWhenSessionMatches: true },
+            {
+                provider: current.provider,
+                model: current.model,
+                preferWhenSessionMatches: true,
+                useSessionAgent: false,
+            },
         ];
     const priority = (item: SummaryModel) =>
         item.preferWhenSessionMatches && sameSummaryRoute(item, current);

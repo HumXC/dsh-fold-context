@@ -134,7 +134,7 @@ function answer(f, step, promptTokens, outputTokens = 4096, native = true) {
 }
 async function replayWorld(t) {
     const f = await fixture({
-        compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 8192, compactionRetries: 3 },
+        compaction: { auto: true, targetTokens: 16384 },
     });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({
@@ -217,7 +217,7 @@ test("Blender-shaped replay selects high-cost assistant history and preserves na
 });
 
 test("regenerated instruction and MCP baselines alone never buy another summary", async (t) => {
-    const f = await fixture({ compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 512 } });
+    const f = await fixture({ compaction: { auto: true, targetTokens: 2048 } });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({
         context: { contextWindow: 4096 },
@@ -375,7 +375,7 @@ test("real provider stream prices latest output once when retained and when summ
 });
 
 test("identical nonempty baseline regeneration is skipped but changed workspace identity is evidence", async (t) => {
-    const f = await fixture({ compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 512 } });
+    const f = await fixture({ compaction: { auto: true, targetTokens: 2048 } });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({
         context: { contextWindow: 4096 },
@@ -422,7 +422,7 @@ test("identical nonempty baseline regeneration is skipped but changed workspace 
 });
 
 test("model metadata races never escape to the unguarded native pressure selection", async (t) => {
-    const f = await fixture({ compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 512 } });
+    const f = await fixture({ compaction: { auto: true, targetTokens: 2048 } });
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     snapshot(

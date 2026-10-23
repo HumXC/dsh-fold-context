@@ -9,7 +9,7 @@ for (const [cacheReadTokens, cacheState, ratio, basis] of [
     [0, "uncached", 0.1, "primary_usage"],
 ]) {
     test(`primary usage maps ${cacheState} cache evidence into scheduling without guessing a hit`, async (t) => {
-        const f = await fixture({ compaction: { retainTokens: 256 }, scheduling: {} });
+        const f = await fixture({ compaction: { targetTokens: 4096 }, scheduling: {} });
         t.after(f.close);
         f.session.append("turn/start", { turn: 1 });
         for (let step = 0; step < 8; step++)
@@ -43,7 +43,7 @@ for (const [cacheReadTokens, cacheState, ratio, basis] of [
         assert.equal(status.plan.cacheState, cacheState);
         assert.equal(status.plan.effectiveCacheReadRatio, ratio);
         assert.equal(status.diagnostic.economics.cacheBasis, basis);
-        assert.equal(status.plan.cachedPrefixAssumed, true);
+        assert.equal(status.plan.cacheExpired, false);
         assert.ok(
             status.plan.initialRebuildPenalty > 0,
             "a historical cache miss grants no current rebuild credit",

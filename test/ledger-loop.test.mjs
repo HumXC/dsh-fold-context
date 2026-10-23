@@ -39,14 +39,9 @@ test("batched release changes only the tool body before a checkpoint while ordin
     let checked = false;
     const f = await setup(t, {
         auto: false,
-        compaction: { retainTokens: 0 },
+        compaction: { targetTokens: 2048, cacheReadRatio: 1 },
         // This scenario checks release/replay semantics with an eligible archival checkpoint.
         scheduling: {
-            minIntervalSteps: 0,
-            minSavingsTokens: 1,
-            minSavingsRatio: 0,
-            expectedSummaryRatio: 0.05,
-            cacheReadRatio: 1,
             summaryInputRatio: 0.01,
             summaryOutputRatio: 0.01,
         },

@@ -99,7 +99,7 @@ function ReleaseItemDetail({ item, status, pendingReason, t, id, close }) {
         ["attachmentOwner", item.ownerId ? displayId(item.ownerId) : ""],
         ["waitingReason", pendingReason ? t(pendingReason) : ""],
     ].filter(([, value]) => value);
-    const preview = text(item.preview) || text(item.snippet);
+    const preview = text(item.preview);
     return h(
         "div",
         {

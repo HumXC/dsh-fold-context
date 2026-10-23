@@ -5,18 +5,19 @@ import { temporaryRoot } from "./attachment-fixture.mjs";
 import { summaryRecords } from "./summary-records.mjs";
 
 test("allocation notices stay outside summaries while literal ID-like business text and replay remain exact", async (t) => {
+    let world;
+    // Drain the session before temporaryRoot removes its backing directory.
+    t.after(() => world?.close());
     const root = await temporaryRoot(t);
     const business = 'const archivedId = "[§T3§]"; keep this exact code.\n'.repeat(900);
     const input = "Keep the literal [§U1§] in the project requirements.\n".repeat(700);
-    let world;
     let headers;
     let assistant;
     let assistantBytes;
     let checked = false;
-    t.after(() => world?.close());
     world = await loopFixture(root, {
-        compaction: { retainTokens: 0 },
-        scheduling: { minIntervalSteps: 0 },
+        compaction: { targetTokens: 64, cacheReadRatio: 1 },
+        scheduling: { summaryInputRatio: 0.01, summaryOutputRatio: 0.01 },
         tools: { probe_read: () => business },
         responses: [
             call("probe_read"),

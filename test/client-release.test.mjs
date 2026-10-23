@@ -17,11 +17,15 @@ const record = (id, reason = "Used conclusions", extra = {}) => ({
     id: String(id),
     reason,
     tool: "read",
+    preview: `Evidence ${id}`,
     kind: "tool",
     ...extra,
 });
 const wire = (toolName, value, args = {}) => ({
     toolName,
+    callId: "client-release-test-call",
+    openFile() {},
+    loadImage: async () => "blob:client-release-test-image",
     phase: "result",
     useDisclosure: () => ({ expanded: true, toggle() {} }),
     block: {

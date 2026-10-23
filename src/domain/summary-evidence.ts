@@ -7,7 +7,8 @@ import { CONTROL_TOOLS, EXPAND_TOOL, SEARCH_TOOL } from "./protocol.js";
 export function isSummaryControlNotice(message: Message): boolean {
     return (
         message.source?.kind === ALLOCATION_SOURCE ||
-        message.source?.kind === "fold-context-release-cleanup"
+        message.source?.kind === "fold-context-release-cleanup" ||
+        message.source?.kind === "fold-context-session-summary"
     );
 }
 

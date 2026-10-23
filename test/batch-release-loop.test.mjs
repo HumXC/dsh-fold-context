@@ -6,21 +6,17 @@ import { commitForcedReleases } from "./release-batch-fixture.mjs";
 import { fixture } from "./fixture.mjs";
 import { planReleaseBatch } from "../lib/domain/scheduler.js";
 import { commitInlineReleases, estimateInlineReleases } from "../lib/integration/inline-release.js";
+import { observeSessionCut, withSessionCut } from "../lib/integration/session-cut.js";
 
 const signal = () => new AbortController().signal;
 const waiting = {
-    enabled: true,
-    proactive: false,
-    releaseMinTokens: 1,
-    releaseMaxWaitSteps: 100,
-    releaseBacklogRatio: 1,
     cacheTtlMs: 0,
 };
 
 async function queued(t, options = {}) {
     const f = await fixture({
         ...options,
-        compaction: { auto: false, retainTokens: 32, ...options.compaction },
+        compaction: { auto: false, targetTokens: 100000, cacheReadRatio: 0, ...options.compaction },
         scheduling: { ...waiting, ...options.scheduling },
     });
     t.after(f.close);
@@ -33,7 +29,7 @@ async function queued(t, options = {}) {
         reason: "Extracted the needed facts",
     });
     assert.equal(result.isError, false);
-    f.appendUser("Continue the current task using the extracted facts.");
+    f.appendUser("Continue the current task using the extracted facts. ".repeat(600));
     return { ...f, id, original };
 }
 const entry = (f) => f.engine.state(f.session).entries.find((item) => item.id === f.id);
@@ -50,7 +46,7 @@ test("low-pressure marks stay queued and read-only status does not purchase a re
 });
 
 test("pressure grants a batch, then stops without summary once fresh measurement is below target", async (t) => {
-    const f = await queued(t, { compaction: { auto: true, thresholdRatio: 0.8 } });
+    const f = await queued(t, { compaction: { auto: true, targetTokens: 10000 } });
     const before = f.engine.pressureStatus(f.session).totalTokens;
     f.llm.resolveModelInfo = async () => ({ context: { contextWindow: before } });
     let selected = false;
@@ -63,11 +59,11 @@ test("pressure grants a batch, then stops without summary once fresh measurement
     assert.equal(entry(f).status, "released");
     assert.equal(f.calls.length, 0);
     assert.equal(selected, false);
-    assert.ok(f.engine.pressureStatus(f.session).totalTokens < before * 0.8);
+    assert.ok(f.engine.pressureStatus(f.session).totalTokens < 10000);
 });
 
 test("remaining pressure builds both range and auxiliary summary from the released surface", async (t) => {
-    const f = await queued(t, { compaction: { auto: true, thresholdRatio: 0.8 } });
+    const f = await queued(t, { compaction: { auto: true, targetTokens: 2048 } });
     f.appendUser("Unmarked historical business evidence. ".repeat(3000));
     f.toolRound("work_on_history", "Extracted the old unmarked evidence.");
     f.appendUser("Protect this latest input.");
@@ -75,12 +71,12 @@ test("remaining pressure builds both range and auxiliary summary from the releas
     f.llm.resolveModelInfo = async () => ({ context: { contextWindow: Math.ceil(before * 0.55) } });
     const seen = [];
     const originalRange = f.engine.pressureRange.bind(f.engine);
-    f.engine.pressureRange = (session, measurement, retain) => {
+    f.engine.pressureRange = (session, measurement, retain, cut) => {
         seen.push({
             total: measurement.totalTokens,
             nodes: measurement.nodes.map((node) => node.seq),
         });
-        return originalRange(session, measurement, retain);
+        return originalRange(session, measurement, retain, cut);
     };
     assert.ok(await f.engine.compactIfNeeded(f.agent, "pressure", signal()));
     assert.ok(f.calls.length > 0);
@@ -109,8 +105,8 @@ test("overflow with insufficient release still enters native summary recovery", 
     );
 });
 
-test("maximum wait is replayable business progress and admits one combined release", async (t) => {
-    const f = await queued(t, { scheduling: { releaseMaxWaitSteps: 2 } });
+test("recent replacements execute consistently after cold replay without a wait horizon", async (t) => {
+    const f = await queued(t, { compaction: { cacheReadRatio: 1 } });
     f.toolRound("work_a", "Completed independent business work.");
     f.toolRound("work_b", "Completed another independent business step.");
     const cold = Session.create(
@@ -119,9 +115,12 @@ test("maximum wait is replayable business progress and admits one combined relea
         f.session.header,
     );
     for (const session of [f.session, cold]) {
-        const status = await f.engine.schedulingStatus({ ...f.agent, session });
-        assert.equal(status.releaseBatch.reason, "max_wait");
-        assert.ok(status.releaseBatch.oldestWaitSteps >= 2);
+        await f.withSessionQuery(session, async () => {
+            const status = await f.engine.schedulingStatus({ ...f.agent, session });
+            assert.equal(status.releaseBatch.reason, "economical_release");
+            assert.ok(status.releaseBatch.releaseTokens > 0);
+            assert.equal(status.releaseBatch.deferredCount, 0);
+        });
     }
     await f.engine.compactIfNeeded(f.agent, "pressure", signal());
     assert.equal(entry(f).status, "released");
@@ -130,20 +129,25 @@ test("maximum wait is replayable business progress and admits one combined relea
 
 test("native replacements reject stale revision permission without side effects", async (t) => {
     const f = await queued(t);
-    const estimate = estimateInlineReleases(f.ctx, f.session, f.engine.state(f.session));
+    const cut = await observeSessionCut(f.ctx, f.session);
+    t.after(() => cut[Symbol.dispose]());
+    const estimate = estimateInlineReleases(f.ctx, f.session, f.engine.state(f.session), cut);
     const permit = planReleaseBatch({
         revision: estimate.revision,
         totalTokens: f.engine.pressureStatus(f.session).totalTokens,
-        releaseTokens: Math.max(0, estimate.beforeTokens - estimate.afterTokens),
-        releaseCount: estimate.replacementCount,
-        oldestWaitSteps: 0,
+        candidates: estimate.replacements.map((item) => ({
+            seq: item.seq,
+            savingTokens: item.releasableTokens,
+            replacementTokens: item.afterTokens,
+            suffixTokens: 0,
+        })),
         opportunity: "pressure",
         nowMs: Date.now(),
     });
     f.appendUser("A newer protected input invalidates the old permission.");
     const seq = f.session.seq;
     assert.equal(
-        commitInlineReleases(f.ctx, f.session, f.engine.state(f.session), signal(), permit),
+        commitInlineReleases(f.ctx, f.session, f.engine.state(f.session), signal(), permit, cut),
         0,
     );
     assert.equal(f.session.seq, seq);
@@ -208,7 +212,10 @@ test("an independent replacement later in the prompt does not authorize an earli
             surfaceOp: { op: "replace", startSeq: victim.seq, endSeq: victim.seq },
         },
     );
-    assert.ok(f.engine.rebuildEvidence(f.session).independentRebuildTokens > 0);
+    const evidence = await withSessionCut(f.ctx, f.session, (cut) =>
+        f.engine.rebuildEvidence(f.session, cut),
+    );
+    assert.ok(evidence.independentRebuildTokens > 0);
     await f.engine.compactIfNeeded(f.agent, "pressure", signal());
     assert.equal(entry(f).status, "queued");
     assert.ok(f.session.surface.nodes.includes(f.original.seq));
@@ -219,8 +226,9 @@ test("a previous inline batch cannot manufacture permission for another pending 
     const f = await queued(t);
     const second = f.toolRound("read_second_archive", "SECOND_ARCHIVE_CONTENT ".repeat(2000));
     const secondId = f.idFor(second);
+    f.appendUser("Later retained business evidence. ".repeat(1000));
     primaryCacheObservation(f);
-    assert.ok(commitForcedReleases(f) > 0);
+    assert.ok((await commitForcedReleases(f)) > 0);
     assert.equal(entry(f).status, "released");
     const marked = await f.invoke("context_release", {
         ids: [Number(secondId)],
@@ -239,7 +247,7 @@ test("a previous inline batch cannot manufacture permission for another pending 
 test("native release-control cleanup cannot purchase another batch or rebuild credit on replay", async (t) => {
     const f = await queued(t);
     primaryCacheObservation(f);
-    assert.ok(commitForcedReleases(f) > 0);
+    assert.ok((await commitForcedReleases(f)) > 0);
     assert.equal(entry(f).status, "released");
     f.advanceSteps(100);
     f.session.append("step/start", { turn: 1, step: 100 });
@@ -264,19 +272,24 @@ test("native release-control cleanup cannot purchase another batch or rebuild cr
         ids: [Number(secondId)],
         reason: "Second archive consumed",
     });
+    f.appendUser("Later retained task evidence. ".repeat(1000));
     const cold = Session.create(
         f.session.id,
         JSON.parse(JSON.stringify(f.session.snapshotEvents())),
         f.session.header,
     );
     for (const session of [f.session, cold]) {
-        const evidence = f.engine.rebuildEvidence(session);
-        assert.equal(evidence.rebuildStartSeq, null);
-        assert.equal(evidence.independentRebuildTokens, 0);
-        assert.equal(
-            (await f.engine.schedulingStatus({ ...f.agent, session })).releaseBatch.decision,
-            "wait",
-        );
+        await f.withSessionQuery(session, async () => {
+            const evidence = await withSessionCut(f.ctx, session, (cut) =>
+                f.engine.rebuildEvidence(session, cut),
+            );
+            assert.equal(evidence.rebuildStartSeq, null);
+            assert.equal(evidence.independentRebuildTokens, 0);
+            assert.equal(
+                (await f.engine.schedulingStatus({ ...f.agent, session })).releaseBatch.decision,
+                "wait",
+            );
+        });
     }
     await f.engine.compactIfNeeded(f.agent, "pressure", signal());
     assert.equal(
@@ -284,5 +297,31 @@ test("native release-control cleanup cannot purchase another batch or rebuild cr
         "queued",
     );
     assert.ok(f.session.surface.nodes.includes(second.seq));
+    assert.equal(f.calls.length, 0);
+});
+
+test("a deferred old replacement does not hold back a cheap recent release", async (t) => {
+    const f = await queued(t);
+    const recent = f.toolRound("read_recent", "RECENT_CONSUMED_RESULT ".repeat(400));
+    const recentId = f.idFor(recent);
+    const outcome = await f.invoke("context_release", {
+        ids: [Number(recentId)],
+        reason: "The recent result has been consumed",
+    });
+    assert.equal(outcome.isError, false);
+    f.appendUser("Continue the current task.");
+    const before = await f.engine.schedulingStatus(f.agent);
+    assert.equal(before.releaseBatch.decision, "execute");
+    assert.ok(before.releaseBatch.deferredCount > 0);
+    assert.ok(before.releaseBatch.selectedSeqs.includes(recent.seq));
+    assert.equal(before.releaseBatch.selectedSeqs.includes(f.original.seq), false);
+    assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
+    assert.equal(entry(f).status, "queued");
+    assert.equal(
+        f.engine.state(f.session).entries.find((item) => item.id === recentId).status,
+        "released",
+    );
+    assert.ok(f.session.surface.nodes.includes(f.original.seq));
+    assert.equal(f.session.surface.nodes.includes(recent.seq), false);
     assert.equal(f.calls.length, 0);
 });

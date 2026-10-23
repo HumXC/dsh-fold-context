@@ -11,7 +11,7 @@ import {
 const signal = () => new AbortController().signal;
 async function pressureWorld(t, tail = "Current task requirements. ".repeat(150)) {
     const f = await fixture({
-        compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 512, compactionRetries: 3 },
+        compaction: { auto: true, targetTokens: 2048 },
     });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({
@@ -60,7 +60,7 @@ test("automatic pressure never resummarizes only an old checkpoint and managemen
 
 test("a pressure retry stops after useful compaction when only its new checkpoint remains selectable", async (t) => {
     const f = await fixture({
-        compaction: { auto: true, thresholdRatio: 0.5, retainTokens: 512, compactionRetries: 3 },
+        compaction: { auto: true, targetTokens: 2048 },
     });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({

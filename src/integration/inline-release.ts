@@ -1,7 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { isDeepStrictEqual } from "node:util";
 import { freezeMessage, type ContentBlock } from "@deepseek-ai/dsh-llm";
-import { SessionSeq, type Session, type SessionEvent } from "@deepseek-ai/dsh-session";
+import type { Session, SessionEvent } from "@deepseek-ai/dsh-session";
 import type { LedgerState } from "../domain/ledger.js";
 import type { ReleaseBatchPlan } from "../domain/scheduler.js";
 import { inlineReleaseContent } from "../domain/protocol.js";
@@ -12,6 +12,7 @@ import {
     RELEASE_REPORT_VERSION,
     releaseReport,
 } from "../domain/release-report.js";
+import type { SessionCut } from "./session-cut.js";
 
 export { RELEASE_CLEANUP_SOURCE } from "../domain/release-controls.js";
 
@@ -22,7 +23,7 @@ interface Replacement {
     content: ContentBlock[];
     releasedIds: string[];
 }
-function planReplacements(session: Session, state: LedgerState): Replacement[] {
+function planReplacements(session: Session, state: LedgerState, cut: SessionCut): Replacement[] {
     const groups = new Map<number, Entry[]>();
     for (const entry of state.entries) {
         if (
@@ -37,7 +38,7 @@ function planReplacements(session: Session, state: LedgerState): Replacement[] {
     }
     const plans: Replacement[] = [];
     for (const [seq, entries] of groups) {
-        const event = session.eventAt(SessionSeq(seq));
+        const event = cut.events.get(seq);
         if (event?.type !== "tool/result" && event?.type !== "user/message") continue;
         if (session.deriveEventMessage(event) === null) continue;
         // Edit persisted native blocks; file projections may expose text handles instead.
@@ -106,8 +107,10 @@ export function estimateInlineReleases(
     ctx: Context,
     session: Session,
     state: LedgerState,
+    cut: SessionCut,
 ): InlineReleaseEstimate {
-    const plans = state.activeStart === null ? planReplacements(session, state) : [];
+    if (!cut.current(session)) throw new Error("fold-context: release observation changed");
+    const plans = state.activeStart === null ? planReplacements(session, state, cut) : [];
     const replacements = plans.map(({ event, content, releasedIds }) => {
         const original = event.type === "tool/result" ? event.data.message : event.data;
         const beforeTokens = ctx.tokenMeter.estimateMessage(original);
@@ -147,7 +150,7 @@ export function estimateInlineReleases(
         { beforeTokens: 0, afterTokens: 0 },
     );
     return {
-        revision: session.seq,
+        revision: cut.revision,
         replacementCount: plans.length,
         replacements,
         releasedIds: [...new Set(plans.flatMap((plan) => plan.releasedIds))],
@@ -162,16 +165,21 @@ export function commitInlineReleases(
     state: LedgerState,
     signal: AbortSignal,
     permit: ReleaseBatchPlan,
+    cut: SessionCut,
 ): number {
     signal.throwIfAborted();
     if (
         state.activeStart !== null ||
         permit.decision !== "execute" ||
-        permit.revision !== session.seq
+        permit.revision !== session.seq ||
+        !cut.current(session)
     )
         return 0;
-    const plans = planReplacements(session, state);
-    if (plans.length === 0) return 0;
+    const permitted = new Set(permit.selectedSeqs);
+    const plans = planReplacements(session, state, cut).filter((plan) =>
+        permitted.has(Number(plan.event.seq)),
+    );
+    if (plans.length === 0 || plans.length !== permitted.size) return 0;
     const releasedIds = new Set(plans.flatMap((plan) => plan.releasedIds));
     const report = {
         ...releaseReport(state, releasedIds, `${session.id}:${session.seq}`),
@@ -189,6 +197,8 @@ export function commitInlineReleases(
             { beforeTokens: 0, afterTokens: 0 },
         ),
     };
+    signal.throwIfAborted();
+    if (!cut.current(session)) return 0;
     for (const [index, { event, content, releasedIds: targetIds }] of plans.entries()) {
         const final = index === plans.length - 1;
         const seq = event.seq;

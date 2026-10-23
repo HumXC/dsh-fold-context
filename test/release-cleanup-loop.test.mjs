@@ -19,7 +19,7 @@ for (const mode of ["native", "ptc", "siblings"])
         });
         f = await loopFixture(root, {
             strictSession: true,
-            scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
+            compaction: { cacheReadRatio: 1 },
             tools: { probe_read: () => "Consumed source evidence. ".repeat(300) },
             ...(mode === "native"
                 ? {}
@@ -132,7 +132,7 @@ test("a quiet PTC call reusing an earlier retained native callId remains intact"
     });
     f = await loopFixture(root, {
         strictSession: true,
-        scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
+        compaction: { cacheReadRatio: 1 },
         tools: { probe_read: () => "Consumed source evidence." },
         ptc: async (tools) => ({
             value: await tools.context_release({ ids, reason: "Already consumed" }),

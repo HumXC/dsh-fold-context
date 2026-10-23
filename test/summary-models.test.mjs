@@ -18,6 +18,10 @@ const failureText = (error) => `${error.message} ${error.cause ? failureText(err
 test("session matches are stably promoted only within the configured list", () => {
     const list = resolveSummaryModels([model("deepseek"), model("fixture"), model("other")]);
     assert.ok(list.every((item) => item.preferWhenSessionMatches));
+    assert.ok(
+        list.every((item) => item.useSessionAgent === false),
+        "legacy entries keep the native helper disabled",
+    );
     assert.deepEqual(
         summaryCandidates(list, route).map((item) => item.model),
         ["fixture", "deepseek", "other"],
@@ -34,6 +38,7 @@ test("session matches are stably promoted only within the configured list", () =
         ["deepseek", "fixture", "other"],
     );
     assert.equal(summaryCandidates([], route)[0].model, "fixture");
+    assert.equal(summaryCandidates([], route)[0].useSessionAgent, false);
     assert.doesNotThrow(() => resolveSummaryModels([model("a"), model("a")]));
     assert.doesNotThrow(() =>
         resolveSummaryModels([

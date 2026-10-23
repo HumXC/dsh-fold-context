@@ -5,7 +5,6 @@ import fold from "../lib/index.js";
 import { POLICY_GROUPS, normalizePolicyOverrides } from "../lib/domain/settings-catalog.js";
 import { selectPolicyOverrides } from "../lib/settings-config.js";
 import { resolveFoldCompactionConfig } from "../lib/config.js";
-import { resolveReleasePolicy } from "../lib/domain/planner.js";
 import { resolveSummaryPolicy } from "../lib/domain/summary-policy.js";
 import { resolveSchedulingPolicy } from "../lib/domain/scheduler.js";
 import { resolveReminderPolicy } from "../lib/domain/reminder.js";
@@ -13,164 +12,175 @@ import { fixture } from "./fixture.mjs";
 
 const defaults = () => ({
     compaction: resolveFoldCompactionConfig({}),
-    release: resolveReleasePolicy(),
     summary: resolveSummaryPolicy(),
     scheduling: resolveSchedulingPolicy(),
     reminders: resolveReminderPolicy(),
 });
 
-test("the settings catalog covers every runtime policy field and preserves canonical defaults", () => {
+test("the clean catalog has four groups and ten fields; omitted overrides inherit without materializing defaults", () => {
     const original = defaults();
     const overrides = normalizePolicyOverrides();
-    for (const group of POLICY_GROUPS) {
-        const names = group.fields.map((field) => field.key);
-        if (group.key === "compaction") names.push("modelPolicies");
-        const expected = new Set(Object.keys(original[group.key]));
-        if (group.key === "compaction") expected.add("retainTokens");
-        assert.deepEqual([...names].sort(), [...expected].sort(), group.key);
-        assert.equal(overrides[group.key].enabled, false);
-        if (group.key !== "compaction")
-            assert.deepEqual(overrides[group.key].values, original[group.key]);
-    }
+    assert.deepEqual(POLICY_GROUPS.map((group) => group.key).sort(), [
+        "compaction",
+        "reminders",
+        "scheduling",
+        "summary",
+    ]);
     assert.equal(
         POLICY_GROUPS.reduce((count, group) => count + group.fields.length, 0),
-        37,
+        10,
     );
-    assert.deepEqual(resolveFoldCompactionConfig(overrides.compaction.values), original.compaction);
+    for (const group of POLICY_GROUPS) {
+        assert.deepEqual(overrides[group.key], {});
+        for (const field of group.fields) {
+            if (field.default !== null)
+                assert.deepEqual(original[group.key][field.key], field.default);
+        }
+    }
+    assert.deepEqual(selectPolicyOverrides(original, overrides), original);
+    assert.deepEqual(
+        POLICY_GROUPS.flatMap((group) =>
+            group.fields.filter((field) => field.perModel).map((field) => field.key),
+        ),
+        ["targetTokens", "cacheReadRatio"],
+    );
 });
 
-test("disabled profile groups preserve each preset and selecting groups clones their values", () => {
-    const base = structuredClone(defaults());
-    base.compaction.auto = false;
-    base.compaction.modelPolicies = [{ provider: "preset", model: "route", retainTokens: 7 }];
-    base.release.catalogLimit = 6;
+test("field overrides preserve preset siblings, false and zero; empty model arrays explicitly clear inheritance", () => {
+    const base = defaults();
+    base.compaction = {
+        ...base.compaction,
+        auto: false,
+        targetTokens: 170000,
+        modelPolicies: [{ provider: "preset", model: "route", cacheReadRatio: 0.2 }],
+    };
+    base.summary = { reasoning: "preserve", images: "references" };
     const overrides = normalizePolicyOverrides({
-        release: { enabled: false, values: { catalogLimit: 99 } },
+        compaction: { cacheReadRatio: 0 },
+        reminders: { enabled: false },
     });
-    const inherited = selectPolicyOverrides(base, overrides);
-    assert.deepEqual(inherited, base);
-    overrides.release.enabled = true;
-    overrides.compaction.enabled = true;
     const selected = selectPolicyOverrides(base, overrides);
-    assert.equal(selected.release.catalogLimit, 99);
-    assert.equal(selected.compaction.auto, true);
-    assert.deepEqual(selected.compaction.modelPolicies, []);
-    selected.compaction.modelPolicies.push({ provider: "other", model: "route" });
-    assert.deepEqual(overrides.compaction.values.modelPolicies, []);
-    assert.deepEqual(base.compaction.modelPolicies, [
-        { provider: "preset", model: "route", retainTokens: 7 },
-    ]);
+    assert.deepEqual(selected.compaction, { ...base.compaction, cacheReadRatio: 0 });
+    assert.deepEqual(selected.summary, base.summary);
+    assert.equal(selected.reminders.enabled, false);
+    assert.deepEqual(overrides.compaction, { cacheReadRatio: 0 });
+    const cleared = selectPolicyOverrides(
+        base,
+        normalizePolicyOverrides({ compaction: { modelPolicies: [] } }),
+    );
+    assert.deepEqual(cleared.compaction.modelPolicies, []);
+    assert.equal(cleared.compaction.targetTokens, 170000);
+    selected.compaction.modelPolicies[0].cacheReadRatio = 0.9;
+    assert.equal(
+        base.compaction.modelPolicies[0].cacheReadRatio,
+        0.2,
+        "effective snapshots cannot mutate preset arrays",
+    );
 });
 
-test("profile Config preserves summary models, exposes opt-in groups and validates before persistence", async (t) => {
+test("profile Config preserves summary models and validates clean field overrides before persistence", async (t) => {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
-    const routes = [{ provider: "test", model: "summary-fixture" }];
     const config = fold.Config({
         uiOnly: true,
-        summaryModels: routes,
-        policyOverrides: { release: { enabled: true, values: { catalogLimit: 9 } } },
+        summaryModels: [{ provider: "test", model: "summary-fixture" }],
+        policyOverrides: { compaction: { targetTokens: 170000 }, reminders: { enabled: false } },
     });
     fold.apply(ctx, config);
     assert.equal(ctx.get("compaction"), undefined);
     assert.equal(ctx.foldContextSettings.current()[0].model, "summary-fixture");
-    assert.equal(ctx.foldContextSettings.policies().release.values.catalogLimit, 9);
-    assert.equal(ctx.foldContextSettings.policies().compaction.enabled, false);
+    assert.deepEqual(ctx.foldContextSettings.policies().compaction, { targetTokens: 170000 });
+    assert.deepEqual(ctx.foldContextSettings.policies().summary, {});
     for (const policyOverrides of [
-        { release: { enabled: true, values: { catalogLimit: 0 } } },
-        { reminders: { enabled: true, values: { ignoredBackoffSteps: [20, 10] } } },
-        { reminders: { enabled: true, values: { ignoredBackoffSteps: [] } } },
-        { summary: { enabled: true, values: { reasoning: "invalid" } } },
-        { compaction: { enabled: true, values: { thresholdRatio: 0 } } },
-        {
-            compaction: {
-                enabled: true,
-                values: { modelPolicies: [{ provider: "p", model: "m", retainTokens: -1 }] },
-            },
-        },
+        { compaction: { targetTokens: 0 } },
+        { compaction: { cacheReadRatio: 1.1 } },
+        { summary: { reasoning: "invalid" } },
+        { reminders: { enabled: "false" } },
+        { compaction: { modelPolicies: [{ provider: "p", model: "m", targetTokens: -1 }] } },
+        { compaction: { modelPolicies: [{ provider: "p", model: "m", auto: true }] } },
     ])
         assert.throws(() => fold.Config({ uiOnly: true, policyOverrides }));
 });
 
-test("all numeric field boundaries, types and enum values share strict Host validation", () => {
-    for (const group of POLICY_GROUPS) {
+test("legacy root fields, wrappers and removed settings fail without migration or silent defaults", () => {
+    for (const legacy of ["compaction", "release", "summary", "scheduling", "reminders"])
+        assert.throws(() => fold.Config({ [legacy]: {} }), legacy);
+    for (const overrides of [
+        { release: {} },
+        { compaction: { enabled: true, values: {} } },
+        { compaction: { thresholdRatio: 0.8 } },
+        { scheduling: { paybackTurns: 24 } },
+        { scheduling: { releaseMaxWaitSteps: 16 } },
+        { reminders: { ignoredBackoffSteps: [12, 24] } },
+    ]) {
+        assert.throws(() => normalizePolicyOverrides(overrides));
+        assert.throws(() => fold.Config({ policyOverrides: overrides }));
+        assert.throws(() => fold.Config({ policy: overrides }));
+    }
+});
+
+test("all field types and numeric boundaries share strict Host validation", () => {
+    for (const group of POLICY_GROUPS)
         for (const field of group.fields) {
             const bad =
                 field.type === "boolean"
                     ? ["false", 0, null]
                     : field.type === "enum"
                       ? ["invalid", 1, null]
-                      : field.type === "steps"
-                        ? [[], [2, 1], [0], Array(17).fill(1)]
-                        : [
-                              null,
-                              "1",
-                              NaN,
-                              Infinity,
-                              ...(field.min === undefined
-                                  ? []
-                                  : [field.min === Number.MIN_VALUE ? 0 : field.min - 1]),
-                              ...(field.max === undefined ? [] : [field.max + 1]),
-                              ...(field.type === "integer" ? [1.5] : []),
-                          ];
-            for (const value of bad)
+                      : [
+                            null,
+                            "1",
+                            NaN,
+                            Infinity,
+                            ...(field.min === undefined ? [] : [field.min - 1]),
+                            ...(field.max === undefined ? [] : [field.max + 1]),
+                            ...(field.type === "integer" ? [1.5] : []),
+                        ];
+            for (const value of bad) {
+                const overrides = { [group.key]: { [field.key]: value } };
                 assert.throws(
-                    () =>
-                        normalizePolicyOverrides({
-                            [group.key]: { enabled: true, values: { [field.key]: value } },
-                        }),
+                    () => normalizePolicyOverrides(overrides),
                     `${group.key}.${field.key}: ${String(value)}`,
                 );
+                assert.throws(() => fold.Config({ policyOverrides: overrides }));
+            }
         }
-    }
-    assert.throws(() =>
-        normalizePolicyOverrides({
-            compaction: {
-                enabled: true,
-                values: { modelPolicies: [{ provider: "p", model: "m", auto: true }] },
-            },
-        }),
-    );
+    for (const value of [null, [], false])
+        assert.throws(() => normalizePolicyOverrides({ compaction: value }));
     const model = normalizePolicyOverrides({
         compaction: {
-            enabled: true,
-            values: {
-                modelPolicies: [
-                    { provider: "p", model: "m", retainTokens: 0, thresholdRatio: 0.9 },
-                ],
-            },
+            modelPolicies: [{ provider: "p", model: "m", cacheReadRatio: 0, targetTokens: 170000 }],
         },
     });
-    assert.deepEqual(model.compaction.values.modelPolicies, [
-        { provider: "p", model: "m", retainTokens: 0, thresholdRatio: 0.9 },
+    assert.deepEqual(model.compaction.modelPolicies, [
+        { provider: "p", model: "m", targetTokens: 170000, cacheReadRatio: 0 },
     ]);
+    model.compaction.modelPolicies.push({ provider: "p", model: "m" });
+    assert.throws(() => normalizePolicyOverrides(model), /modelPolicies/);
 });
 
-test("new engines capture profile policy once while summary model selection remains live", async (t) => {
+test("profile changes become effective at the next decision boundary instead of requiring a new engine", async (t) => {
     const profile = {
         summaryModels: [{ provider: "test", model: "summary-fixture" }],
         policyOverrides: normalizePolicyOverrides({
-            compaction: {
-                enabled: true,
-                values: { auto: false, headroomTokens: 0, maxTokens: 333 },
-            },
-            release: { enabled: true, values: { catalogLimit: 2 } },
-            summary: { enabled: true, values: { reasoning: "preserve", images: "references" } },
-            reminders: { enabled: true, values: { enabled: false } },
+            compaction: { auto: false, summaryMaxTokens: 333 },
+            summary: { reasoning: "preserve", images: "references" },
+            reminders: { enabled: false },
         }),
     };
-    const first = await fixture({ profileSettings: profile });
-    t.after(first.close);
-    assert.equal(first.engine.releasePolicy.catalogLimit, 2);
-    assert.deepEqual(first.engine.summaryPolicy, { reasoning: "preserve", images: "references" });
-    assert.equal(first.engine.reminderPolicy.enabled, false);
-    profile.policyOverrides.summary.values.reasoning = "omit-from-summary";
-    profile.policyOverrides.release.values.catalogLimit = 5;
-    const second = await fixture({ profileSettings: profile });
-    t.after(second.close);
-    assert.equal(second.engine.releasePolicy.catalogLimit, 5);
-    assert.equal(second.engine.summaryPolicy.reasoning, "omit-from-summary");
-    assert.equal(first.engine.releasePolicy.catalogLimit, 2);
-    assert.equal(first.engine.summaryPolicy.reasoning, "preserve");
-    assert.equal(first.ctx.foldContextSettings.policies().release.values.catalogLimit, 5);
+    const f = await fixture({ profileSettings: profile });
+    t.after(f.close);
+    assert.deepEqual(f.engine.summaryPolicy, { reasoning: "preserve", images: "references" });
+    assert.equal(f.engine.reminderPolicy.enabled, false);
+    profile.policyOverrides.summary.reasoning = "omit-from-summary";
+    profile.policyOverrides.reminders.enabled = true;
+    assert.equal(
+        f.engine.summaryPolicy.reasoning,
+        "preserve",
+        "configuration stays stable between boundaries",
+    );
+    await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
+    assert.equal(f.engine.summaryPolicy.reasoning, "omit-from-summary");
+    assert.equal(f.engine.reminderPolicy.enabled, true);
+    assert.equal(f.ctx.foldContextSettings.policies().summary.reasoning, "omit-from-summary");
 });

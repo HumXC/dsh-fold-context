@@ -92,14 +92,10 @@ test("messages share one monotonic numeric ordinal independently of roles and ev
     );
 });
 
-for (const schedulingEnabled of [false, true]) {
-    test(`v8 tool release uses an explicit batch permit with scheduling ${schedulingEnabled ? "enabled" : "disabled"}`, async (t) => {
+for (const autoEnabled of [false, true]) {
+    test(`v8 tool release uses an explicit batch permit with automatic summaries ${autoEnabled ? "enabled" : "disabled"}`, async (t) => {
         const f = await fixture({
-            scheduling: {
-                enabled: schedulingEnabled,
-                minIntervalSteps: 100,
-                minSavingsTokens: 1000000,
-            },
+            compaction: { auto: autoEnabled },
         });
         t.after(f.close);
         f.session.append("turn/start", { turn: 1 });
@@ -142,7 +138,7 @@ for (const schedulingEnabled of [false, true]) {
             f.engine.state(f.session).entries.find((entry) => entry.id === tool.id).status,
             "queued",
         );
-        commitForcedReleases(f);
+        await commitForcedReleases(f);
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === tool.id).status,
             "released",
@@ -320,7 +316,7 @@ test("releasing a signed assistant's result retains conversation evidence and ex
         ).accepted,
         true,
     );
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     await compactSurface(f);
     const supplied = summaryRecords(f.calls[0].messages);
     for (const text of [user.data.content[0].text, content[0].text]) {

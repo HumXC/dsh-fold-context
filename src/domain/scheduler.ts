@@ -1,27 +1,15 @@
 import { z } from "zod";
 
 const tokenCountSchema = z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const positiveCountSchema = tokenCountSchema.positive();
 const ratioSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
-/** Costs are HEURISTIC normalized uncached-token units, never provider prices. */
+/** Relative costs only. Timing, batching and prediction are internal policy. */
 export const schedulingPolicySchema = z
     .object({
-        enabled: z.boolean().default(true),
-        proactive: z.boolean().default(true),
-        minIntervalSteps: tokenCountSchema.default(8),
-        minSavingsTokens: tokenCountSchema.default(2048),
-        minSavingsRatio: ratioSchema.max(1).default(0.2),
-        expectedSummaryRatio: ratioSchema.default(0.2),
-        paybackTurns: positiveCountSchema.default(24),
         cacheReadRatio: ratioSchema.max(1).default(0.1),
         summaryInputRatio: ratioSchema.default(1),
         summaryOutputRatio: ratioSchema.default(1),
-        releaseMinTokens: tokenCountSchema.default(2048),
-        releaseMaxWaitSteps: positiveCountSchema.default(16),
-        releaseBacklogRatio: ratioSchema.positive().max(1).default(0.15),
-        /** Zero disables time-based cache expiry assumptions. */
-        cacheTtlMs: tokenCountSchema.default(300_000),
+        cacheTtlMs: tokenCountSchema.default(0),
     })
     .strict();
 
@@ -126,240 +114,227 @@ export function selectScheduledRange(input: ScheduledRangeInput): ScheduledRange
 export type ScheduledTrigger = "backlog" | "model_request";
 export type SchedulingSafetyReason = "pressure" | "overflow";
 export type SchedulingCacheState = "unknown" | "cached" | "uncached";
-export type SchedulingReason =
-    | "disabled"
-    | "no_selection"
-    | "no_marks"
-    | "min_interval"
-    | "min_savings"
-    | "min_ratio"
-    | "not_paid_back"
-    | "eligible"
-    | "safety_pressure"
-    | "safety_overflow";
 
 export interface ScheduledCompactionInput {
     readonly trigger: ScheduledTrigger;
-    /** Current measured prompt tokens, including the preserved head. */
     readonly totalTokens: number;
-    /** Whole selected span, including unmarked history. */
     readonly selectedTokens: number;
-    /** Fixed head tokens preserved outside the selected span. */
     readonly prefixTokens: number;
-    readonly excludedTokens?: number;
-    /** Estimate after all summary-input filters; overrides selected minus excluded. */
     readonly filterInputTokens?: number;
-    /** Selected content removable inline; never credit it as summary savings. */
+    readonly excludedTokens?: number;
     readonly inlineReleaseTokens?: number;
-    /** Actual prompt estimate after the pending inline batch, for the ratio gate. */
     readonly postReleaseTokens?: number;
     readonly stepsSinceSummary: number;
-    /** Marks covered by the candidate selection, not unrelated queued marks. */
     readonly markedIds: readonly string[];
     readonly routeSignature?: string | null;
     readonly cacheState?: SchedulingCacheState;
-    readonly effectiveCacheReadRatio?: number;
-    /** Credit only a rebuild required independently before this batch was planned. */
     readonly independentRebuildTokens?: number;
     readonly cacheExpired?: boolean;
     readonly headerOverheadTokens?: number;
     readonly auto?: boolean;
-    /** Caller-authorized safety path, never inferred from economic estimates. */
     readonly forceSafety?: SchedulingSafetyReason;
+    readonly targetTokens: number;
+    readonly safetyTokens: number;
+    /** Observed business growth per primary request, not a configurable request horizon. */
+    readonly growthTokens?: number | undefined;
+    readonly summaryRatio?: number;
+    readonly summaryMaxTokens?: number;
+    /** Cache share of summary INPUT only; independent summary calls default to uncached. */
+    readonly summaryCacheShare?: number;
 }
-
 const compactionInputSchema = z
     .object({
         trigger: z.enum(["backlog", "model_request"]),
         totalTokens: tokenCountSchema,
         selectedTokens: tokenCountSchema,
         prefixTokens: tokenCountSchema,
-        excludedTokens: tokenCountSchema.optional(),
         filterInputTokens: tokenCountSchema.optional(),
+        excludedTokens: tokenCountSchema.optional(),
         inlineReleaseTokens: tokenCountSchema.default(0),
         postReleaseTokens: tokenCountSchema.optional(),
         stepsSinceSummary: tokenCountSchema,
-        markedIds: z.array(z.string().min(1)),
+        markedIds: z.array(z.string()),
         routeSignature: z.string().nullable().default(null),
         cacheState: z.enum(["unknown", "cached", "uncached"]).default("unknown"),
-        effectiveCacheReadRatio: ratioSchema.max(1).optional(),
         independentRebuildTokens: tokenCountSchema.default(0),
         cacheExpired: z.boolean().default(false),
         headerOverheadTokens: tokenCountSchema.default(0),
         auto: z.boolean().default(true),
         forceSafety: z.enum(["pressure", "overflow"]).optional(),
+        targetTokens: tokenCountSchema.positive(),
+        safetyTokens: tokenCountSchema.positive(),
+        growthTokens: tokenCountSchema.positive().optional(),
+        summaryRatio: z.number().min(0).max(1).default(0.2),
+        summaryCacheShare: z.number().min(0).max(1).default(0),
+        summaryMaxTokens: tokenCountSchema.positive().default(Number.MAX_SAFE_INTEGER),
     })
     .strict()
-    .superRefine((input, context) => {
+    .superRefine((input, ctx) => {
+        if (input.targetTokens >= input.safetyTokens)
+            ctx.addIssue({ code: "custom", message: "target must be below safety boundary" });
         if (
-            input.prefixTokens > input.totalTokens ||
-            input.selectedTokens >
-                input.totalTokens - input.prefixTokens - input.headerOverheadTokens
-        ) {
-            context.addIssue({
+            input.prefixTokens + input.headerOverheadTokens + input.selectedTokens >
+            input.totalTokens
+        )
+            ctx.addIssue({
                 code: "custom",
-                message: "selected span, preserved head and header overhead exceed totalTokens",
+                message: "selected span and fixed input exceed totalTokens",
             });
-        }
-        if (input.excludedTokens !== undefined && input.excludedTokens > input.selectedTokens) {
-            context.addIssue({ code: "custom", message: "excludedTokens exceed selectedTokens" });
-        }
-        if (input.inlineReleaseTokens > input.selectedTokens) {
-            context.addIssue({
-                code: "custom",
-                message: "inlineReleaseTokens exceed selectedTokens",
-            });
-        }
+        if (
+            (input.excludedTokens ?? 0) > input.selectedTokens ||
+            input.inlineReleaseTokens > input.selectedTokens
+        )
+            ctx.addIssue({ code: "custom", message: "excluded content exceeds selected span" });
     });
 
-export interface ScheduledCompactionPlan {
-    readonly heuristic: "HEURISTIC";
-    readonly decision: "execute" | "wait";
-    readonly reason: SchedulingReason;
-    readonly trigger: ScheduledTrigger;
-    readonly forceSafety: SchedulingSafetyReason | null;
-    readonly routeSignature: string | null;
-    readonly markedIds: readonly string[];
-    readonly cacheState: SchedulingCacheState;
-    readonly cachedPrefixAssumed: boolean;
-    readonly effectiveCacheReadRatio: number;
-    readonly totalTokens: number;
-    readonly selectedTokens: number;
-    readonly prefixTokens: number;
-    readonly excludedTokens: number | null;
-    readonly filterInputTokens: number;
-    readonly inlineReleaseTokens: number;
-    readonly postReleaseTokens: number;
-    readonly stepsSinceSummary: number;
-    readonly predictedSummaryTokens: number;
-    readonly netSavingTokens: number;
-    /** Fraction of the current total prompt saved by replacing the whole span. */
-    readonly savingsRatio: number;
-    readonly retainedSurfaceTokens: number;
-    readonly headerOverheadTokens: number;
-    readonly rebuiltSuffixTokens: number;
-    readonly independentRebuildTokens: number;
-    readonly cacheExpired: boolean;
-    readonly initialRebuildPenalty: number;
-    readonly summaryCost: number;
-    readonly perTurnSaving: number;
-    /** Null means no positive savings or no representable finite payback. */
-    readonly breakEvenTurns: number | null;
-}
-
-/**
- * Deterministic gate for low-pressure requests and marked backlog. A historical
- * cache miss describes one call, never future billing. Only independently
- * required rebuild work or evidenced TTL expiry reduces the rebuild penalty;
- * the auxiliary summary call is always charged exactly once.
+/** Compare renewable cycles in equal units: cost per newly accumulated business token.
+ * A cycle reads an approximately linearly growing prompt, then replaces history.
+ * This is a bounded forecast, not an assertion of provider billing or task duration.
+ * Pressure bounds how long the economic optimum may be deferred.
  */
 export function planScheduledCompaction(
     value: ScheduledCompactionInput,
     config: Partial<SchedulingPolicy> = {},
-): ScheduledCompactionPlan {
+) {
     const policy = resolveSchedulingPolicy(config);
     const input = compactionInputSchema.parse(value);
+    const r = policy.cacheReadRatio;
+    const growthTokens = input.growthTokens ?? Math.max(1, Math.ceil(input.targetTokens / 64));
+    const ratio = input.summaryRatio;
     const filterInputTokens =
         input.filterInputTokens ?? input.selectedTokens - (input.excludedTokens ?? 0);
-    const predictedSummaryTokens = checkEstimate(
-        Math.ceil(
-            checkEstimate(filterInputTokens * policy.expectedSummaryRatio, "summary prediction"),
-        ),
-        "predictedSummaryTokens",
+    const predictedSummaryTokens = Math.min(
+        input.summaryMaxTokens,
+        Math.ceil(filterInputTokens * ratio),
     );
     const netSavingTokens = Math.max(
         0,
-        input.selectedTokens - predictedSummaryTokens - input.inlineReleaseTokens,
+        input.selectedTokens - input.inlineReleaseTokens - predictedSummaryTokens,
     );
-    const retainedSurfaceTokens =
-        input.totalTokens - input.prefixTokens - input.selectedTokens - input.headerOverheadTokens;
-    const rebuiltSuffixTokens = checkEstimate(
-        predictedSummaryTokens + retainedSurfaceTokens + input.headerOverheadTokens,
-        "rebuiltSuffixTokens",
-    );
-    const cachedPrefixAssumed = !input.cacheExpired;
-    const effectiveCacheReadRatio = input.effectiveCacheReadRatio ?? policy.cacheReadRatio;
-    const initialRebuildPenalty = checkEstimate(
-        Math.max(0, rebuiltSuffixTokens - input.independentRebuildTokens) *
-            (input.cacheExpired ? 0 : 1 - effectiveCacheReadRatio),
-        "initialRebuildPenalty",
-    );
-    const summaryCost = checkEstimate(
-        filterInputTokens * policy.summaryInputRatio +
-            predictedSummaryTokens * policy.summaryOutputRatio,
-        "summaryCost",
-    );
-    const perTurnSaving = checkEstimate(netSavingTokens * effectiveCacheReadRatio, "perTurnSaving");
-    const upfrontCost = checkEstimate(initialRebuildPenalty + summaryCost, "upfrontCost");
-    const payback = perTurnSaving > 0 ? Math.ceil(upfrontCost / perTurnSaving) : null;
-    const breakEvenTurns = payback !== null && Number.isSafeInteger(payback) ? payback : null;
     const postReleaseTokens = input.postReleaseTokens ?? input.totalTokens;
-    const savingsRatio = postReleaseTokens > 0 ? netSavingTokens / postReleaseTokens : 0;
-    const markedIds = [...new Set(input.markedIds)];
-    let reason: SchedulingReason;
-    let decision: ScheduledCompactionPlan["decision"] = "wait";
-    if (input.selectedTokens === 0) {
-        reason = "no_selection";
-    } else if (
-        input.forceSafety !== undefined &&
-        (input.forceSafety !== "pressure" || input.auto)
-    ) {
-        reason = `safety_${input.forceSafety}`;
-        decision = "execute";
-    } else if (input.forceSafety === "pressure") {
-        reason = "disabled";
-    } else if (
-        !policy.enabled ||
-        (input.trigger === "backlog" && (!input.auto || !policy.proactive))
-    ) {
-        reason = "disabled";
-    } else if (input.trigger === "backlog" && markedIds.length === 0) {
-        reason = "no_marks";
-    } else if (input.stepsSinceSummary < policy.minIntervalSteps) {
-        reason = "min_interval";
-    } else if (netSavingTokens === 0 || netSavingTokens < policy.minSavingsTokens) {
-        reason = "min_savings";
-    } else if (savingsRatio < policy.minSavingsRatio) {
-        reason = "min_ratio";
-    } else if (breakEvenTurns === null || breakEvenTurns > policy.paybackTurns) {
-        reason = "not_paid_back";
-    } else {
-        reason = "eligible";
-        decision = "execute";
+    const retainedSurfaceTokens =
+        input.totalTokens - input.prefixTokens - input.headerOverheadTokens - input.selectedTokens;
+    // Request envelope and stable system head precede the changed historical span.
+    const rebuiltSuffixTokens = predictedSummaryTokens + retainedSurfaceTokens;
+    const initialRebuildPenalty =
+        Math.max(0, rebuiltSuffixTokens - input.independentRebuildTokens) *
+        (input.cacheExpired ? 0 : 1 - r);
+    const inputWeight = policy.summaryInputRatio * (1 - input.summaryCacheShare * (1 - r));
+    const summaryCost =
+        filterInputTokens * inputWeight + predictedSummaryTokens * policy.summaryOutputRatio;
+    const predictedAfterTokens = Math.max(0, postReleaseTokens - netSavingTokens);
+    const urgency = Math.max(
+        0,
+        Math.min(
+            1,
+            (postReleaseTokens - input.targetTokens) / (input.safetyTokens - input.targetTokens),
+        ),
+    );
+    // Cheap cache permits more of the soft-to-safe band, but never the next-request reserve.
+    const latestStartTokens = Math.max(
+        input.targetTokens,
+        Math.min(
+            input.safetyTokens - growthTokens,
+            input.targetTokens + (input.safetyTokens - input.targetTokens) * (1 - r),
+        ),
+    );
+    const cycleCost = (additional: number) => {
+        const extraSummary = Math.max(
+            0,
+            Math.min(
+                input.summaryMaxTokens - predictedSummaryTokens,
+                Math.ceil(additional * ratio),
+            ),
+        );
+        const before = postReleaseTokens + additional;
+        const after = predictedAfterTokens + extraSummary;
+        const work = before - after;
+        if (work <= 0) return Number.MAX_SAFE_INTEGER;
+        const summary =
+            summaryCost + additional * inputWeight + extraSummary * policy.summaryOutputRatio;
+        const rebuild = initialRebuildPenalty + extraSummary * (input.cacheExpired ? 0 : 1 - r);
+        return checkEstimate(
+            (summary + rebuild) / work + (r * (before + after)) / (2 * growthTokens),
+            "cycleCost",
+        );
+    };
+    const currentUnitCost = cycleCost(0);
+    const remaining = Math.max(0, latestStartTokens - postReleaseTokens);
+    let recommendedAtTokens = postReleaseTokens;
+    let bestUnitCost = currentUnitCost;
+    for (let index = 1; index <= 16; index++) {
+        const additional = Math.ceil((remaining * index) / 16);
+        const cost = cycleCost(additional);
+        if (cost < bestUnitCost) {
+            bestUnitCost = cost;
+            recommendedAtTokens = postReleaseTokens + additional;
+        }
     }
+    if (r === 0 && !input.cacheExpired) recommendedAtTokens = Math.ceil(latestStartTokens);
+    const safety =
+        input.forceSafety !== undefined || postReleaseTokens + growthTokens >= input.safetyTokens;
+    let reason: string;
+    let decision: "execute" | "wait" = "wait";
+    if (input.selectedTokens === 0) reason = "no_selection";
+    else if (netSavingTokens <= 0) reason = "no_savings";
+    else if (safety) {
+        decision = "execute";
+        reason = input.forceSafety === "overflow" ? "safety_overflow" : "safety_pressure";
+    } else if (!input.auto && input.trigger !== "model_request") reason = "disabled";
+    else if (
+        input.trigger !== "model_request" &&
+        postReleaseTokens < input.targetTokens &&
+        input.markedIds.length === 0
+    )
+        reason = "no_request";
+    else if (postReleaseTokens >= latestStartTokens) {
+        decision = "execute";
+        reason = "window_pressure";
+    } else if (recommendedAtTokens <= postReleaseTokens) {
+        decision = "execute";
+        reason = "cost_optimum";
+    } else reason = "cost_deferred";
     return {
-        heuristic: "HEURISTIC",
+        heuristic: "HEURISTIC" as const,
         decision,
         reason,
         trigger: input.trigger,
         forceSafety: input.forceSafety ?? null,
         routeSignature: input.routeSignature,
-        markedIds,
+        markedIds: [...new Set(input.markedIds)],
         cacheState: input.cacheState,
-        cachedPrefixAssumed,
-        effectiveCacheReadRatio,
+        effectiveCacheReadRatio: r,
+        cacheExpired: input.cacheExpired,
         totalTokens: input.totalTokens,
+        postReleaseTokens,
         selectedTokens: input.selectedTokens,
         prefixTokens: input.prefixTokens,
-        excludedTokens: input.excludedTokens ?? null,
-        filterInputTokens,
-        inlineReleaseTokens: input.inlineReleaseTokens,
-        postReleaseTokens,
-        stepsSinceSummary: input.stepsSinceSummary,
-        predictedSummaryTokens,
-        netSavingTokens,
-        savingsRatio,
-        retainedSurfaceTokens,
         headerOverheadTokens: input.headerOverheadTokens,
+        filterInputTokens,
+        predictedSummaryTokens,
+        predictedAfterTokens,
+        netSavingTokens,
+        inlineReleaseTokens: input.inlineReleaseTokens,
+        retainedSurfaceTokens,
         rebuiltSuffixTokens,
         independentRebuildTokens: input.independentRebuildTokens,
-        cacheExpired: input.cacheExpired,
         initialRebuildPenalty,
         summaryCost,
-        perTurnSaving,
-        breakEvenTurns,
+        targetTokens: input.targetTokens,
+        safetyTokens: input.safetyTokens,
+        growthTokens,
+        urgency,
+        latestStartTokens: Math.floor(latestStartTokens),
+        recommendedAtTokens,
+        currentUnitCost,
+        bestUnitCost,
+        confidence:
+            input.growthTokens === undefined
+                ? ("cold_start" as const)
+                : ("observed_growth" as const),
     };
 }
+export type ScheduledCompactionPlan = ReturnType<typeof planScheduledCompaction>;
 
 export interface ReleaseCacheEvidence {
     readonly routeSignature: string;
@@ -367,8 +342,6 @@ export interface ReleaseCacheEvidence {
     readonly usageAtMs: number;
     readonly cacheReadTokens: number;
 }
-
-/** TTL is an explicit heuristic, anchored to a same-route cache HIT, never a miss. */
 export function cacheExpiryEvidence(
     evidence: ReleaseCacheEvidence | null | undefined,
     nowMs: number,
@@ -389,83 +362,105 @@ export function cacheExpiryEvidence(
         nowMs - evidence.usageAtMs >= ttlMs
     );
 }
-
 export type ReleaseOpportunity = SchedulingSafetyReason | "summary" | "rebuild";
-export type ReleaseBatchReason =
-    | "no_releases"
-    | "active_compaction"
-    | "hot_cache"
-    | "min_release"
-    | "cache_expired"
-    | "max_wait"
-    | "backlog_watermark"
-    | `opportunity_${ReleaseOpportunity}`;
+export interface ReleaseCandidate {
+    readonly seq: number;
+    readonly savingTokens: number;
+    readonly replacementTokens: number;
+    /** Existing measured suffix strictly after this message. */
+    readonly suffixTokens: number;
+}
 export interface ReleaseBatchInput {
     readonly revision: number;
     readonly totalTokens: number;
-    /** Net savings of complete native replacements; price overlapping owners once. */
-    readonly releaseTokens: number;
-    readonly releaseCount: number;
-    readonly oldestWaitSteps: number;
+    readonly candidates: readonly ReleaseCandidate[];
+    readonly targetTokens?: number;
+    readonly safetyTokens?: number;
     readonly activeCompaction?: boolean;
     readonly opportunity?: ReleaseOpportunity;
     readonly cache?: ReleaseCacheEvidence | null;
     readonly nowMs: number;
 }
-export interface ReleaseBatchPlan {
-    readonly revision: number;
-    readonly decision: "execute" | "wait";
-    readonly reason: ReleaseBatchReason;
-    readonly cacheExpired: boolean;
-    readonly releaseTokens: number;
-    readonly releaseCount: number;
-    readonly oldestWaitSteps: number;
-}
-
-/** Marks alone never create a paid rebuild; this planner cannot mutate a session. */
-export function planReleaseBatch(
-    input: ReleaseBatchInput,
-    config: Partial<SchedulingPolicy> = {},
-): ReleaseBatchPlan {
+export function planReleaseBatch(input: ReleaseBatchInput, config: Partial<SchedulingPolicy> = {}) {
     const policy = resolveSchedulingPolicy(config);
-    for (const key of [
-        "revision",
-        "totalTokens",
-        "releaseTokens",
-        "releaseCount",
-        "oldestWaitSteps",
-    ] as const)
-        checkCount(input[key], key);
+    checkCount(input.revision, "revision");
+    checkCount(input.totalTokens, "totalTokens");
     const cacheExpired = cacheExpiryEvidence(input.cache, input.nowMs, policy.cacheTtlMs);
-    let reason: ReleaseBatchReason;
-    let decision: ReleaseBatchPlan["decision"] = "wait";
-    if (input.activeCompaction) reason = "active_compaction";
-    else if (input.releaseCount === 0) reason = "no_releases";
-    else if (input.opportunity !== undefined) {
-        reason = `opportunity_${input.opportunity}`;
-        decision = "execute";
-    } else if (input.releaseTokens === 0) reason = "min_release";
-    else if (input.oldestWaitSteps >= policy.releaseMaxWaitSteps) {
-        reason = "max_wait";
-        decision = "execute";
-    } else if (input.releaseTokens < policy.releaseMinTokens) reason = "min_release";
-    else if (
-        input.totalTokens > 0 &&
-        input.releaseTokens / input.totalTokens >= policy.releaseBacklogRatio
-    ) {
-        reason = "backlog_watermark";
-        decision = "execute";
-    } else if (cacheExpired) {
-        reason = "cache_expired";
-        decision = "execute";
-    } else reason = "hot_cache";
+    const seen = new Set<number>();
+    const candidates = [...input.candidates].sort(
+        (a, b) => a.suffixTokens - b.suffixTokens || b.seq - a.seq,
+    );
+    for (const candidate of candidates) {
+        for (const key of ["seq", "savingTokens", "replacementTokens", "suffixTokens"] as const)
+            checkCount(candidate[key], key);
+        if (seen.has(candidate.seq)) throw new RangeError("duplicate release replacement");
+        seen.add(candidate.seq);
+    }
+    const r = policy.cacheReadRatio;
+    const target = input.targetTokens ?? input.totalTokens;
+    const safety = input.safetyTokens ?? Math.max(target + 1, input.totalTokens + 1);
+    const urgency = Math.max(
+        0,
+        Math.min(1, (input.totalTokens - target) / Math.max(1, safety - target)),
+    );
+    let selectedSeqs: number[] = [];
+    let releaseTokens = 0;
+    let rebuildTokens = 0;
+    // Keep nonpositive replacements deferred, including negative deltas clamped by the caller.
+    // Their original bodies remain in suffixTokens and must not receive a savings deduction.
+    const beneficial = candidates.filter((candidate) => candidate.savingTokens > 0);
+    // Evaluate suffix batches, allowing cheap recent replacements past an expensive older mark.
+    let saving = 0;
+    for (let index = 0; index < beneficial.length; index++) {
+        const candidate = beneficial[index]!;
+        saving += candidate.savingTokens;
+        const suffix =
+            Math.max(0, candidate.suffixTokens - (saving - candidate.savingTokens)) +
+            candidate.replacementTokens;
+        const penalty = suffix * (cacheExpired ? 0 : 1 - r);
+        const recent = suffix <= Math.max(1, Math.min(target * 0.025, saving));
+        if (
+            saving > 0 &&
+            (input.opportunity !== undefined ||
+                cacheExpired ||
+                recent ||
+                penalty * (1 - urgency) <= r * saving)
+        ) {
+            selectedSeqs = beneficial.slice(0, index + 1).map((item) => item.seq);
+            releaseTokens = saving;
+            rebuildTokens = suffix;
+        }
+    }
+    if (input.activeCompaction) {
+        selectedSeqs = [];
+        releaseTokens = 0;
+        rebuildTokens = 0;
+    }
+    const decision = selectedSeqs.length > 0 ? ("execute" as const) : ("wait" as const);
+    const reason = input.activeCompaction
+        ? "active_compaction"
+        : candidates.length === 0
+          ? "no_releases"
+          : decision === "wait"
+            ? "await_summary"
+            : input.opportunity !== undefined
+              ? `opportunity_${input.opportunity}`
+              : cacheExpired
+                ? "cache_expired"
+                : "economical_release";
     return {
         revision: input.revision,
         decision,
         reason,
         cacheExpired,
-        releaseTokens: input.releaseTokens,
-        releaseCount: input.releaseCount,
-        oldestWaitSteps: input.oldestWaitSteps,
+        selectedSeqs,
+        releaseTokens,
+        releaseCount: selectedSeqs.length,
+        deferredCount: candidates.length - selectedSeqs.length,
+        deferredTokens:
+            candidates.reduce((sum, item) => sum + item.savingTokens, 0) - releaseTokens,
+        rebuildTokens,
+        rebuildCost: rebuildTokens * (cacheExpired ? 0 : 1 - r),
     };
 }
+export type ReleaseBatchPlan = ReturnType<typeof planReleaseBatch>;

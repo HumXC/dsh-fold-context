@@ -86,6 +86,9 @@ export async function loopFixture(root, options = {}) {
                     ? {}
                     : { inputModalities: options.inputModalities }),
                 defaultMaxTokens: 128,
+                ...(options.modelReasoning === undefined
+                    ? {}
+                    : { reasoning: options.modelReasoning }),
             };
         }
         async *stream(request) {
@@ -123,6 +126,9 @@ export async function loopFixture(root, options = {}) {
                             ? "tool-calls"
                             : "stop"),
                 },
+                ...(response?.replayState === undefined
+                    ? {}
+                    : { replayState: response.replayState }),
             };
         }
     }
@@ -132,26 +138,38 @@ export async function loopFixture(root, options = {}) {
         root: join(root, "sessions"),
         compression: "none",
     });
-    mountCompression(ctx, {
-        compaction: {
-            auto: options.auto ?? false,
-            headroomTokens: 0,
-            maxTokens: 128,
-            retainTokens: 512,
-            thresholdRatio: 0.5,
-            compactionRetries: 0,
-            ...options.compaction,
+    const compressionConfig = {
+        policy: {
+            compaction: {
+                auto: options.auto ?? false,
+                summaryMaxTokens: 128,
+                ...options.compaction,
+            },
+            summary: {
+                reasoning: options.reasoning ?? "omit-from-summary",
+                images: options.images ?? "auto",
+            },
+            scheduling: options.scheduling ?? {},
+            reminders: options.reminders ?? {},
         },
-        summary: { reasoning: options.reasoning ?? "omit-from-summary" },
         summaryModels: {
             get: () =>
                 options.summaryModels ?? [
                     { provider: "test", model: "summary-mock", preferWhenSessionMatches: true },
                 ],
         },
-        release: { catalogLimit: 32 },
-        scheduling: options.scheduling ?? {},
-    });
+    };
+    let compressionFiber;
+    let compressionCtx = ctx;
+    if (options.isolatedCompression) {
+        compressionFiber = ctx.plugin((featureCtx) => {
+            compressionCtx = featureCtx;
+            mountCompression(featureCtx, compressionConfig);
+        });
+        await compressionFiber.inertia;
+    } else {
+        mountCompression(ctx, compressionConfig);
+    }
     for (const [name, execute] of Object.entries(options.tools ?? {}))
         ctx.tools.register(
             defineTool({
@@ -177,12 +195,18 @@ export async function loopFixture(root, options = {}) {
         sessions,
         query,
         persistence,
-        engine: ctx.compaction,
+        engine: compressionCtx.compaction,
         originalCalls,
         attachments: ctx.get("attachments"),
         requests,
         summaries,
         root,
+        disposeCompression: async () => {
+            if (!compressionFiber)
+                throw new Error("fixture requires isolatedCompression to unload only compression");
+            await compressionFiber.dispose();
+            await compressionFiber.inertia;
+        },
         create: async (extra = {}) => {
             const handle = await ctx.agents.create({
                 sessionId: SessionId(randomUUID()),
@@ -193,8 +217,12 @@ export async function loopFixture(root, options = {}) {
             handles.push(handle);
             return handle;
         },
-        resume: async (sessionId) => {
-            const handle = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions });
+        resume: async (sessionId, extra = {}) => {
+            const handle = await ctx.agents.resume({
+                resumeSessionId: sessionId,
+                agentOptions,
+                ...extra,
+            });
             handles.push(handle);
             return handle;
         },

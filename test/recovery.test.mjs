@@ -20,7 +20,7 @@ test("released Unicode originals expand exactly through bounded pages without un
     const event = f.toolRound("read", original);
     const id = f.idFor(event);
     await f.invoke("context_release", { ids: [Number(id)], reason: "Consumed" });
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     assert.equal(f.engine.state(f.session).entries[0].status, "released");
     const surface = [...f.session.surface.nodes];
     let offset = 0;

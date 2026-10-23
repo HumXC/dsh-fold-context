@@ -20,6 +20,9 @@ import { FoldContextSettings } from "../lib/integration/settings.js";
 export async function fixture(options = {}) {
     const ctx = new Context();
     const sessions = new SessionStore(ctx);
+    const querySessions = new Map();
+    const getSession = sessions.get.bind(sessions);
+    sessions.get = (id) => querySessions.get(id) ?? getSession(id);
     new SessionProjectionRegistry(ctx);
     const query = new LocalSessionQuery(ctx);
     const meter = new TokenMeter(ctx);
@@ -72,15 +75,17 @@ export async function fixture(options = {}) {
             { get: () => options.profileSettings.policyOverrides },
         );
     const fiber = ctx.plugin(foldContext, {
-        compaction: { auto: false, headroomTokens: 0, maxTokens: 1024, ...options.compaction },
-        summaryModels: options.summaryModels ?? [{ provider: "test", model: "summary-fixture" }],
-        release: { catalogLimit: 32 },
-        scheduling: options.scheduling ?? {},
-        reminders: options.reminders ?? {},
-        summary: {
-            reasoning: options.reasoning ?? "omit-from-summary",
-            images: options.images ?? "auto",
+        policy: {
+            compaction: { auto: false, summaryMaxTokens: 1024, ...options.compaction },
+
+            scheduling: options.scheduling ?? {},
+            reminders: options.reminders ?? {},
+            summary: {
+                reasoning: options.reasoning ?? "omit-from-summary",
+                images: options.images ?? "auto",
+            },
         },
+        summaryModels: options.summaryModels ?? [{ provider: "test", model: "summary-fixture" }],
     });
     await fiber.await();
     const engine = ctx.compaction;
@@ -90,6 +95,7 @@ export async function fixture(options = {}) {
         reason: "initial",
     });
     const agent = {
+        ctx,
         session,
         options: { provider: "test", model: "fixture" },
         runMaintenance: (task) => task(new AbortController().signal),
@@ -200,6 +206,16 @@ export async function fixture(options = {}) {
         agent,
         meter,
         query,
+        withSessionQuery: async (observed, task) => {
+            const previous = querySessions.get(observed.id);
+            querySessions.set(observed.id, observed);
+            try {
+                return await task();
+            } finally {
+                if (previous === undefined) querySessions.delete(observed.id);
+                else querySessions.set(observed.id, previous);
+            }
+        },
         calls,
         llm,
         appendUser,

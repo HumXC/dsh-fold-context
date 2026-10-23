@@ -206,10 +206,10 @@ test("real inline release replaces only the tool body before recovery without an
     );
 });
 
-test("real eligible checkpoint request runs below threshold and search discovers folded evidence", async (t) => {
+test("real eligible checkpoint request runs below the safety boundary and search discovers folded evidence", async (t) => {
     const f = await setup(t, {
-        compaction: { retainTokens: 0 },
-        scheduling: { minIntervalSteps: 0 },
+        compaction: { targetTokens: 64, cacheReadRatio: 1 },
+        scheduling: { summaryInputRatio: 0.01, summaryOutputRatio: 0.01 },
         tools: { probe_read: () => "SUMMARY_LOOP_HIDDEN ".repeat(1500) },
         responses: [
             call("probe_read"),

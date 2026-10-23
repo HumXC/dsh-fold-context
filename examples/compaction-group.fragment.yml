@@ -17,42 +17,22 @@
     - id: fold-context
       name: dsh-fold-context
       config:
-        compaction:
-          auto: true # false 关闭普通压力与 backlog 摘要；独立 release、溢出与显式请求仍可运行
-          thresholdRatio: 0.8
-          retainRatio: 0.16
-          headroomTokens: 65536
-        scheduling:
-          enabled: true # false 使显式 context_compact 沿用旧的强制摘要路径
-          proactive: true # false 只关闭低压力 queued-release backlog
-          minIntervalSteps: 8
-          minSavingsTokens: 2048
-          minSavingsRatio: 0.2
-          expectedSummaryRatio: 0.2
-          paybackTurns: 24
-          # HEURISTIC：归一化未缓存 token 成本，不是供应商费用或缓存 TTL。
-          # 未知缓存保守假定前缀已缓存；实际压力/溢出与用户 /compact 绕过经济门槛。
-          cacheReadRatio: 0.1
-          summaryInputRatio: 1
-          summaryOutputRatio: 1
-        reminders:
-          enabled: true
-          minAgeSteps: 2 # 纯 context_* 管理步骤不推进计数
-          largeOutputTokens: 8000 # 仅用于候选排序
-          backlogTokens: 16000
-          staleTokens: 4000
-          staleSteps: 8
-          pressureRatio: 0.8 # 相对于官方有效压力阈值
-          minIntervalSteps: 6
-          pressureIntervalSteps: 4
-          ignoredBackoffSteps: [12, 24]
-          rearmGrowthTokens: 8000
-          maxCandidates: 5
-        summary:
-          reasoning: omit-from-summary
-          images: auto # 模型不支持图片时传引用；引用投影优先于原生前缀缓存复用
-        release:
-          catalogLimit: 32 # 按需目录 1–128；准入 notice 最多另附 8 条语义变化
+        policy:
+          compaction:
+            auto: true # false 只停止无申请的常规主动摘要，保留排队申请和安全恢复
+            cacheReadRatio: 0.1 # 缓存输入单价 / 未缓存输入单价
+            summaryMaxTokens: 8192
+            # targetTokens: 170000 # 可选绝对目标；省略时自动估算
+            modelPolicies: [] # 可按 provider/model 覆盖目标和缓存比
+          scheduling:
+            summaryInputRatio: 1
+            summaryOutputRatio: 1
+            cacheTtlMs: 0 # 未知供应商 TTL 时保持关闭
+          reminders:
+            enabled: true
+          summary:
+            reasoning: omit-from-summary
+            images: auto
     - id: command-compact
       name: "@deepseek-ai/dsh-command-compact"
     - id: tool-result-pruner

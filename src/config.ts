@@ -1,74 +1,43 @@
 import z from "@deepseek-ai/schemastery";
 
-/** Fold owns its configuration vocabulary; the official engine only executes it. */
+/** User policy; native engine execution options are derived separately. */
 export interface FoldCompactionPolicy {
-    thresholdRatio?: number;
-    headroomTokens?: number;
-    retainRatio?: number;
-    retainTokens?: number;
-    maxTokens?: number;
-    compactionRetries?: number;
-    maxOverflowRetries?: number;
+    targetTokens?: number;
+    cacheReadRatio?: number;
 }
 export interface FoldCompactionConfig extends FoldCompactionPolicy {
     auto?: boolean;
+    summaryMaxTokens?: number;
     modelPolicies?: (FoldCompactionPolicy & { provider: string; model: string })[];
 }
-const policyFields = {
-    thresholdRatio: z.number().min(Number.MIN_VALUE).max(1),
-    headroomTokens: z.number().step(1).min(0),
-    retainRatio: z.number().min(0).max(1),
-    retainTokens: z.number().step(1).min(0),
-    maxTokens: z.number().step(1).min(1),
-    compactionRetries: z.number().step(1).min(0),
-    maxOverflowRetries: z.number().step(1).min(0),
-};
-// Keep mapped inputs named instead of exposing a transitive Dict import in declarations.
-type ModelPolicyFields = typeof policyFields & {
-    provider: Schemastery<string, string, "defined">;
-    model: Schemastery<string, string, "defined">;
-};
-type CompactionFields = typeof policyFields & {
-    auto: Schemastery<boolean>;
-    modelPolicies: Schemastery<
-        Schemastery.ObjectS<ModelPolicyFields>[],
-        Schemastery.ObjectT<ModelPolicyFields>[]
-    >;
-};
-export const foldCompactionSchema: Schemastery<
-    Schemastery.ObjectS<CompactionFields>,
-    Schemastery.ObjectT<CompactionFields>
-> = z.object({
-    ...policyFields,
-    auto: z.boolean(),
-    modelPolicies: z.array(
-        z.object({
-            provider: z.string().min(1).required(),
-            model: z.string().min(1).required(),
-            ...policyFields,
-        }),
-    ),
-});
 export const summaryModelConfigSchema = z.object({
     provider: z.string().min(1).required(),
     model: z.string().min(1).required(),
     reasoningEffort: z.string().min(1),
     preferWhenSessionMatches: z.boolean().default(true),
+    useSessionAgent: z.boolean().default(false),
 });
 
-export function resolveFoldCompactionConfig(config: FoldCompactionConfig): FoldCompactionConfig {
-    const headroomTokens = config.headroomTokens ?? 65536;
+export function resolveFoldCompactionConfig(config: FoldCompactionConfig) {
     return {
-        thresholdRatio: 0.8,
-        headroomTokens,
-        maxTokens: Math.max(1, headroomTokens),
+        auto: true,
+        cacheReadRatio: 0.1,
+        summaryMaxTokens: 8192,
+        modelPolicies: [],
+        ...config,
+    };
+}
+/** Only the adapter speaks the native engine's execution vocabulary. */
+export function nativeCompactionConfig(config: FoldCompactionConfig) {
+    const resolved = resolveFoldCompactionConfig(config);
+    return {
+        auto: true,
+        thresholdRatio: 0.9,
+        retainRatio: 1 / 6,
+        headroomTokens: resolved.summaryMaxTokens,
+        maxTokens: resolved.summaryMaxTokens,
         compactionRetries: 1,
         maxOverflowRetries: 1,
         modelPolicies: [],
-        auto: true,
-        ...(config.retainTokens === undefined && config.retainRatio === undefined
-            ? { retainRatio: 0.16 }
-            : {}),
-        ...config,
     };
 }

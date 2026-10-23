@@ -11,6 +11,7 @@ const route = (provider, model, extra = {}) => ({
     provider,
     model,
     preferWhenSessionMatches: true,
+    useSessionAgent: false,
     ...extra,
 });
 // Exact ModelCatalog wire shape from dsh-api-session-controller/types.d.ts.
@@ -43,7 +44,7 @@ const catalog = {
 const descriptor = (rows = [], revision = 7, ns = "fold-context-ui") => ({
     ns,
     revision,
-    value: { summaryModels: rows },
+    value: { summaryModels: rows, policyOverrides: policyDefaults() },
     schema: {},
     applies: "live",
     secrets: [],
@@ -217,6 +218,13 @@ const button = (tree, name) =>
             node.type === "button" &&
             (node.props["aria-label"] === name || visibleText(node) === name),
     );
+const switchControl = (tree, label) =>
+    nodes(tree).find(
+        (node) =>
+            node.type === "input" &&
+            node.props.role === "switch" &&
+            node.props["aria-label"] === label,
+    );
 const deferred = () => {
     let resolve;
     const promise = new Promise((done) => {
@@ -281,12 +289,118 @@ test("catalog uses provider group ids and nested reasoning.efforts with no hardc
     );
 });
 
-test("add, dependent choices, toggle, reorder and delete stage one revision-fenced summaryModels mutation", async () => {
+test("omitted session-Agent flags default to off without changing saved settings", async () => {
+    const legacy = {
+        provider: "openai",
+        model: "gpt",
+        reasoningEffort: "low",
+        preferWhenSessionMatches: false,
+    };
+    const f = fixture([legacy], { revision: 11 });
+    await f.controller.start();
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), [
+        route("openai", "gpt", { reasoningEffort: "low", preferWhenSessionMatches: false }),
+    ]);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    assert.equal(f.controller.canSave(), false);
+    assert.deepEqual(f.getEntry().value.summaryModels, [legacy]);
+    assert.equal(Object.hasOwn(f.getEntry().value.summaryModels[0], "useSessionAgent"), false);
+    const control = switchControl(
+        f.client.render(f.controller),
+        "Summary model 1 · Use the session Agent for summaries",
+    );
+    assert.equal(control.props.checked, false);
+    assert.equal(control.props["aria-checked"], false);
+    assert.equal(f.calls.length, 0, "loading settings must not write the normalized default");
+    f.controller.change(0, "preferWhenSessionMatches", true);
+    assert.equal(await f.controller.save(), true);
+    assert.equal(f.calls[0].revision, 11);
+    assert.deepEqual(f.calls[0].ops[0].value, [route("openai", "gpt", { reasoningEffort: "low" })]);
+    assert.equal(f.controller.getSnapshot().revision, 12);
+});
+
+test("session-Agent toggles save real booleans with revision fencing and preserve other route fields", async () => {
+    const initial = [
+        route("openai", "gpt", { reasoningEffort: "low", preferWhenSessionMatches: false }),
+        route("deepseek", "flash"),
+    ];
+    const f = fixture(initial, { revision: 19, ns: "include:fold-context-ui" });
+    await f.controller.start();
+    const rowKeys = copy(f.controller.getSnapshot().rowKeys);
+    const label = "Summary model 1 · Use the session Agent for summaries";
+    switchControl(f.client.render(f.controller), label).props.onChange({
+        target: { checked: true },
+    });
+    const enabled = [{ ...initial[0], useSessionAgent: true }, initial[1]];
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), enabled);
+    assert.deepEqual(copy(f.controller.getSnapshot().rowKeys), rowKeys);
+    assert.equal(f.controller.getSnapshot().revision, 19);
+    assert.equal(f.calls.length, 0);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[0], {
+        ns: "include:fold-context-ui",
+        revision: 19,
+        ops: [
+            { op: "set", path: ["summaryModels"], value: enabled },
+            { op: "set", path: ["policyOverrides"], value: policyDefaults() },
+        ],
+    });
+    assert.deepEqual(f.getEntry().value.summaryModels, enabled);
+    assert.equal(typeof f.getEntry().value.summaryModels[0].useSessionAgent, "boolean");
+    assert.equal(f.controller.getSnapshot().revision, 20);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    const control = switchControl(f.client.render(f.controller), label);
+    assert.equal(control.props.checked, true);
+    assert.equal(control.props["aria-checked"], true);
+    control.props.onChange({ target: { checked: false } });
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), initial);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[1], {
+        ns: "include:fold-context-ui",
+        revision: 20,
+        ops: [
+            { op: "set", path: ["summaryModels"], value: initial },
+            { op: "set", path: ["policyOverrides"], value: policyDefaults() },
+        ],
+    });
+    assert.deepEqual(f.getEntry().value.summaryModels, initial);
+    assert.equal(typeof f.getEntry().value.summaryModels[0].useSessionAgent, "boolean");
+    assert.equal(f.calls[0].ops[0].value[0].useSessionAgent, true);
+    assert.deepEqual(copy(f.controller.getSnapshot().rowKeys), rowKeys);
+    assert.equal(f.controller.getSnapshot().revision, 21);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+});
+
+test("nonboolean session-Agent flags reject settings without coercing or overwriting them", async (t) => {
+    for (const value of ["true", "false", 1, 0, null, {}, []]) {
+        await t.test(JSON.stringify(value), async () => {
+            const invalid = route("deepseek", "flash", { useSessionAgent: value });
+            const f = fixture([invalid]);
+            await f.controller.start();
+            assert.equal(f.controller.getSnapshot().settingsStatus, "error");
+            assert.match(visibleText(f.client.render(f.controller)), /Invalid summary settings/);
+            assert.equal(f.controller.canSave(), false);
+            assert.equal(await f.controller.save(), false);
+            assert.deepEqual(f.getEntry().value.summaryModels, [invalid]);
+            assert.equal(f.calls.length, 0);
+        });
+    }
+});
+
+test("add, dependent choices, toggle, reorder and delete stage one revision-fenced settings mutation", async () => {
     const f = fixture([route("deepseek", "flash")]);
     await f.controller.start();
     const originalKeys = [...f.controller.getSnapshot().rowKeys];
     f.controller.add();
     assert.equal(f.controller.getSnapshot().rows[1].preferWhenSessionMatches, true);
+    assert.equal(f.controller.getSnapshot().rows[1].useSessionAgent, false);
+    assert.equal(
+        switchControl(
+            f.client.render(f.controller),
+            "Summary model 2 · Use the session Agent for summaries",
+        ).props.checked,
+        false,
+    );
     assert.equal(f.controller.canSave(), false);
     f.controller.change(1, "provider", "openai");
     f.controller.change(1, "model", "gpt");
@@ -313,6 +427,7 @@ test("add, dependent choices, toggle, reorder and delete stage one revision-fenc
                         route("deepseek", "flash"),
                     ],
                 },
+                { op: "set", path: ["policyOverrides"], value: policyDefaults() },
             ],
         },
     ]);
@@ -379,9 +494,27 @@ test("page controls have distinct accessible names, matching labels and stable b
     for (const input of nodes(english).filter((node) => ["input", "select"].includes(node.type)))
         assert.ok(labels.some((label) => label.props.htmlFor === input.props.id));
     const switches = nodes(english).filter((node) => node.props.role === "switch");
-    assert.equal(switches.length, 2);
-    assert.equal(switches[1].props["aria-checked"], true);
-    switches[1].props.onChange({ target: { checked: false } });
+    assert.equal(switches.length, 4);
+    assert.equal(new Set(switches.map((control) => control.props.id)).size, 4);
+    assert.equal(new Set(switches.map((control) => control.props["aria-label"])).size, 4);
+    const firstPriority = switchControl(
+        english,
+        "Summary model 1 · Prioritize when matching the session",
+    );
+    const secondPriority = switchControl(
+        english,
+        "Summary model 2 · Prioritize when matching the session",
+    );
+    assert.equal(firstPriority.props["aria-checked"], true);
+    assert.equal(secondPriority.props["aria-checked"], true);
+    for (const index of [1, 2])
+        assert.equal(
+            switchControl(english, `Summary model ${index} · Use the session Agent for summaries`)
+                .props["aria-checked"],
+            false,
+        );
+    secondPriority.props.onChange({ target: { checked: false } });
+    assert.equal(f.controller.getSnapshot().rows[1].preferWhenSessionMatches, false);
     button(f.client.render(f.controller), "Summary model 2 · Move up").props.onClick();
     assert.equal(f.controller.getSnapshot().rows[0].model, "gpt");
     f.client.setLanguage("zh");
@@ -390,6 +523,48 @@ test("page controls have distinct accessible names, matching labels and stable b
     assert.match(visibleText(chinese), /自动（供应商默认值）/);
     assert.ok(button(chinese, "摘要模型 1 · 删除"));
     assert.doesNotMatch(visibleText(chinese), /summarySettings[A-Z]/);
+});
+
+test("session-Agent switches pair distinct ids, labels, checked state and help text in both locales", async () => {
+    const f = fixture([
+        route("deepseek", "flash"),
+        route("openai", "gpt", { useSessionAgent: true, preferWhenSessionMatches: false }),
+    ]);
+    await f.controller.start();
+    for (const locale of ["en", "zh"]) {
+        f.client.setLanguage(locale);
+        const tree = f.client.render(f.controller);
+        const all = nodes(tree);
+        const text = locale === "zh" ? "沿用会话生成摘要" : "Use the session Agent for summaries";
+        const controls = [1, 2].map((index) =>
+            switchControl(
+                tree,
+                `${locale === "zh" ? "摘要模型" : "Summary model"} ${index} · ${text}`,
+            ),
+        );
+        assert.equal(new Set(controls.map((control) => control.props.id)).size, 2);
+        assert.equal(new Set(controls.map((control) => control.props["aria-describedby"])).size, 2);
+        for (const [index, control] of controls.entries()) {
+            assert.equal(control.props.type, "checkbox");
+            assert.equal(control.props.checked, index === 1);
+            assert.equal(control.props["aria-checked"], index === 1);
+            assert.equal(control.props.disabled, false);
+            assert.ok(control.props.id);
+            const labels = all.filter(
+                (node) => node.type === "label" && node.props.htmlFor === control.props.id,
+            );
+            assert.equal(labels.length, 1);
+            assert.equal(visibleText(labels[0]).trim(), text);
+            const help = all.find((node) => node.props?.id === control.props["aria-describedby"]);
+            assert.equal(help?.type, "p");
+            assert.match(visibleText(help), locale === "zh" ? /默认关闭/ : /Off by default/);
+            assert.match(
+                visibleText(help),
+                locale === "zh" ? /匹配当前会话/ : /session provider and model/,
+            );
+        }
+        assert.doesNotMatch(visibleText(tree), /summarySettings[A-Z]/);
+    }
 });
 
 test("remote configuration changes retain the draft and original revision until explicit reload", async () => {
@@ -405,6 +580,10 @@ test("remote configuration changes retain the draft and original revision until 
     assert.equal(f.calls.length, 0);
     const tree = f.client.render(f.controller);
     assert.match(visibleText(tree), /Another page changed these settings/);
+    const control = switchControl(tree, "Summary model 1 · Use the session Agent for summaries");
+    assert.equal(control.props.disabled, true);
+    control.props.onChange({ target: { checked: true } });
+    assert.equal(f.controller.getSnapshot().rows[0].useSessionAgent, false);
     await button(tree, "Reload and discard unsaved changes").props.onClick();
     assert.equal(f.controller.getSnapshot().revision, 8);
     assert.equal(f.controller.getSnapshot().rows[0].provider, "openai");
@@ -462,6 +641,14 @@ test("suffix namespace is persisted exactly and read-only or malformed settings 
     assert.equal(await readOnly.controller.save(), false);
     assert.equal(readOnly.calls.length, 0);
     assert.match(visibleText(readOnly.client.render(readOnly.controller)), /read-only/);
+    const control = switchControl(
+        readOnly.client.render(readOnly.controller),
+        "Summary model 1 · Use the session Agent for summaries",
+    );
+    assert.equal(control.props.disabled, true);
+    control.props.onChange({ target: { checked: true } });
+    assert.equal(readOnly.controller.getSnapshot().rows[0].useSessionAgent, false);
+    assert.equal(readOnly.calls.length, 0);
     const malformed = fixture([{ provider: "openai", model: "gpt", reasoningEffort: 42 }]);
     await malformed.controller.start();
     assert.equal(malformed.controller.getSnapshot().settingsStatus, "error");
@@ -484,13 +671,24 @@ test("overlapping saves serialize at the UI boundary and cannot mutate the submi
     };
     const save = f.controller.save();
     assert.equal(f.controller.getSnapshot().saving, true);
+    const before = copy(f.controller.getSnapshot().rows);
+    const control = switchControl(
+        f.client.render(f.controller),
+        "Summary model 1 · Use the session Agent for summaries",
+    );
+    assert.equal(control.props.disabled, true);
+    control.props.onChange({ target: { checked: true } });
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), before);
     assert.equal(await f.controller.save(), false);
     f.controller.remove(0);
     assert.equal(f.controller.getSnapshot().rows.length, 1);
     pending.resolve(ok(descriptor(copy(request.ops[0].value), 8)));
     assert.equal(await save, true);
     assert.equal(f.controller.getSnapshot().saved, true);
-    assert.match(visibleText(f.client.render(f.controller)), /The next summary will use/);
+    assert.match(
+        visibleText(f.client.render(f.controller)),
+        /Saved\. Changes apply at the next safe decision boundary/,
+    );
 });
 
 test("late reads cannot replace newer catalog state and teardown ignores pending settlements", async () => {
@@ -588,156 +786,298 @@ test("mounted page subscribes to configuration, adapter and reconnect events and
     assert.equal(f.calls.length, 0, "mounting, refreshing and unmounting must never save settings");
 });
 
-const policyDefaults = () => copy(load().plugin.normalizePolicyOverrides({}));
+function policyDefaults() {
+    return copy(load().plugin.normalizePolicyOverrides({}));
+}
 
-test("all runtime policy controls render with unique labels, inheritance and both locales", async () => {
-    const f = fixture([route("deepseek", "flash"), route("openai", "gpt")], {
-        policies: policyDefaults(),
-    });
+test("all policy controls render inherited, editable and localized without group switches", async () => {
+    const f = fixture([route("deepseek", "flash"), route("openai", "gpt")]);
     await f.controller.start();
+    assert.equal(f.controller.getSnapshot().dirty, false);
     for (const locale of ["en", "zh"]) {
-        const tree = f.client.render(f.controller, locale);
+        f.client.setLanguage(locale);
+        const tree = f.client.render(f.controller);
         const all = nodes(tree);
-        assert.equal(all.filter((node) => node.type === "details").length, 5);
+        assert.equal(all.filter((node) => node.type === "details").length, 4);
         const controls = all.filter(
             (node) =>
                 ["input", "select"].includes(node.type) && node.props.id?.includes("-policy-"),
         );
-        assert.equal(controls.filter((node) => !node.props.id.endsWith("-mode")).length, 37);
-        assert.equal(new Set(controls.map((node) => node.props.id)).size, controls.length);
-        assert.equal(
-            new Set(controls.map((node) => node.props["aria-label"])).size,
-            controls.length,
-        );
+        assert.equal(controls.length, 10);
+        assert.equal(new Set(controls.map((node) => node.props.id)).size, 10);
+        assert.equal(new Set(controls.map((node) => node.props["aria-label"])).size, 10);
         for (const control of controls) {
             assert.ok(
                 all.some(
                     (node) => node.type === "label" && node.props.htmlFor === control.props.id,
                 ),
             );
-            assert.equal(control.props.disabled, !control.props.id.endsWith("-mode"));
+            assert.equal(control.props.disabled, false);
+            assert.equal(control.props.value, "");
+            if (control.type === "input") assert.equal(control.props.required, false);
         }
         assert.doesNotMatch(visibleText(tree), /policy_[a-z]|policySettingsTitle/);
+        assert.match(
+            visibleText(tree),
+            locale === "zh" ? /窗口与自动摘要/ : /Window and automation/,
+        );
     }
-    f.controller.setPolicyMode("release", true);
-    f.controller.changePolicy("release", "catalogLimit", "4");
+    f.controller.changePolicy("compaction", "targetTokens", "170000");
     assert.equal(f.controller.canSave(), true);
-    f.controller.resetPolicy("release");
-    assert.equal(f.controller.getSnapshot().policyOverrides.release.values.catalogLimit, 32);
-    assert.equal(f.controller.getSnapshot().policyOverrides.release.enabled, true);
-    f.controller.setPolicyMode("release", false);
+    f.controller.resetPolicy("compaction");
+    assert.deepEqual(copy(f.controller.getSnapshot().policyOverrides.compaction), {});
     assert.equal(f.controller.getSnapshot().dirty, false);
 });
 
-test("all policy groups and the saved summary models share one revision-fenced save", async () => {
-    const routes = [route("deepseek", "flash"), route("openai", "gpt")];
-    const f = fixture(routes, { policies: policyDefaults() });
+test("boolean, enum and numeric overrides round-trip and clearing restores field inheritance", async () => {
+    const f = fixture([route("deepseek", "flash")]);
     await f.controller.start();
-    f.controller.setPolicyMode("summary", true);
-    f.controller.changePolicy("summary", "images", "references");
-    f.controller.setPolicyMode("scheduling", true);
+    const control = (id) =>
+        nodes(f.client.render(f.controller)).find((node) => node.props.id === id);
+    control("settings-policy-compaction-auto").props.onChange({ target: { value: "false" } });
+    control("settings-policy-summary-images").props.onChange({ target: { value: "references" } });
+    control("settings-policy-compaction-cacheReadRatio").props.onChange({ target: { value: "0" } });
     f.controller.changePolicy("scheduling", "cacheTtlMs", "0");
-    f.controller.setPolicyMode("reminders", true);
-    f.controller.changePolicy("reminders", "ignoredBackoffSteps", "12，24, 48");
+    f.controller.changePolicy("reminders", "enabled", false);
+    assert.equal(control("settings-policy-compaction-auto").props.value, "false");
     assert.equal(await f.controller.save(), true);
-    assert.equal(f.calls.length, 1);
-    const call = f.calls[0];
-    assert.equal(call.revision, 7);
-    assert.deepEqual(
-        call.ops.map((op) => op.path),
-        [["summaryModels"], ["policyOverrides"]],
-    );
-    assert.deepEqual(call.ops[0].value, routes);
-    assert.equal(call.ops[1].value.summary.values.images, "references");
-    assert.equal(call.ops[1].value.scheduling.values.cacheTtlMs, 0);
-    assert.deepEqual(call.ops[1].value.reminders.values.ignoredBackoffSteps, [12, 24, 48]);
-    assert.equal(f.controller.getSnapshot().dirty, false);
+    assert.deepEqual(f.calls[0].ops[1].value, {
+        compaction: { auto: false, cacheReadRatio: 0 },
+        scheduling: { cacheTtlMs: 0 },
+        summary: { images: "references" },
+        reminders: { enabled: false },
+    });
+    assert.equal(f.calls[0].revision, 7);
+    assert.deepEqual(f.calls[0].ops[0].value, [route("deepseek", "flash")]);
     assert.equal(f.controller.getSnapshot().revision, 8);
-    assert.match(visibleText(f.client.render(f.controller)), /subsequently started sessions/);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    assert.match(visibleText(f.client.render(f.controller)), /next safe decision boundary/);
+    for (const [group, key] of [
+        ["compaction", "auto"],
+        ["compaction", "cacheReadRatio"],
+        ["summary", "images"],
+        ["scheduling", "cacheTtlMs"],
+        ["reminders", "enabled"],
+    ])
+        f.controller.changePolicy(group, key, "");
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[1].ops[1].value, policyDefaults());
+    assert.equal(Object.hasOwn(f.calls[1].ops[1].value.compaction, "modelPolicies"), false);
 });
 
-test("policy validation prevents invalid saves without discarding partially entered values", async () => {
-    const f = fixture([], { policies: policyDefaults() });
+test("unrelated model edits never turn inherited policy fields or model lists into explicit overrides", async () => {
+    const f = fixture([route("deepseek", "flash")]);
     await f.controller.start();
-    f.controller.setPolicyMode("reminders", true);
-    f.controller.changePolicy("reminders", "ignoredBackoffSteps", "24, 12");
-    assert.equal(f.controller.canSave(), false);
-    assert.equal(
-        f.controller.getSnapshot().policyOverrides.reminders.values.ignoredBackoffSteps,
-        "24, 12",
-    );
-    assert.match(visibleText(f.client.render(f.controller)), /Ignored-reminder backoff steps/);
-    assert.equal(await f.controller.save(), false);
-    assert.equal(f.calls.length, 0);
-    f.controller.changePolicy("reminders", "ignoredBackoffSteps", "12, 24");
-    f.controller.setPolicyMode("release", true);
-    for (const invalid of ["", "0", "129", "1.5", "Infinity"]) {
-        f.controller.changePolicy("release", "catalogLimit", invalid);
+    f.controller.change(0, "preferWhenSessionMatches", false);
+    f.controller.change(0, "preferWhenSessionMatches", true);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    f.controller.changePolicy("compaction", "targetTokens", "   ");
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    f.controller.change(0, "useSessionAgent", true);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[0].ops[1].value, policyDefaults());
+    assert.equal(Object.hasOwn(f.calls[0].ops[1].value.compaction, "modelPolicies"), false);
+});
+
+test("policy validation retains invalid drafts and blocks saves", async () => {
+    const f = fixture();
+    await f.controller.start();
+    for (const invalid of ["0", "-1", "1.5", "Infinity", "NaN", "not-a-number"]) {
+        f.controller.changePolicy("compaction", "targetTokens", invalid);
         assert.equal(f.controller.canSave(), false, invalid);
+        assert.equal(f.controller.getSnapshot().policyOverrides.compaction.targetTokens, invalid);
+        assert.equal(await f.controller.save(), false);
     }
-    f.controller.changePolicy("release", "catalogLimit", "8");
+    assert.match(visibleText(f.client.render(f.controller)), /Target window/);
+    assert.equal(f.calls.length, 0);
+    f.controller.changePolicy("compaction", "targetTokens", "170000");
+    assert.equal(f.controller.canSave(), true);
+    f.controller.changePolicy("compaction", "cacheReadRatio", "1.01");
+    assert.equal(f.controller.canSave(), false);
+    f.controller.changePolicy("compaction", "cacheReadRatio", "0.1");
     assert.equal(f.controller.canSave(), true);
 });
 
-test("per-model policies preserve unknown routes, inherit blank fields and keep stable row order", async () => {
+test("per-model policies preserve unavailable routes, restrict fields and retain row identity", async () => {
     const policies = policyDefaults();
-    policies.compaction.enabled = true;
-    policies.compaction.values.modelPolicies = [
-        { provider: "offline", model: "old", retainTokens: 0 },
-    ];
+    policies.compaction.modelPolicies = [{ provider: "offline", model: "old", cacheReadRatio: 0 }];
     const f = fixture([], { policies });
     await f.controller.start();
-    assert.match(visibleText(f.client.render(f.controller)), /offline/);
+    assert.match(visibleText(f.client.render(f.controller)), /offline.*unavailable/i);
     const originalKey = f.controller.getSnapshot().policyRowKeys[0];
     f.controller.addPolicyModel();
     assert.equal(f.controller.canSave(), false);
     f.controller.changePolicyModel(1, "provider", "openai");
     f.controller.changePolicyModel(1, "model", "gpt");
-    f.controller.changePolicyModel(1, "headroomTokens", "64");
-    f.controller.changePolicyModel(1, "retainRatio", "");
+    f.controller.changePolicyModel(1, "targetTokens", "170000");
+    f.controller.changePolicyModel(1, "cacheReadRatio", "");
+    f.controller.changePolicyModel(1, "auto", false);
+    assert.equal(
+        Object.hasOwn(
+            f.controller.getSnapshot().policyOverrides.compaction.modelPolicies[1],
+            "auto",
+        ),
+        false,
+    );
     f.controller.movePolicyModel(1, -1);
     assert.equal(f.controller.getSnapshot().policyRowKeys[1], originalKey);
+    const modelControls = nodes(f.client.render(f.controller)).filter(
+        (node) =>
+            ["input", "select"].includes(node.type) && node.props.id?.startsWith("settings-model-"),
+    );
+    assert.equal(
+        modelControls.length,
+        8,
+        "each route has provider/model and only the two per-model fields",
+    );
     assert.equal(await f.controller.save(), true);
-    assert.deepEqual(f.calls[0].ops[1].value.compaction.values.modelPolicies, [
-        { provider: "openai", model: "gpt", headroomTokens: 64 },
-        { provider: "offline", model: "old", retainTokens: 0 },
+    assert.deepEqual(f.calls[0].ops[1].value.compaction.modelPolicies, [
+        { provider: "openai", model: "gpt", targetTokens: 170000 },
+        { provider: "offline", model: "old", cacheReadRatio: 0 },
     ]);
     f.controller.removePolicyModel(0);
     f.controller.changePolicyModel(0, "provider", "deepseek");
-    assert.equal(
-        f.controller.getSnapshot().policyOverrides.compaction.values.modelPolicies[0].model,
-        "",
-    );
+    assert.equal(f.controller.getSnapshot().policyOverrides.compaction.modelPolicies[0].model, "");
 });
 
-test("policy-only remote conflicts retain the whole draft and the original revision", async () => {
-    const f = fixture([], { policies: policyDefaults() });
+test("empty model lists explicitly override presets and list reset restores inheritance only", async () => {
+    const policies = policyDefaults();
+    policies.compaction = {
+        targetTokens: 170000,
+        modelPolicies: [{ provider: "offline", model: "old" }],
+    };
+    const f = fixture([], { policies });
     await f.controller.start();
-    f.controller.setPolicyMode("release", true);
-    f.controller.changePolicy("release", "catalogLimit", "4");
+    f.controller.removePolicyModel(0);
+    assert.match(visibleText(f.client.render(f.controller)), /empty list disables preset/);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[0].ops[1].value.compaction, {
+        targetTokens: 170000,
+        modelPolicies: [],
+    });
+    button(f.client.render(f.controller), "Inherit preset model policies").props.onClick();
+    assert.deepEqual(copy(f.controller.getSnapshot().policyRowKeys), []);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[1].ops[1].value.compaction, { targetTokens: 170000 });
+});
+
+test("duplicate per-model routes block save until corrected", async () => {
+    const f = fixture();
+    await f.controller.start();
+    for (let i = 0; i < 2; i++) {
+        f.controller.addPolicyModel();
+        f.controller.changePolicyModel(i, "provider", "openai");
+        f.controller.changePolicyModel(i, "model", "gpt");
+    }
+    assert.equal(f.controller.canSave(), false);
+    assert.match(visibleText(f.client.render(f.controller)), /Session model policy 2/);
+    f.controller.changePolicyModel(1, "model", "plain");
+    assert.equal(f.controller.canSave(), true);
+});
+
+test("policy-only remote conflicts retain draft and revision until explicit reload", async () => {
+    const f = fixture();
+    await f.controller.start();
+    f.controller.changePolicy("compaction", "targetTokens", "170000");
     const remote = descriptor([], 8);
-    remote.value.policyOverrides = policyDefaults();
-    remote.value.policyOverrides.summary.enabled = true;
+    remote.value.policyOverrides.summary.images = "references";
     f.setEntry(remote);
     await f.controller.loadSettings();
     assert.equal(f.controller.getSnapshot().conflicted, true);
     assert.equal(f.controller.getSnapshot().revision, 7);
-    assert.equal(f.controller.getSnapshot().policyOverrides.release.values.catalogLimit, "4");
+    assert.equal(f.controller.getSnapshot().policyOverrides.compaction.targetTokens, "170000");
     assert.equal(f.controller.canSave(), false);
     await f.controller.loadSettings(true);
     assert.equal(f.controller.getSnapshot().revision, 8);
-    assert.equal(f.controller.getSnapshot().policyOverrides.summary.enabled, true);
+    assert.equal(f.controller.getSnapshot().policyOverrides.summary.images, "references");
     assert.equal(f.controller.getSnapshot().dirty, false);
 });
 
-test("missing or malformed policy save receipts preserve the submitted draft", async () => {
-    const f = fixture([], { policies: policyDefaults() });
+test("policy changes are frozen during save and rejected revision receipts retain the draft", async () => {
+    const f = fixture();
     await f.controller.start();
-    f.controller.setPolicyMode("release", true);
-    f.controller.changePolicy("release", "catalogLimit", "4");
-    f.remote.settings.mutate = async () => ok(descriptor([], 8));
-    assert.equal(await f.controller.save(), false);
+    f.controller.changePolicy("compaction", "targetTokens", "170000");
+    const pending = deferred();
+    let request;
+    f.remote.settings.mutate = async (ns, ops, revision) => {
+        request = copy({ ns, ops, revision });
+        return pending.promise;
+    };
+    const saving = f.controller.save();
+    f.controller.changePolicy("compaction", "targetTokens", "180000");
+    f.controller.resetPolicy("compaction");
+    f.controller.inheritPolicyModels();
+    assert.equal(f.controller.getSnapshot().policyOverrides.compaction.targetTokens, "170000");
+    assert.equal(request.ops[1].value.compaction.targetTokens, 170000);
+    pending.resolve(ok(descriptor([], 6)));
+    assert.equal(await saving, false);
+    assert.equal(f.controller.getSnapshot().revision, 7);
     assert.equal(f.controller.getSnapshot().dirty, true);
-    assert.equal(f.controller.getSnapshot().policyOverrides.release.values.catalogLimit, "4");
-    assert.match(visibleText(f.client.render(f.controller)), /Could not save/);
+});
+
+for (const [kind, invalidate] of [
+    ["missing", (entry) => delete entry.value.policyOverrides],
+    ["undefined", (entry) => (entry.value.policyOverrides = undefined)],
+    ["null", (entry) => (entry.value.policyOverrides = null)],
+    ["array", (entry) => (entry.value.policyOverrides = [])],
+    ["invalid value", (entry) => (entry.value.policyOverrides.summary.images = "invalid")],
+    [
+        "legacy wrapper",
+        (entry) => (entry.value.policyOverrides.compaction = { enabled: true, values: {} }),
+    ],
+    ["legacy field", (entry) => (entry.value.policyOverrides.scheduling.paybackTurns = 24)],
+]) {
+    test(`${kind} policy documents reject load without saving defaults`, async () => {
+        const f = fixture([route("deepseek", "flash")]);
+        invalidate(f.getEntry());
+        await f.controller.start();
+        const state = f.controller.getSnapshot();
+        assert.equal(state.settingsStatus, "error");
+        assert.equal(state.policyOverrides, null);
+        assert.equal(f.controller.canEdit(), false);
+        assert.equal(f.controller.canSave(), false);
+        assert.equal(await f.controller.save(), false);
+        assert.equal(f.calls.length, 0);
+        if (["missing", "undefined", "null", "array"].includes(kind)) {
+            assert.equal(state.settingsError.key, "summarySettingsResponse");
+            assert.match(
+                visibleText(f.client.render(f.controller)),
+                /unrecognized settings response/,
+            );
+        }
+    });
+    test(`${kind} policy save receipts preserve draft and revision`, async () => {
+        const f = fixture();
+        await f.controller.start();
+        f.controller.changePolicy("compaction", "targetTokens", "170000");
+        f.remote.settings.mutate = async () => {
+            const entry = descriptor([], 8);
+            invalidate(entry);
+            return ok(entry);
+        };
+        assert.equal(await f.controller.save(), false);
+        const state = f.controller.getSnapshot();
+        assert.equal(state.dirty, true);
+        assert.equal(state.revision, 7);
+        assert.equal(state.saved, false);
+        assert.equal(state.policyOverrides.compaction.targetTokens, "170000");
+        assert.match(visibleText(f.client.render(f.controller)), /Could not save/);
+        if (["missing", "undefined", "null", "array"].includes(kind))
+            assert.equal(state.saveError.key, "summarySettingsResponse");
+    });
+}
+
+test("remote canonical values matching a numeric draft acknowledge the new revision without false conflict", async () => {
+    const f = fixture();
+    await f.controller.start();
+    f.controller.changePolicy("compaction", "targetTokens", "170000");
+    const remote = descriptor([], 8);
+    remote.value.policyOverrides.compaction.targetTokens = 170000;
+    f.setEntry(remote);
+    await f.controller.loadSettings();
+    assert.equal(f.controller.getSnapshot().conflicted, false);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    assert.equal(f.controller.getSnapshot().revision, 8);
+    assert.equal(f.controller.getSnapshot().policyOverrides.compaction.targetTokens, 170000);
+    assert.equal(f.calls.length, 0);
 });

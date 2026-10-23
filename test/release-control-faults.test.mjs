@@ -69,7 +69,7 @@ test("PTC dispatches queue releases without becoming cleanup candidates", async 
         releaseControlProjection.init(),
     );
     assert.deepEqual(cold.groups, []);
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
     const step =
         1 +
@@ -184,7 +184,7 @@ test("multiple concurrent release subcalls settle their targets and retain the P
         2,
     );
     assert.equal(JSON.stringify(outcome.value).includes("reason"), false);
-    commitForcedReleases(f);
+    await commitForcedReleases(f);
     await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
     const step =
         1 +
@@ -256,7 +256,7 @@ for (const mode of ["native", "ptc"])
                 sourceEventSeqs: [original.seq],
             },
         );
-        commitForcedReleases(f);
+        await commitForcedReleases(f);
         await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal);
         const step =
             1 +

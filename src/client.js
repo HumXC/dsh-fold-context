@@ -98,29 +98,34 @@ window.__ModuleLoader__.load({
             active_compaction: "已有摘要事务正在执行",
             no_business_evidence: "历史前缀没有新的业务证据",
             ineffective_compaction: "上次摘要未降低实际压力",
-            paybackRequests: "预计回本请求 / 策略上限",
+            unitCosts: "当前 / 最佳单位成本",
+            startWindow: "建议 / 最迟启动 tokens",
+            targetWindow: "目标 / 安全 tokens",
+            confidence: "增长估计依据",
+            cold_start: "冷启动估计",
+            observed_growth: "已有增长观测",
             upfrontCost: "摘要与重建成本",
             protectedInput: "固定提示与受保护输入",
             cacheBasis: "缓存估算来源",
             assumed_cached: "未知命中情况，保守假定已缓存",
             primary_usage: "最近主请求的用量报告",
-            noFinitePayback: "无法预计有限回本周期",
             costUnits: "归一化 tokens（估算）",
             nextAction: "下一步",
             checkModelAction: "检查会话路由与模型 contextWindow 配置。",
             checkFailureAction: "检查最近摘要错误并修正原因，原请求会保留。",
-            checkPolicyAction: "检查 auto、enabled 和 proactive 配置。",
+            checkPolicyAction: "检查自动摘要设置；排队申请和安全恢复仍然可用。",
             verifyUsageAction: "摘要后查看下一次主请求用量，确认压力是否下降。",
             boundaryAction: "等待下一个可执行的步骤边界。",
             waitSummaryAction: "等待当前摘要事务完成。",
             continueAction: "继续当前任务；排队请求会在后续边界重新评估。",
             fixed_overhead: "固定提示与工具定义已达到压力阈值，仅压缩历史无法达标。",
             protected_input: "固定提示与当前任务尾部已达到压力阈值，需缩短固定输入或拆分当前任务。",
-            not_paid_back: "尚未达到预计回本门槛",
-            min_interval: "尚未达到最小处理间隔",
+            cost_optimum: "达到预计成本较优的位置",
+            cost_deferred: "等待成本更低的摘要时机",
+            window_pressure: "达到成本调整后的窗口边界",
+            no_request: "没有待处理意图且尚未到目标窗口",
+            no_savings: "预计净节省不足",
             insufficient_savings: "预计节省不足",
-            min_savings: "预计节省不足",
-            min_ratio: "预计节省比例不足",
             no_selection: "没有同时满足保留预算与任务保护的完整历史前缀",
             no_marks: "没有待处理标记",
             eligible: "满足调度条件",
@@ -159,6 +164,9 @@ window.__ModuleLoader__.load({
             summarySettingsPrefer: "匹配会话时优先",
             summarySettingsPreferHelp:
                 "当前会话使用相同供应商和模型时优先尝试此项，否则按列表顺序尝试。",
+            summarySettingsSessionAgent: "沿用会话生成摘要",
+            summarySettingsSessionAgentHelp:
+                "默认关闭。开启后，匹配当前会话的首选模型可沿用会话并调用工具准备摘要；其他情况使用独立摘要请求。",
             summarySettingsAdd: "添加模型",
             summarySettingsUp: "上移",
             summarySettingsDown: "下移",
@@ -183,7 +191,6 @@ window.__ModuleLoader__.load({
             summarySettingsReadOnly: "当前配置只读。",
             summarySettingsSave: "保存",
             summarySettingsSaving: "正在保存…",
-            summarySettingsSaved: "已保存；下一次摘要使用此配置。",
             summarySettingsSaveFailed: "保存失败",
             summarySettingsConflict: "配置已被其他页面修改。草稿已保留，请重新加载后再编辑。",
             summarySettingsTransport: "配置连接暂不可用。",
@@ -275,19 +282,24 @@ window.__ModuleLoader__.load({
             active_compaction: "A summary is already running",
             no_business_evidence: "No new business evidence in the prefix",
             ineffective_compaction: "Last summary did not reduce observed pressure",
-            paybackRequests: "Payback requests / policy limit",
+            unitCosts: "Current / best unit cost",
+            startWindow: "Recommended / latest start tokens",
+            targetWindow: "Target / safety tokens",
+            confidence: "Growth estimate basis",
+            cold_start: "Cold-start estimate",
+            observed_growth: "Observed growth",
             upfrontCost: "Summary and rebuild cost",
             protectedInput: "Fixed and protected input",
             cacheBasis: "Cache estimate source",
             assumed_cached: "Unknown; conservatively assumed cached",
             primary_usage: "Latest primary request usage",
-            noFinitePayback: "No finite estimated payback",
             costUnits: "normalized tokens (estimated)",
             nextAction: "Next action",
             checkModelAction: "Check the conversation route and model contextWindow.",
             checkFailureAction:
                 "Inspect the summary error and fix its cause; queued intent is preserved.",
-            checkPolicyAction: "Inspect auto, enabled and proactive settings.",
+            checkPolicyAction:
+                "Check automatic summaries; queued requests and safety recovery remain available.",
             verifyUsageAction:
                 "Use the next primary request's usage to verify pressure after the summary.",
             boundaryAction: "Wait for the next eligible step boundary.",
@@ -297,11 +309,12 @@ window.__ModuleLoader__.load({
                 "The fixed prompt and tool definitions reach the pressure threshold; history summaries alone cannot reach the target.",
             protected_input:
                 "Fixed input and the active task tail reach the pressure threshold; reduce fixed input or split the task.",
-            not_paid_back: "Estimated payback gate not met",
-            min_interval: "Minimum interval not reached",
+            cost_optimum: "Forecast cost favors a checkpoint now",
+            cost_deferred: "Waiting for a lower-cost checkpoint",
+            window_pressure: "Cost-adjusted window boundary reached",
+            no_request: "No pending intent below the target window",
+            no_savings: "No positive estimated saving",
             insufficient_savings: "Insufficient estimated savings",
-            min_savings: "Insufficient estimated savings",
-            min_ratio: "Estimated savings ratio too low",
             no_selection: "No balanced prefix meets retention and task protection",
             no_marks: "No pending marks",
             eligible: "Scheduling gates met",
@@ -340,6 +353,9 @@ window.__ModuleLoader__.load({
             summarySettingsPrefer: "Prioritize when matching the session",
             summarySettingsPreferHelp:
                 "Try this entry first when the current session uses the same provider and model; otherwise follow list order.",
+            summarySettingsSessionAgent: "Use the session Agent for summaries",
+            summarySettingsSessionAgentHelp:
+                "Off by default. When this entry is selected first and matches the session provider and model, the Agent can use its conversation and tools to prepare the summary. Other cases use an independent summary request.",
             summarySettingsAdd: "Add model",
             summarySettingsUp: "Move up",
             summarySettingsDown: "Move down",
@@ -369,7 +385,6 @@ window.__ModuleLoader__.load({
             summarySettingsReadOnly: "These settings are read-only.",
             summarySettingsSave: "Save",
             summarySettingsSaving: "Saving…",
-            summarySettingsSaved: "Saved. The next summary will use these settings.",
             summarySettingsSaveFailed: "Could not save settings",
             summarySettingsConflict:
                 "Another page changed these settings. Your draft is retained; reload before editing again.",
@@ -411,6 +426,15 @@ window.__ModuleLoader__.load({
                 throw settingsProblem("summarySettingsInvalid");
             return matches[0];
         }
+        function summarySettingsPolicies(value) {
+            if (
+                !object(value) ||
+                !Object.hasOwn(value, "policyOverrides") ||
+                !object(value.policyOverrides)
+            )
+                throw settingsProblem("summarySettingsResponse");
+            return normalizePolicyOverrides(value.policyOverrides);
+        }
         function summarySettingsRows(value) {
             if (!Array.isArray(value) || value.length > 32)
                 throw settingsProblem("summarySettingsInvalid");
@@ -421,7 +445,8 @@ window.__ModuleLoader__.load({
                     !text(row.model) ||
                     (row.reasoningEffort !== undefined && !text(row.reasoningEffort)) ||
                     (row.preferWhenSessionMatches !== undefined &&
-                        typeof row.preferWhenSessionMatches !== "boolean")
+                        typeof row.preferWhenSessionMatches !== "boolean") ||
+                    (row.useSessionAgent !== undefined && typeof row.useSessionAgent !== "boolean")
                 )
                     throw settingsProblem("summarySettingsInvalid");
                 return {
@@ -431,6 +456,7 @@ window.__ModuleLoader__.load({
                         ? {}
                         : { reasoningEffort: row.reasoningEffort }),
                     preferWhenSessionMatches: row.preferWhenSessionMatches ?? true,
+                    useSessionAgent: row.useSessionAgent ?? false,
                 };
             });
         }
@@ -507,7 +533,6 @@ window.__ModuleLoader__.load({
                     rows: [],
                     rowKeys: [],
                     baseRows: [],
-                    supportsPolicies: false,
                     policyOverrides: null,
                     basePolicyOverrides: null,
                     policyRowKeys: [],
@@ -571,18 +596,13 @@ window.__ModuleLoader__.load({
                     if (!this.active || generation !== this.settingsGeneration) return;
                     const entry = summarySettingsNamespace(description);
                     const rows = summarySettingsRows(entry.value.summaryModels);
-                    const supportsPolicies = Object.hasOwn(entry.value, "policyOverrides");
-                    const policyOverrides = supportsPolicies
-                        ? normalizePolicyOverrides(entry.value.policyOverrides)
-                        : null;
+                    const policyOverrides = summarySettingsPolicies(entry.value);
                     const { state } = this;
                     if (
                         !discard &&
                         state.dirty &&
                         (JSON.stringify(rows) !== JSON.stringify(state.rows) ||
-                            supportsPolicies !== state.supportsPolicies ||
-                            JSON.stringify(policyOverrides) !==
-                                JSON.stringify(state.policyOverrides))
+                            policyDraftDirty(state.policyOverrides, policyOverrides))
                     ) {
                         this.publish({
                             settingsStatus: "ready",
@@ -601,10 +621,9 @@ window.__ModuleLoader__.load({
                         writable: description.writable === true,
                         rows,
                         baseRows: rows,
-                        supportsPolicies,
                         policyOverrides,
                         basePolicyOverrides: policyOverrides,
-                        policyRowKeys: (policyOverrides?.compaction.values.modelPolicies ?? []).map(
+                        policyRowKeys: (policyOverrides.compaction.modelPolicies ?? []).map(
                             () => ++this.keySequence,
                         ),
                         rowKeys: rows.map(() => ++this.keySequence),
@@ -649,11 +668,10 @@ window.__ModuleLoader__.load({
                     rowKeys,
                     dirty:
                         JSON.stringify(rows) !== JSON.stringify(this.state.baseRows) ||
-                        (this.state.supportsPolicies &&
-                            policyDraftDirty(
-                                this.state.policyOverrides,
-                                this.state.basePolicyOverrides,
-                            )),
+                        policyDraftDirty(
+                            this.state.policyOverrides,
+                            this.state.basePolicyOverrides,
+                        ),
                     saved: false,
                     saveError: null,
                 });
@@ -669,7 +687,12 @@ window.__ModuleLoader__.load({
                 this.edit(
                     [
                         ...this.state.rows,
-                        { provider: "", model: "", preferWhenSessionMatches: true },
+                        {
+                            provider: "",
+                            model: "",
+                            preferWhenSessionMatches: true,
+                            useSessionAgent: false,
+                        },
                     ],
                     [...this.state.rowKeys, ++this.keySequence],
                 );
@@ -699,13 +722,18 @@ window.__ModuleLoader__.load({
             change(index, field, value) {
                 if (
                     !this.state.rows[index] ||
-                    !["provider", "model", "reasoningEffort", "preferWhenSessionMatches"].includes(
-                        field,
-                    )
+                    ![
+                        "provider",
+                        "model",
+                        "reasoningEffort",
+                        "preferWhenSessionMatches",
+                        "useSessionAgent",
+                    ].includes(field)
                 )
                     return;
                 const row = { ...this.state.rows[index] };
-                if (field === "preferWhenSessionMatches") row[field] = value === true;
+                if (field === "preferWhenSessionMatches" || field === "useSessionAgent")
+                    row[field] = value === true;
                 else if (field === "reasoningEffort" && value === "") delete row.reasoningEffort;
                 else if (typeof value === "string") {
                     if (field === "provider" && value !== row.provider) row.model = "";
@@ -715,7 +743,7 @@ window.__ModuleLoader__.load({
                 this.edit(this.state.rows.map((old, i) => (i === index ? row : old)));
             }
             editPolicies(policyOverrides, policyRowKeys = this.state.policyRowKeys) {
-                if (!this.canEdit() || !this.state.supportsPolicies) return;
+                if (!this.canEdit()) return;
                 this.publish({
                     policyOverrides,
                     policyRowKeys,
@@ -724,14 +752,6 @@ window.__ModuleLoader__.load({
                         policyDraftDirty(policyOverrides, this.state.basePolicyOverrides),
                     saved: false,
                     saveError: null,
-                });
-            }
-            setPolicyMode(group, enabled) {
-                const entry = this.state.policyOverrides?.[group];
-                if (!entry || typeof enabled !== "boolean") return;
-                this.editPolicies({
-                    ...this.state.policyOverrides,
-                    [group]: { ...entry, enabled },
                 });
             }
             changePolicy(group, key, value) {
@@ -745,7 +765,7 @@ window.__ModuleLoader__.load({
                     return;
                 this.editPolicies({
                     ...this.state.policyOverrides,
-                    [group]: { ...entry, values: { ...entry.values, [key]: value } },
+                    [group]: { ...entry, [key]: value },
                 });
             }
             resetPolicy(group) {
@@ -755,13 +775,13 @@ window.__ModuleLoader__.load({
                 this.editPolicies(
                     {
                         ...this.state.policyOverrides,
-                        [group]: { ...defaults, enabled: entry.enabled },
+                        [group]: defaults,
                     },
                     group === "compaction" ? [] : this.state.policyRowKeys,
                 );
             }
             policyError() {
-                if (!this.state.supportsPolicies) return null;
+                if (!this.state.policyOverrides) return null;
                 try {
                     policyDraftPayload(this.state.policyOverrides);
                     return null;
@@ -775,13 +795,19 @@ window.__ModuleLoader__.load({
                 this.editPolicies(
                     {
                         ...this.state.policyOverrides,
-                        compaction: { ...entry, values: { ...entry.values, modelPolicies: rows } },
+                        compaction: { ...entry, modelPolicies: rows },
                     },
                     keys,
                 );
             }
+            inheritPolicyModels() {
+                const entry = this.state.policyOverrides?.compaction;
+                if (!entry) return;
+                const { modelPolicies: _models, ...inherited } = entry;
+                this.editPolicies({ ...this.state.policyOverrides, compaction: inherited }, []);
+            }
             addPolicyModel() {
-                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                const rows = this.state.policyOverrides?.compaction.modelPolicies ?? [];
                 if (
                     !rows ||
                     rows.length >= 128 ||
@@ -795,7 +821,7 @@ window.__ModuleLoader__.load({
                 );
             }
             removePolicyModel(index) {
-                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                const rows = this.state.policyOverrides?.compaction.modelPolicies;
                 if (rows)
                     this.editPolicyModels(
                         rows.filter((_row, i) => i !== index),
@@ -803,9 +829,7 @@ window.__ModuleLoader__.load({
                     );
             }
             movePolicyModel(index, offset) {
-                const rows = [
-                    ...(this.state.policyOverrides?.compaction.values.modelPolicies ?? []),
-                ];
+                const rows = [...(this.state.policyOverrides?.compaction.modelPolicies ?? [])];
                 const keys = [...this.state.policyRowKeys];
                 const target = index + offset;
                 if (
@@ -821,14 +845,14 @@ window.__ModuleLoader__.load({
                 this.editPolicyModels(rows, keys);
             }
             changePolicyModel(index, key, value) {
-                const rows = this.state.policyOverrides?.compaction.values.modelPolicies;
+                const rows = this.state.policyOverrides?.compaction.modelPolicies;
                 if (
                     !rows?.[index] ||
                     ![
                         "provider",
                         "model",
-                        ...POLICY_GROUPS[0].fields
-                            .filter((field) => field.key !== "auto")
+                        ...POLICY_GROUPS.find((group) => group.key === "compaction")
+                            .fields.filter((field) => field.perModel)
                             .map((field) => field.key),
                     ].includes(key)
                 )
@@ -857,15 +881,16 @@ window.__ModuleLoader__.load({
                 if (!this.canSave()) return false;
                 const generation = ++this.saveGeneration;
                 ++this.settingsGeneration;
-                const { namespace, revision, rows, supportsPolicies } = this.state;
+                const { namespace, revision, rows } = this.state;
                 const value = rows.map((row) => ({ ...row }));
-                const operations = [{ op: "set", path: ["summaryModels"], value }];
-                if (supportsPolicies)
-                    operations.push({
+                const operations = [
+                    { op: "set", path: ["summaryModels"], value },
+                    {
                         op: "set",
                         path: ["policyOverrides"],
                         value: policyDraftPayload(this.state.policyOverrides),
-                    });
+                    },
+                ];
                 this.publish({ saving: true, saved: false, saveError: null });
                 try {
                     if (!this.remote?.settings?.mutate)
@@ -881,19 +906,13 @@ window.__ModuleLoader__.load({
                     )
                         throw settingsProblem("summarySettingsResponse");
                     const accepted = summarySettingsRows(entry.value?.summaryModels);
-                    if (supportsPolicies && !Object.hasOwn(entry.value ?? {}, "policyOverrides"))
-                        throw settingsProblem("summarySettingsResponse");
-                    const acceptedPolicies = supportsPolicies
-                        ? normalizePolicyOverrides(entry.value.policyOverrides)
-                        : null;
+                    const acceptedPolicies = summarySettingsPolicies(entry.value);
                     this.publish({
                         rows: accepted,
                         baseRows: accepted,
                         policyOverrides: acceptedPolicies,
                         basePolicyOverrides: acceptedPolicies,
-                        policyRowKeys: (
-                            acceptedPolicies?.compaction.values.modelPolicies ?? []
-                        ).map(
+                        policyRowKeys: (acceptedPolicies.compaction.modelPolicies ?? []).map(
                             (_row, index) => this.state.policyRowKeys[index] ?? ++this.keySequence,
                         ),
                         revision: entry.revision,
@@ -946,12 +965,8 @@ window.__ModuleLoader__.load({
                     "aria-busy": state.saving || state.settingsStatus === "loading",
                 },
                 h("style", null, `${summarySettingsCss}\n${policySettingsCss}`),
-                h(
-                    "h3",
-                    { id: `${id}-title` },
-                    t(state.supportsPolicies ? "policySettingsTitle" : "summarySettingsTitle"),
-                ),
-                state.supportsPolicies ? h("h4", null, t("summarySettingsTitle")) : null,
+                h("h3", { id: `${id}-title` }, t("policySettingsTitle")),
+                h("h4", null, t("summarySettingsTitle")),
                 h("p", { className: "fc-settings-note" }, t("summarySettingsDescription")),
                 h("p", { className: "fc-settings-note" }, t("summarySettingsEmpty")),
                 state.settingsStatus === "loading" ? message("summarySettingsLoading") : null,
@@ -1173,6 +1188,38 @@ window.__ModuleLoader__.load({
                                     t("summarySettingsPreferHelp"),
                                 ),
                                 h(
+                                    "label",
+                                    {
+                                        className: "fc-settings-priority",
+                                        htmlFor: `${rowId}-session-agent`,
+                                    },
+                                    h("input", {
+                                        type: "checkbox",
+                                        role: "switch",
+                                        id: `${rowId}-session-agent`,
+                                        checked: row.useSessionAgent,
+                                        "aria-checked": row.useSessionAgent,
+                                        "aria-label": `${rowTitle} · ${t("summarySettingsSessionAgent")}`,
+                                        "aria-describedby": `${rowId}-session-agent-help`,
+                                        disabled: !editable,
+                                        onChange: (event) =>
+                                            controller.change(
+                                                index,
+                                                "useSessionAgent",
+                                                event.target.checked,
+                                            ),
+                                    }),
+                                    h("span", null, t("summarySettingsSessionAgent")),
+                                ),
+                                h(
+                                    "p",
+                                    {
+                                        id: `${rowId}-session-agent-help`,
+                                        className: "fc-settings-help",
+                                    },
+                                    t("summarySettingsSessionAgentHelp"),
+                                ),
+                                h(
                                     "div",
                                     { className: "fc-settings-actions fc-settings-row-actions" },
                                     ...[
@@ -1268,13 +1315,7 @@ window.__ModuleLoader__.load({
                         t(state.saving ? "summarySettingsSaving" : "summarySettingsSave"),
                     ),
                 ),
-                state.saved
-                    ? message(
-                          state.supportsPolicies
-                              ? "summarySettingsSavedAll"
-                              : "summarySettingsSaved",
-                      )
-                    : null,
+                state.saved ? message("summarySettingsSavedAll") : null,
             );
         }
         const inputId = (v) => Number.isSafeInteger(v) && v > 0;
@@ -1592,7 +1633,6 @@ window.__ModuleLoader__.load({
                             "div",
                             { className: "fc-items" },
                             ...items.slice(0, 128).map((item, i) => {
-                                if (typeof item === "string") item = { id: item };
                                 return h(
                                     "div",
                                     { className: "fc-item", key: `${item.id}:${i}` },
@@ -1659,18 +1699,16 @@ window.__ModuleLoader__.load({
                     React.useEffect(() => {
                         let active = true;
                         setState({ url: null, failed: false });
-                        if (loadImage)
-                            Promise.resolve()
-                                .then(() => loadImage(attachment))
-                                .then(
-                                    (url) => {
-                                        if (active) setState({ url, failed: false });
-                                    },
-                                    () => {
-                                        if (active) setState({ url: null, failed: true });
-                                    },
-                                );
-                        else setState({ url: null, failed: true });
+                        Promise.resolve()
+                            .then(() => loadImage(attachment))
+                            .then(
+                                (url) => {
+                                    if (active) setState({ url, failed: false });
+                                },
+                                () => {
+                                    if (active) setState({ url: null, failed: true });
+                                },
+                            );
                         // The session owns shared image URLs, including their revocation.
                         return () => {
                             active = false;
@@ -1768,9 +1806,7 @@ window.__ModuleLoader__.load({
                                     t,
                                 }),
                             ),
-                            v.representation === "file-handle" &&
-                                typeof v.path === "string" &&
-                                props.openFile
+                            v.representation === "file-handle" && typeof v.path === "string"
                                 ? h(
                                       "button",
                                       {
@@ -1853,12 +1889,38 @@ window.__ModuleLoader__.load({
                                 ],
                                 ["reason", scheduling.reason ? t(scheduling.reason) : null],
                                 [
-                                    "paybackRequests",
-                                    economics
-                                        ? Number.isFinite(economics.breakEvenRequests)
-                                            ? `${economics.breakEvenRequests} / ${economics.expectedFutureRequests}`
-                                            : t("noFinitePayback")
+                                    "unitCosts",
+                                    economics &&
+                                    Number.isFinite(economics.currentUnitCost) &&
+                                    Number.isFinite(economics.bestUnitCost)
+                                        ? Number(economics.currentUnitCost.toFixed(3)) +
+                                          " / " +
+                                          Number(economics.bestUnitCost.toFixed(3))
                                         : null,
+                                ],
+                                [
+                                    "startWindow",
+                                    economics &&
+                                    Number.isFinite(economics.recommendedAtTokens) &&
+                                    Number.isFinite(economics.latestStartTokens)
+                                        ? String(economics.recommendedAtTokens) +
+                                          " / " +
+                                          economics.latestStartTokens
+                                        : null,
+                                ],
+                                [
+                                    "targetWindow",
+                                    limits &&
+                                    Number.isFinite(limits.thresholdTokens) &&
+                                    Number.isFinite(limits.safetyTokens)
+                                        ? String(limits.thresholdTokens) +
+                                          " / " +
+                                          limits.safetyTokens
+                                        : null,
+                                ],
+                                [
+                                    "confidence",
+                                    economics?.confidence ? t(economics.confidence) : null,
                                 ],
                                 [
                                     "upfrontCost",
@@ -2096,31 +2158,28 @@ window.__ModuleLoader__.load({
                             controllers.add(controller);
                             controller.start();
                             const dispose = [];
-                            if (settingsCtx.remote.$on) {
-                                dispose.push(
-                                    settingsCtx.remote.$on("settings/document-updated", (ns) => {
-                                        if (
-                                            ns === "fold-context-ui" ||
-                                            text(ns).endsWith(":fold-context-ui")
-                                        )
-                                            controller.loadSettings();
-                                        else controller.loadCatalog();
-                                    }),
-                                );
-                                dispose.push(
-                                    settingsCtx.remote.$on("llm/adapters-updated", () =>
-                                        controller.loadCatalog(),
-                                    ),
-                                );
-                            }
+                            dispose.push(
+                                settingsCtx.remote.$on("settings/document-updated", (ns) => {
+                                    if (
+                                        ns === "fold-context-ui" ||
+                                        text(ns).endsWith(":fold-context-ui")
+                                    )
+                                        controller.loadSettings();
+                                    else controller.loadCatalog();
+                                }),
+                            );
+                            dispose.push(
+                                settingsCtx.remote.$on("llm/adapters-updated", () =>
+                                    controller.loadCatalog(),
+                                ),
+                            );
                             dispose.push(
                                 settingsCtx.on("connection/reset", () => controller.reconnect()),
                             );
                             return () => {
                                 controller.stop();
                                 controllers.delete(controller);
-                                for (const cleanup of dispose)
-                                    if (typeof cleanup === "function") cleanup();
+                                for (const cleanup of dispose) cleanup();
                             };
                         }, [controller]);
                         return renderSummarySettings(controller, state, t, id);

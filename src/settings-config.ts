@@ -6,79 +6,65 @@ import {
     type PolicyOverrides,
     type PolicyValues,
 } from "./domain/settings-catalog.js";
-
-function fieldSchema(field: PolicyField, inherit = false): Schemastery {
+function fieldSchema(field: PolicyField, defaults: boolean): Schemastery {
     const schema: Schemastery =
         field.type === "boolean"
             ? z.boolean()
             : field.type === "enum"
               ? z.union(field.choices!.map((choice) => choice.value))
-              : field.type === "steps"
-                ? z.array(z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)).min(1).max(16)
-                : field.type === "integer"
-                  ? z.number().step(1)
-                  : z.number();
-    if (field.min !== undefined && field.type !== "steps") schema.min(field.min);
-    if (field.max !== undefined && field.type !== "steps") schema.max(field.max);
-    return !inherit && field.default !== null ? schema.default(field.default) : schema;
+              : field.type === "integer"
+                ? z.number().step(1)
+                : z.number();
+    if (field.min !== undefined) schema.min(field.min);
+    if (field.max !== undefined) schema.max(field.max);
+    return defaults && field.default !== null ? schema.default(field.default) : schema;
 }
-const groups = Object.fromEntries(
-    POLICY_GROUPS.map((group) => {
-        const fields: Record<string, Schemastery> = Object.fromEntries(
-            group.fields.map((field) => [field.key, fieldSchema(field)]),
-        );
-        if (group.key === "compaction")
-            fields.modelPolicies = z
-                .array(
-                    z.object({
-                        provider: z.string().min(1).required(),
-                        model: z.string().min(1).required(),
-                        ...Object.fromEntries(
-                            group.fields
-                                .filter((field) => field.key !== "auto")
-                                .map((field) => [field.key, fieldSchema(field, true)]),
-                        ),
-                    }),
-                )
-                .max(128);
-        return [
-            group.key,
-            z
-                .object({
-                    enabled: z.boolean().default(false),
-                    values: z.object(fields).default({}),
-                })
-                .default({}),
-        ];
-    }),
+function groups(defaults: boolean) {
+    return Object.fromEntries(
+        POLICY_GROUPS.map((group) => {
+            const fields: Record<string, Schemastery> = Object.fromEntries(
+                group.fields.map((field) => [field.key, fieldSchema(field, defaults)]),
+            );
+            if (group.key === "compaction")
+                fields.modelPolicies = z
+                    .array(
+                        z.object({
+                            provider: z.string().min(1).required(),
+                            model: z.string().min(1).required(),
+                            ...Object.fromEntries(
+                                group.fields
+                                    .filter((field) => field.perModel)
+                                    .map((field) => [field.key, fieldSchema(field, false)]),
+                            ),
+                        }),
+                    )
+                    .max(128);
+            if (fields.modelPolicies) delete fields.modelPolicies.meta.default;
+            return [group.key, z.object(fields).default({})];
+        }),
+    );
+}
+const validateKeys = z.transform(
+    z.any(),
+    (value: unknown) => {
+        normalizePolicyOverrides(value);
+        return {};
+    },
+    true,
 );
-
-/** A profile-wide override is opt-in per group, preserving existing preset policy. */
-export const policyOverridesSchema: Schemastery<
-    Schemastery.ObjectS<typeof groups>,
-    PolicyOverrides,
-    "defined"
-> = z.transform(z.object(groups), normalizePolicyOverrides, true).default({});
-
+export const policySchema: Schemastery = z.intersect([validateKeys, z.object(groups(true))]);
+export const policyOverridesSchema: Schemastery<any, PolicyOverrides, "defined"> = z
+    .transform(z.intersect([validateKeys, z.object(groups(false))]), normalizePolicyOverrides, true)
+    .default({});
 export function selectPolicyOverrides(
     base: PolicyValues,
     overrides?: PolicyOverrides,
 ): PolicyValues {
-    return {
-        compaction: structuredClone(
-            overrides?.compaction.enabled ? overrides.compaction.values : base.compaction,
-        ),
-        release: structuredClone(
-            overrides?.release.enabled ? overrides.release.values : base.release,
-        ),
-        summary: structuredClone(
-            overrides?.summary.enabled ? overrides.summary.values : base.summary,
-        ),
-        scheduling: structuredClone(
-            overrides?.scheduling.enabled ? overrides.scheduling.values : base.scheduling,
-        ),
-        reminders: structuredClone(
-            overrides?.reminders.enabled ? overrides.reminders.values : base.reminders,
-        ),
-    };
+    const values = normalizePolicyOverrides(overrides);
+    return structuredClone({
+        compaction: { ...base.compaction, ...values.compaction },
+        summary: { ...base.summary, ...values.summary },
+        scheduling: { ...base.scheduling, ...values.scheduling },
+        reminders: { ...base.reminders, ...values.reminders },
+    });
 }

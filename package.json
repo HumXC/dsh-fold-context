@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-context",
-  "version": "0.2.4",
+  "version": "0.3.1",
   "description": "Predictable context compression and recoverable evidence for DSH",
   "packageManager": "pnpm@11.15.0",
   "type": "module",
@@ -67,12 +67,13 @@
   "devDependencies": {
     "@deepseek-ai/dsh-agent-loop": "0.2.0-rc.2",
     "@deepseek-ai/dsh-attachment-local": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-fs-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-compaction-image-offload": "0.2.0-rc.2",
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-fs-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-persistence": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-spill-policy": "0.2.0-rc.2",
     "@types/node": "^22.18.0",
     "prettier": "3.9.10",
     "typescript": "^5.9.3"

@@ -83,7 +83,7 @@ async function invoke(f, blocks, replayState) {
 }
 async function requestBoundary(f, apply = true) {
     if (apply) {
-        commitForcedReleases(f);
+        await commitForcedReleases(f);
         await f.engine.compactIfNeeded(f.agent, "pressure", signal());
     }
     const step = nextStep(f);

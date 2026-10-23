@@ -11,6 +11,9 @@ function candidate(overrides = {}) {
     return {
         trigger: "backlog",
         totalTokens: 12000,
+        targetTokens: 17000,
+        safetyTokens: 22000,
+        growthTokens: 1000,
         selectedTokens: 8000,
         prefixTokens: 1000,
         excludedTokens: 2000,
@@ -169,166 +172,44 @@ test("selector rejects unsafe identities and budgets instead of guessing a range
     );
 });
 
-test("historical cache misses keep conservative future costs unless independent work is proved", () => {
-    const unknown = planScheduledCompaction(candidate());
-    const cached = planScheduledCompaction(candidate({ cacheState: "cached" }));
+test("normalized costs preserve the unchanged prefix and credit only independent rebuild", () => {
+    const hot = planScheduledCompaction(candidate());
+    assert.equal(hot.predictedSummaryTokens, 1200);
+    assert.equal(hot.retainedSurfaceTokens, 3000);
+    assert.equal(hot.rebuiltSuffixTokens, 4200);
+    assert.equal(hot.initialRebuildPenalty, 3780);
+    assert.equal(hot.summaryCost, 7200);
     const miss = planScheduledCompaction(candidate({ cacheState: "uncached" }));
-    assert.equal(unknown.heuristic, "HEURISTIC");
-    assert.equal(unknown.cachedPrefixAssumed, true);
-    assert.equal(unknown.breakEvenTurns, cached.breakEvenTurns);
-    assert.equal(cached.predictedSummaryTokens, 1200);
-    assert.equal(cached.retainedSurfaceTokens, 3000);
-    assert.equal(cached.rebuiltSuffixTokens, 4200);
-    assert.equal(cached.initialRebuildPenalty, 3780);
-    assert.equal(cached.summaryCost, 7200);
-    assert.equal(cached.perTurnSaving, 680);
-    assert.equal(cached.breakEvenTurns, 17);
-    assert.equal(cached.reason, "eligible");
-    assert.equal(planScheduledCompaction(candidate(), { paybackTurns: 8 }).reason, "not_paid_back");
-    assert.equal(miss.cachedPrefixAssumed, true);
-    assert.equal(miss.effectiveCacheReadRatio, 0.1);
-    assert.equal(miss.initialRebuildPenalty, cached.initialRebuildPenalty);
-    assert.equal(miss.breakEvenTurns, cached.breakEvenTurns);
-    const independentlyPaid = planScheduledCompaction(
-        candidate({ independentRebuildTokens: 4200 }),
-    );
-    assert.equal(independentlyPaid.initialRebuildPenalty, 0);
-    assert.equal(independentlyPaid.summaryCost, cached.summaryCost);
-    assert.equal(independentlyPaid.breakEvenTurns, 11);
-    const moreExpensiveReads = planScheduledCompaction(candidate(), { cacheReadRatio: 0.5 });
-    assert.ok(cached.breakEvenTurns > moreExpensiveReads.breakEvenTurns);
-    const override = planScheduledCompaction(candidate({ effectiveCacheReadRatio: 1 }));
-    assert.equal(override.initialRebuildPenalty, 0);
-    assert.equal(override.breakEvenTurns, 2);
-});
-test("a covering summary saves the full unmarked span as well as excluded marks", () => {
-    const plan = planScheduledCompaction(
-        candidate({
-            excludedTokens: 100,
-            cacheState: "uncached",
-        }),
-    );
-    assert.equal(plan.filterInputTokens, 7900);
-    assert.equal(plan.predictedSummaryTokens, 1580);
-    assert.equal(plan.netSavingTokens, 6420);
-    assert.ok(plan.netSavingTokens > plan.excludedTokens);
-    assert.equal(plan.reason, "eligible");
-    const filtered = planScheduledCompaction(
-        candidate({ filterInputTokens: 2500, headerOverheadTokens: 100 }),
-        { paybackTurns: 8 },
-    );
-    assert.equal(filtered.predictedSummaryTokens, 500);
-    assert.equal(filtered.rebuiltSuffixTokens, 3500);
-    assert.equal(filtered.summaryCost, 3000);
-    assert.equal(filtered.breakEvenTurns, 9);
-    assert.equal(filtered.reason, "not_paid_back");
+    assert.equal(miss.initialRebuildPenalty, hot.initialRebuildPenalty);
+    const paid = planScheduledCompaction(candidate({ independentRebuildTokens: 4200 }));
+    assert.equal(paid.initialRebuildPenalty, 0);
+    assert.equal(paid.summaryCost, hot.summaryCost);
+    const fixed = planScheduledCompaction(candidate({ totalTokens: 52000, prefixTokens: 41000 }));
     assert.equal(
-        planScheduledCompaction(candidate({ filterInputTokens: 2500, headerOverheadTokens: 100 }), {
-            paybackTurns: 9,
-        }).reason,
-        "eligible",
+        fixed.rebuiltSuffixTokens,
+        hot.rebuiltSuffixTokens,
+        "stable prefix is never charged as rebuilt",
     );
 });
-
-test("tiny explicit requests and summaries that grow the prompt wait despite cheap input", () => {
-    const tiny = planScheduledCompaction(
-        candidate({
-            trigger: "model_request",
-            selectedTokens: 1000,
-            excludedTokens: 1000,
-            markedIds: [],
-            cacheState: "uncached",
-        }),
-    );
-    assert.equal(tiny.reason, "min_savings");
-    assert.equal(tiny.decision, "wait");
-    const growing = planScheduledCompaction(candidate({ cacheState: "uncached" }), {
-        expectedSummaryRatio: 1.5,
-        minSavingsTokens: 0,
-        minSavingsRatio: 0,
-    });
-    assert.equal(growing.predictedSummaryTokens, 9000);
-    assert.equal(growing.netSavingTokens, 0);
-    assert.equal(growing.breakEvenTurns, null);
-    assert.equal(growing.reason, "min_savings");
-    const noReadSaving = planScheduledCompaction(candidate(), { cacheReadRatio: 0 });
-    assert.equal(noReadSaving.breakEvenTurns, null);
-    assert.equal(noReadSaving.reason, "not_paid_back");
+test("summary input cache is accounted separately from future primary cache reads", () => {
+    const independent = planScheduledCompaction(candidate());
+    const shared = planScheduledCompaction(candidate({ summaryCacheShare: 1 }));
+    assert.equal(shared.summaryCost, 1800);
+    assert.ok(shared.summaryCost < independent.summaryCost);
 });
-
-test("interval, marks, and global savings ratio gate real boundary cases", () => {
-    const beforeInterval = planScheduledCompaction(
-        candidate({ cacheState: "uncached", stepsSinceSummary: 7 }),
-    );
-    assert.equal(beforeInterval.reason, "min_interval");
-    assert.equal(planScheduledCompaction(candidate({ cacheState: "uncached" })).reason, "eligible");
-    assert.equal(planScheduledCompaction(candidate({ markedIds: [] })).reason, "no_marks");
+test("window pressure overrides economics without any model force mode", () => {
+    for (const cacheReadRatio of [0, 0.01, 0.1, 0.5, 1]) {
+        const plan = planScheduledCompaction(
+            candidate({ totalTokens: 21500, auto: false, markedIds: [] }),
+            { cacheReadRatio },
+        );
+        assert.equal(plan.decision, "execute");
+        assert.equal(plan.reason, "safety_pressure");
+    }
     assert.equal(
-        planScheduledCompaction(
-            candidate({ trigger: "model_request", markedIds: [], cacheState: "uncached" }),
-        ).reason,
-        "eligible",
+        planScheduledCompaction(candidate({ forceSafety: "overflow", auto: false })).reason,
+        "safety_overflow",
     );
-    const fraction = planScheduledCompaction(
-        candidate({
-            totalTokens: 50000,
-            cacheState: "uncached",
-        }),
-    );
-    assert.equal(fraction.netSavingTokens, 6800);
-    assert.equal(fraction.reason, "min_ratio");
-    const atMinimum = candidate({
-        trigger: "model_request",
-        totalTokens: 10240,
-        selectedTokens: 2560,
-        excludedTokens: 0,
-        cacheState: "uncached",
-        effectiveCacheReadRatio: 1,
-    });
-    assert.equal(planScheduledCompaction(atMinimum).netSavingTokens, 2048);
-    assert.equal(planScheduledCompaction(atMinimum).savingsRatio, 0.2);
-    assert.equal(planScheduledCompaction(atMinimum).reason, "eligible");
-    assert.equal(
-        planScheduledCompaction({ ...atMinimum, selectedTokens: 2559 }).reason,
-        "min_savings",
-    );
-});
-
-test("automatic switches preserve explicit requests and safety overrides", () => {
-    const ready = candidate({ cacheState: "uncached", auto: false });
-    assert.equal(planScheduledCompaction(ready).reason, "disabled");
-    assert.equal(
-        planScheduledCompaction({ ...ready, trigger: "model_request" }).reason,
-        "eligible",
-    );
-    assert.equal(planScheduledCompaction(candidate(), { proactive: false }).reason, "disabled");
-    assert.equal(planScheduledCompaction({ ...ready, forceSafety: "pressure" }).reason, "disabled");
-    const overflow = planScheduledCompaction({
-        ...ready,
-        stepsSinceSummary: 0,
-        forceSafety: "overflow",
-    });
-    assert.equal(overflow.decision, "execute");
-    assert.equal(overflow.reason, "safety_overflow");
-    const pressure = planScheduledCompaction(
-        candidate({ stepsSinceSummary: 0, forceSafety: "pressure" }),
-    );
-    assert.equal(pressure.reason, "safety_pressure");
-    assert.equal(pressure.decision, "execute");
-    const disabled = planScheduledCompaction(
-        candidate({
-            trigger: "model_request",
-            selectedTokens: 1,
-            excludedTokens: 0,
-            stepsSinceSummary: 0,
-            markedIds: [],
-            auto: false,
-        }),
-        { enabled: false },
-    );
-    assert.equal(disabled.reason, "disabled");
-    assert.equal(disabled.decision, "wait");
-    assert.equal(planScheduledCompaction(candidate(), { enabled: false }).reason, "disabled");
     assert.equal(
         planScheduledCompaction(
             candidate({ selectedTokens: 0, excludedTokens: 0, forceSafety: "overflow" }),
@@ -336,24 +217,39 @@ test("automatic switches preserve explicit requests and safety overrides", () =>
         "no_selection",
     );
 });
-
-test("policy and estimates reject nonfinite, unsafe, and incoherent values", () => {
-    const defaults = resolveSchedulingPolicy();
-    assert.equal(defaults.minIntervalSteps, 8);
-    assert.equal(defaults.minSavingsTokens, 2048);
-    assert.equal(defaults.cacheReadRatio, 0.1);
-    assert.ok(Object.isFrozen(defaults));
+test("cache costs monotonically tighten the latest permitted start", () => {
+    let previous = Infinity;
+    for (let index = 0; index <= 100; index++) {
+        const plan = planScheduledCompaction(candidate(), { cacheReadRatio: index / 100 });
+        assert.ok(plan.latestStartTokens <= previous);
+        assert.ok(plan.latestStartTokens >= plan.targetTokens);
+        assert.ok(plan.latestStartTokens < plan.safetyTokens);
+        previous = plan.latestStartTokens;
+    }
+});
+test("explicit request is an intent, not an economic override", () => {
+    const request = candidate({ trigger: "model_request", auto: false, markedIds: [] });
+    const freeCache = planScheduledCompaction(request, { cacheReadRatio: 0 });
+    assert.equal(freeCache.decision, "wait");
+    assert.equal(freeCache.reason, "cost_deferred");
+    assert.equal(planScheduledCompaction(candidate({ auto: false })).reason, "disabled");
+    assert.equal(planScheduledCompaction(candidate({ markedIds: [] })).reason, "no_request");
+});
+test("zero or negative predicted savings cannot manufacture eligibility", () => {
+    const plan = planScheduledCompaction(candidate({ filterInputTokens: 50000, summaryRatio: 1 }));
+    assert.equal(plan.netSavingTokens, 0);
+    assert.equal(plan.reason, "no_savings");
+    assert.equal(plan.decision, "wait");
+});
+test("removed knobs and malformed inputs are rejected", () => {
+    assert.ok(Object.isFrozen(resolveSchedulingPolicy()));
     for (const value of [
-        { minIntervalSteps: 0.5 },
-        { minSavingsTokens: -1 },
-        { expectedSummaryRatio: Infinity },
-        { paybackTurns: 0 },
-        { paybackTurns: Number.MAX_SAFE_INTEGER + 1 },
-        { minSavingsRatio: 1.1 },
-        { cacheReadRatio: NaN },
-        { summaryOutputRatio: -1 },
-        { enabled: "true" },
-        { unexpected: true },
+        { paybackTurns: 24 },
+        { minIntervalSteps: 0 },
+        { releaseMaxWaitSteps: 1 },
+        { cacheReadRatio: 1.1 },
+        { cacheTtlMs: -1 },
+        { summaryOutputRatio: Infinity },
     ]) {
         assert.equal(schedulingPolicySchema.safeParse(value).success, false);
         assert.throws(() => resolveSchedulingPolicy(value));
@@ -361,49 +257,22 @@ test("policy and estimates reject nonfinite, unsafe, and incoherent values", () 
     for (const value of [
         { totalTokens: Infinity },
         { selectedTokens: -1 },
-        { prefixTokens: 12001 },
-        { selectedTokens: 11500 },
+        { selectedTokens: 12000 },
         { excludedTokens: 8001 },
-        { stepsSinceSummary: 0.5 },
-        { filterInputTokens: Number.MAX_SAFE_INTEGER + 1 },
-        { effectiveCacheReadRatio: 1.1 },
-        { markedIds: [""] },
-        { cacheState: "hit-confirmed-by-guess" },
-    ]) {
+        { safetyTokens: 17000 },
+        { growthTokens: 0 },
+        { summaryCacheShare: 2 },
+    ])
         assert.throws(() => planScheduledCompaction(candidate(value)));
-    }
-    assert.throws(
-        () =>
-            planScheduledCompaction(candidate(), { expectedSummaryRatio: Number.MAX_SAFE_INTEGER }),
-        /summary prediction/,
-    );
-    assert.throws(
-        () => planScheduledCompaction(candidate(), { summaryInputRatio: Number.MAX_SAFE_INTEGER }),
-        /summaryCost/,
-    );
-    assert.throws(
-        () => planScheduledCompaction(candidate({ headerOverheadTokens: Number.MAX_SAFE_INTEGER })),
-        /header overhead exceed totalTokens/,
-    );
-    const unrepresentablePayback = planScheduledCompaction(
-        candidate({ effectiveCacheReadRatio: Number.MIN_VALUE }),
-    );
-    assert.equal(unrepresentablePayback.breakEvenTurns, null);
-    assert.equal(unrepresentablePayback.reason, "not_paid_back");
 });
-
-test("plans are deterministic finite JSON and leave frozen caller inputs unchanged", () => {
+test("plans are deterministic finite JSON and do not mutate caller state", () => {
     const input = Object.freeze(candidate({ markedIds: Object.freeze(["17", "3", "17"]) }));
     const before = JSON.stringify(input);
-    const policy = resolveSchedulingPolicy({ paybackTurns: 20 });
-    const first = planScheduledCompaction(input, policy);
-    const second = planScheduledCompaction(input, policy);
-    assert.deepEqual(first, second);
-    assert.deepEqual(JSON.parse(JSON.stringify(first)), first);
+    const plan = planScheduledCompaction(input);
+    assert.deepEqual(plan, planScheduledCompaction(input));
+    assert.deepEqual(JSON.parse(JSON.stringify(plan)), plan);
     assert.equal(JSON.stringify(input), before);
-    assert.deepEqual(first.markedIds, ["17", "3"]);
-    assert.equal(first.routeSignature, "summary-route-v1");
-    for (const value of Object.values(first)) {
+    assert.deepEqual(plan.markedIds, ["17", "3"]);
+    for (const value of Object.values(plan))
         if (typeof value === "number") assert.ok(Number.isFinite(value) && value >= 0);
-    }
 });

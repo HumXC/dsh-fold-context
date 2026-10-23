@@ -64,12 +64,14 @@ export function projectionReceipt(
         }
     }
     const excluded = new Set(
-        selectedExclusions(
-            state,
-            selected,
-            state.activeStart ?? Number.MAX_SAFE_INTEGER,
-            "transcript",
-        ).map((entry) => entry.id),
+        policy.execution === "session"
+            ? []
+            : selectedExclusions(
+                  state,
+                  selected,
+                  state.activeStart ?? Number.MAX_SAFE_INTEGER,
+                  "transcript",
+              ).map((entry) => entry.id),
     );
     const attachments = state.numbering.attachments.flatMap<AttachmentProjection>((item) => {
         if (

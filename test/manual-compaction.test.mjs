@@ -16,10 +16,8 @@ test(
         const resume = Promise.withResolvers();
         let handle;
         const f = await loopFixture(root, {
+            compaction: { auto: false, cacheReadRatio: 0 },
             scheduling: {
-                proactive: false,
-                releaseMaxWaitSteps: 100,
-                releaseBacklogRatio: 1,
                 cacheTtlMs: 0,
             },
             tools: { read_archive: () => "ORIGINAL_QUEUED_EVIDENCE ".repeat(5) },

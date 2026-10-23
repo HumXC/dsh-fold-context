@@ -12,32 +12,32 @@ const candidate = (extra = {}) => ({
     headerOverheadTokens: 2000,
     filterInputTokens: 4000,
     stepsSinceSummary: 8,
+    targetTokens: 14000,
+    safetyTokens: 20000,
     markedIds: [],
     ...extra,
 });
 
-test("header conservation counts rebuild overhead once at the payback boundary", () => {
-    const plan = planScheduledCompaction(candidate(), { paybackTurns: 10 });
+test("stable request headers do not enter the changed historical cache suffix", () => {
+    const plan = planScheduledCompaction(candidate(), { cacheReadRatio: 1 });
     assert.equal(plan.retainedSurfaceTokens, 2000);
     assert.equal(plan.predictedSummaryTokens, 800);
-    assert.equal(plan.rebuiltSuffixTokens, 4800);
-    assert.equal(plan.initialRebuildPenalty, 4320);
-    assert.equal(plan.breakEvenTurns, 10);
+    assert.equal(plan.rebuiltSuffixTokens, 2800);
+    assert.equal(plan.initialRebuildPenalty, 0);
     assert.equal(plan.decision, "execute");
-    assert.equal(plan.reason, "eligible");
+    assert.equal(plan.reason, "window_pressure");
     assert.throws(() => planScheduledCompaction(candidate({ headerOverheadTokens: 5000 })));
 });
 
 for (const queued of [false, true]) {
-    test(`ordinary image-rich history skips auxiliary planning with ${queued ? "proactive disabled" : "no request or marks"}`, async (t) => {
+    test(`ordinary image-rich history skips auxiliary planning with ${queued ? "automatic summaries disabled" : "no request or marks"}`, async (t) => {
         const f = await fixture({
             compaction: {
-                auto: true,
-                thresholdRatio: 0.99,
-                retainTokens: 512,
+                auto: !queued,
+                targetTokens: 100000,
             },
             summaryModels: [{ provider: "test", model: "auxiliary" }],
-            scheduling: { enabled: true, proactive: !queued },
+            scheduling: {},
         });
         t.after(f.close);
         const message = createUserMessage({
@@ -87,10 +87,10 @@ for (const queued of [false, true]) {
             await f.engine.compactIfNeeded(f.agent, "pressure", new AbortController().signal),
             null,
         );
-        assert.equal(
-            routes.length,
-            1,
-            "the official ordinary pressure check still resolves its route",
+        assert.ok(routes.length > 0, "ordinary checks resolve the primary route");
+        assert.ok(
+            routes.every((route) => route.provider === "test" && route.model === "fixture"),
+            "no-action checks must resolve only the primary route, never an auxiliary model",
         );
         assert.deepEqual(
             {

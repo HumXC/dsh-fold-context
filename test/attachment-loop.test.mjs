@@ -30,7 +30,7 @@ test("real AgentLoop releases only selected attachment occurrences before recove
         attachments: true,
         inputModalities: ["text", "image"],
         auto: false,
-        scheduling: { releaseMinTokens: 0, releaseBacklogRatio: 0.000001 },
+        compaction: { cacheReadRatio: 1 },
         responses: [
             (_request, current) => {
                 const session = current.sessions.list()[0];
@@ -188,18 +188,11 @@ test("a released tool body and its child image remain archived after a covering 
     world = await loopFixture(root, {
         attachments: true,
         inputModalities: ["text", "image"],
-        compaction: { retainTokens: 0 },
+        compaction: { targetTokens: 64, cacheReadRatio: 1 },
         // This scenario verifies archival coverage rather than production economics.
         scheduling: {
-            minIntervalSteps: 0,
-            minSavingsTokens: 1,
-            minSavingsRatio: 0,
-            expectedSummaryRatio: 0.05,
-            cacheReadRatio: 1,
             summaryInputRatio: 0.01,
             summaryOutputRatio: 0.01,
-            releaseMinTokens: 0,
-            releaseBacklogRatio: 0.000001,
         },
         responses: [
             call("picture"),

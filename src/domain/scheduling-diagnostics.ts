@@ -4,6 +4,9 @@ export interface SchedulingLimits {
     readonly heuristic: "HEURISTIC";
     readonly contextWindowTokens: number;
     readonly thresholdTokens: number;
+    readonly safetyTokens?: number;
+    readonly configuredTargetTokens?: number | null;
+    readonly targetClamped?: boolean;
     readonly retentionTokens: number;
     readonly headerOverheadTokens: number;
     readonly systemHeadTokens: number;
@@ -12,6 +15,7 @@ export interface SchedulingLimits {
 }
 
 export interface SummaryInputEstimate {
+    readonly execution: "independent" | "session";
     readonly historyTokens: number;
     readonly systemTokens: number;
     readonly toolsTokens: number;
@@ -55,13 +59,13 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
         "No balanced historical prefix satisfies retention and current-task protection.",
         "Keep the active task intact; continue until an older complete prefix is available, or inspect the retention target.",
     ],
-    no_marks: [
+    no_request: [
         "There is no queued history or checkpoint request for proactive summarization.",
         "Release consumed tool evidence or request a checkpoint when useful.",
     ],
     disabled: [
         "This automatic scheduling path is disabled by policy.",
-        "Inspect auto, scheduling.enabled and scheduling.proactive; an explicit user /compact remains available.",
+        "Automatic summaries are disabled; queued requests and safety recovery remain available.",
     ],
     no_business_evidence: [
         "The selectable prefix contains no new business evidence.",
@@ -71,9 +75,21 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
         "The previous summary did not reduce provider-observed pressure, and no new business prefix is available.",
         "Inspect protected input and the last pressure effect before requesting another summary.",
     ],
-    eligible: [
-        "The candidate meets the interval, savings and estimated payback gates.",
-        "The queued checkpoint can run at the next eligible step boundary.",
+    cost_optimum: [
+        "The current checkpoint minimizes the bounded forecast cost per new business token.",
+        "Prepare and commit the selected checkpoint.",
+    ],
+    cost_deferred: [
+        "A later checkpoint has lower forecast cost within the window budget.",
+        "Reconsider after growth, cache changes or increased window pressure.",
+    ],
+    window_pressure: [
+        "The cost-adjusted window threshold has been reached.",
+        "Prepare a checkpoint and verify the resulting prompt size.",
+    ],
+    no_savings: [
+        "The proposed summary has no positive estimated saving.",
+        "Keep the request until a useful selection exists.",
     ],
     safety_pressure: [
         "Prompt pressure reached the window threshold; economic gates are bypassed.",
@@ -86,7 +102,7 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
 };
 
 /** On-demand explanations: no session writes and no extra prompt injection. */
-export function describeScheduling(input: DiagnosticInput, policy: Readonly<SchedulingPolicy>) {
+export function describeScheduling(input: DiagnosticInput, _policy: Readonly<SchedulingPolicy>) {
     const plan = input.plan;
     let [summary, nextAction] = explanations[input.reason] ?? [
         `Scheduling gate: ${input.reason}.`,
@@ -96,30 +112,7 @@ export function describeScheduling(input: DiagnosticInput, policy: Readonly<Sche
         summary = `A summary failed; retry is deferred for ${input.retryAfterSteps} completed steps.`;
         nextAction =
             "Inspect the recorded failure and fix its cause before retrying; existing intent is preserved.";
-    } else if (input.reason === "min_interval" && plan !== null) {
-        summary = `Only ${plan.stepsSinceSummary} steps have completed; policy requires ${policy.minIntervalSteps}.`;
-        nextAction = "Keep working; the queued request will be reconsidered at a later boundary.";
-    } else if (input.reason === "min_savings" && plan !== null) {
-        summary = `Estimated net savings are ${plan.netSavingTokens} tokens; policy requires at least ${policy.minSavingsTokens} and a positive saving.`;
-        nextAction = "Keep the queued request until a larger useful prefix is available.";
-    } else if (input.reason === "min_ratio" && plan !== null) {
-        summary = `Estimated savings are ${(plan.savingsRatio * 100).toFixed(1)}% of the prompt; policy requires ${(policy.minSavingsRatio * 100).toFixed(1)}%.`;
-        nextAction = "Keep working; the current candidate saves too little of the complete prompt.";
-    } else if (input.reason === "not_paid_back" && plan !== null) {
-        summary =
-            plan.breakEvenTurns === null
-                ? "The candidate has no finite estimated payback at the current cache and savings assumptions."
-                : `Estimated payback needs ${plan.breakEvenTurns} future primary requests; policy allows ${policy.paybackTurns}.`;
-        nextAction =
-            "Keep working; waiting alone does not accumulate payback. Adjust the expected future requests or summary costs only when justified.";
     }
-    const projectedSaving = plan === null ? null : plan.perTurnSaving * policy.paybackTurns;
-    const expectedSaving =
-        projectedSaving !== null &&
-        Number.isFinite(projectedSaving) &&
-        projectedSaving <= Number.MAX_SAFE_INTEGER
-            ? projectedSaving
-            : null;
     const constraints: { code: string; message: string }[] = [];
     if (input.limits !== null) {
         const limits = input.limits;
@@ -153,17 +146,11 @@ export function describeScheduling(input: DiagnosticInput, policy: Readonly<Sche
                       independentRebuildTokens: plan.independentRebuildTokens,
                       summaryCost: plan.summaryCost,
                       incrementalRebuildPenalty: plan.initialRebuildPenalty,
-                      upfrontCost: plan.summaryCost + plan.initialRebuildPenalty,
-                      expectedFutureRequests: policy.paybackTurns,
-                      expectedSaving,
-                      paybackGap:
-                          expectedSaving === null
-                              ? null
-                              : Math.max(
-                                    0,
-                                    plan.summaryCost + plan.initialRebuildPenalty - expectedSaving,
-                                ),
-                      breakEvenRequests: plan.breakEvenTurns,
+                      currentUnitCost: plan.currentUnitCost,
+                      bestUnitCost: plan.bestUnitCost,
+                      recommendedAtTokens: plan.recommendedAtTokens,
+                      latestStartTokens: plan.latestStartTokens,
+                      confidence: plan.confidence,
                   },
     };
 }
@@ -173,10 +160,9 @@ export function describeReleaseBatch(plan: ReleaseBatchPlan) {
     const explanations: Partial<Record<ReleaseBatchPlan["reason"], string>> = {
         no_releases: "No eligible native replacements are queued.",
         active_compaction: "A summary transaction is active; releases remain queued.",
-        hot_cache: "The queued batch waits for an independent rebuild or cache expiry opportunity.",
-        min_release: "The batch is below the minimum positive savings target.",
-        max_wait: "The oldest queued release reached the maximum business-step wait.",
-        backlog_watermark: "Queued net savings reached the configured prompt fraction.",
+        await_summary: "Older replacements await a covering checkpoint or a cheaper rebuild.",
+        economical_release:
+            "The selected recent replacements can settle without rebuilding the stable prefix.",
         cache_expired:
             "Same-route primary cache-hit usage exceeds the configured TTL; expiry is assumed.",
     };

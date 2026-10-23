@@ -82,6 +82,7 @@ export function isNumberedInput(message: UserMessage): boolean {
         "runtime-context",
         "compact-checkpoint",
         "fold-context-attachment-recovery",
+        "fold-context-session-summary",
     ].includes(message.source.kind);
 }
 function shapeOf(message: Message): NumberSlot["summaryShape"] {

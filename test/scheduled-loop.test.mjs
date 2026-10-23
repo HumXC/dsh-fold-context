@@ -10,13 +10,6 @@ import { assertTestRoot, call, loopFixture } from "./loop-fixture.mjs";
 
 const signal = () => new AbortController().signal;
 const affordable = {
-    enabled: true,
-    minIntervalSteps: 0,
-    minSavingsTokens: 0,
-    minSavingsRatio: 0,
-    expectedSummaryRatio: 0.05,
-    paybackTurns: 32,
-    cacheReadRatio: 1,
     summaryInputRatio: 0.01,
     summaryOutputRatio: 0.01,
 };
@@ -28,7 +21,7 @@ async function candidate(
     const f = await fixture({
         ...options,
         scheduling: { ...affordable, ...scheduling },
-        compaction: { retainTokens: 256, ...compaction },
+        compaction: { targetTokens: 4096, cacheReadRatio: 1, ...compaction },
     });
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
@@ -49,7 +42,11 @@ async function candidate(
                 .isError,
             false,
         );
-    f.appendUser("Keep this current balanced tail. ".repeat(80));
+    f.appendUser(
+        "Keep this current balanced tail. ".repeat(
+            Math.max(200, Math.ceil((compaction.targetTokens ?? 4096) / 32)),
+        ),
+    );
     return { ...f, id, original };
 }
 
@@ -80,10 +77,10 @@ function assistant(f, text = "A committed work step.") {
     f.session.append("step/end", { turn: 1, step });
 }
 
-test("model checkpoint requests below pressure wait for the interval and preserve their intent", async (t) => {
-    const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
+test("cheap-cache checkpoint requests wait for a later economic window and preserve intent", async (t) => {
+    const f = await candidate(t, { compaction: { targetTokens: 100000, cacheReadRatio: 0 } });
     const status = await f.engine.schedulingStatus(f.agent);
-    assert.equal(status.reason, "min_interval");
+    assert.equal(status.reason, "cost_deferred");
     assert.equal(status.decision, "wait");
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
     assert.equal(f.calls.length, 0);
@@ -94,9 +91,12 @@ test("model checkpoint requests below pressure wait for the interval and preserv
     );
 });
 
-test("model checkpoint requests below pressure pass through the savings gate", async (t) => {
-    const f = await candidate(t, { scheduling: { minSavingsTokens: 1000000 } });
-    assert.equal((await f.engine.schedulingStatus(f.agent)).reason, "min_savings");
+test("expensive summaries below the target remain queued", async (t) => {
+    const f = await candidate(t, {
+        compaction: { targetTokens: 100000, cacheReadRatio: 0.1 },
+        scheduling: { summaryInputRatio: 1000 },
+    });
+    assert.equal((await f.engine.schedulingStatus(f.agent)).reason, "cost_deferred");
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
     assert.equal(f.calls.length, 0);
     assert.equal(f.engine.hasSummaryRequest(f.session), true);
@@ -105,7 +105,7 @@ test("model checkpoint requests below pressure pass through the savings gate", a
 test("eligible requests summarize the full unmarked span through official transactions", async (t) => {
     const f = await candidate(t, { mark: false });
     const status = await f.engine.schedulingStatus(f.agent);
-    assert.equal(status.reason, "eligible");
+    assert.equal(status.reason, "window_pressure");
     assert.deepEqual(status.plan.markedIds, []);
     assert.ok(status.plan.netSavingTokens > 1000);
     const result = await f.engine.compactIfNeeded(f.agent, "pressure", signal());
@@ -138,17 +138,12 @@ test("eligible requests summarize the full unmarked span through official transa
     );
 });
 
-test("queued tool marks drain without summaries independently of automatic and proactive checkpointing", async (t) => {
-    for (const [auto, proactive] of [
-        [true, true],
-        [false, true],
-        [true, false],
-    ]) {
+test("recent tool marks drain without summaries whether automatic checkpointing is enabled", async (t) => {
+    for (const auto of [true, false]) {
         const f = await candidate(t, {
             request: false,
             mark: true,
-            compaction: { auto },
-            scheduling: { proactive },
+            compaction: { auto, targetTokens: 100000 },
         });
         assert.equal(
             f.engine.state(f.session).entries.find((entry) => entry.id === f.id).status,
@@ -164,11 +159,11 @@ test("queued tool marks drain without summaries independently of automatic and p
     }
 });
 
-test("pressure and overflow bypass checkpoint interval and savings gates", async (t) => {
+test("pressure and overflow bypass adverse summary economics", async (t) => {
     const pressure = await candidate(t, {
         request: false,
-        compaction: { auto: true, thresholdRatio: 0.5 },
-        scheduling: { minIntervalSteps: 100, minSavingsTokens: 1000000 },
+        compaction: { auto: true, targetTokens: 2048, cacheReadRatio: 0 },
+        scheduling: { summaryInputRatio: 1000 },
     });
     pressure.llm.resolveModelInfo = async () => ({
         context: { contextWindow: 4096 },
@@ -182,19 +177,20 @@ test("pressure and overflow bypass checkpoint interval and savings gates", async
     assert.equal(pressure.calls.length, 1);
     const overflow = await candidate(t, {
         request: false,
-        scheduling: { proactive: false, minIntervalSteps: 100, minSavingsTokens: 1000000 },
+        compaction: { cacheReadRatio: 0 },
+        scheduling: { summaryInputRatio: 1000 },
     });
     assert.ok(await overflow.engine.compactIfNeeded(overflow.agent, "context-overflow", signal()));
     assert.equal(overflow.calls.length, 1);
 });
 
-test("disabled scheduling keeps model requests queued without a forced overflow fallback", async (t) => {
+test("automatic summaries disabled still honors economic deferral of explicit requests", async (t) => {
     const f = await candidate(t, {
-        scheduling: { enabled: false, minIntervalSteps: 100, minSavingsTokens: 1000000 },
+        compaction: { auto: false, targetTokens: 100000, cacheReadRatio: 0 },
     });
     const status = await f.engine.schedulingStatus(f.agent);
     assert.equal(status.decision, "wait");
-    assert.equal(status.reason, "disabled");
+    assert.equal(status.reason, "cost_deferred");
     assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
     assert.equal(f.calls.length, 0);
     assert.equal(f.engine.hasSummaryRequest(f.session), true);
@@ -203,7 +199,8 @@ test("disabled scheduling keeps model requests queued without a forced overflow 
 test("direct user compactNow bypasses checkpoint economics without a queued model request", async (t) => {
     const f = await candidate(t, {
         request: false,
-        scheduling: { minIntervalSteps: 100, minSavingsTokens: 1000000 },
+        compaction: { targetTokens: 100000, cacheReadRatio: 0 },
+        scheduling: { summaryInputRatio: 1000 },
     });
     f.session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
     assert.equal(f.engine.hasSummaryRequest(f.session), false);
@@ -248,18 +245,21 @@ test("checkpoint status plans are read-only, bounded and account for transcript 
     );
 });
 
-test("checkpoint intervals count committed assistant slots consistently across cold and fork replay", async (t) => {
-    const f = await candidate(t, { scheduling: { minIntervalSteps: 100 } });
+test("checkpoint cost and window decisions remain identical across cold and fork replay", async (t) => {
+    const f = await candidate(t, { compaction: { targetTokens: 100000, cacheReadRatio: 0 } });
     assistant(f);
     const live = await f.engine.schedulingStatus(f.agent);
     const seed = JSON.parse(JSON.stringify(f.session.snapshotEvents()));
     const cold = Session.create(f.session.id, seed, f.session.header);
     const fork = f.sessions.fork(f.session);
     for (const session of [cold, fork]) {
-        const status = await f.engine.schedulingStatus({ ...f.agent, session });
-        assert.equal(status.reason, "min_interval");
-        assert.equal(status.plan.stepsSinceSummary, live.plan.stepsSinceSummary);
-        assert.deepEqual(status.selection, live.selection);
+        await f.withSessionQuery(session, async () => {
+            const status = await f.engine.schedulingStatus({ ...f.agent, session });
+            assert.equal(status.reason, "cost_deferred");
+            assert.equal(status.plan.currentUnitCost, live.plan.currentUnitCost);
+            assert.equal(status.plan.recommendedAtTokens, live.plan.recommendedAtTokens);
+            assert.deepEqual(status.selection, live.selection);
+        });
     }
     assert.equal(f.calls.length, 0);
 });
@@ -308,30 +308,41 @@ test("failed scheduled checkpoints preserve evidence and request and suppress un
     for (const session of [cold, fork]) {
         assert.equal(f.engine.hasSummaryRequest(session), true);
         assert.equal(f.engine.state(session).summaryRequests.at(-1).retryable, true);
-        assert.equal(
-            (await f.engine.schedulingStatus({ ...f.agent, session })).reason,
-            "failed_cooldown",
-        );
-        assert.equal(
-            await f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
-            null,
-        );
+        await f.withSessionQuery(session, async () => {
+            assert.equal(
+                (await f.engine.schedulingStatus({ ...f.agent, session })).reason,
+                "failed_cooldown",
+            );
+            assert.equal(
+                await f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
+                null,
+            );
+        });
     }
     assert.equal(f.calls.length, 1);
-    assistant(f, "Fresh committed evidence allows the next retry.");
+    const cooldown = status.failure.retryAfterSteps;
+    assert.ok(Number.isSafeInteger(cooldown) && cooldown > 0);
+    for (let step = 0; step < cooldown; step++) {
+        assistant(f, `Fresh committed evidence ${step + 1} advances recovery.`);
+        const progress = await f.engine.schedulingStatus(f.agent);
+        assert.equal(progress.failure.retryAfterSteps, cooldown - step - 1);
+        if (step + 1 < cooldown) {
+            assert.equal(progress.reason, "failed_cooldown");
+            assert.equal(await f.engine.compactIfNeeded(f.agent, "pressure", signal()), null);
+            assert.equal(f.calls.length, 1);
+        }
+    }
     const retryStatus = await f.engine.schedulingStatus(f.agent);
     assert.equal(retryStatus.failure.retryAfterSteps, 0);
-    assert.equal(retryStatus.reason, "eligible");
+    assert.equal(retryStatus.reason, "window_pressure");
     failSummary = false;
     const retrySeed = JSON.parse(JSON.stringify(f.session.snapshotEvents()));
     const retryCold = Session.create(f.session.id, retrySeed, f.session.header);
     const retryFork = f.sessions.fork(f.session);
     retryFork.append("turn/start", { turn: 2 });
     for (const session of [f.session, retryCold, retryFork]) {
-        const result = await f.engine.compactIfNeeded(
-            { ...f.agent, session },
-            "pressure",
-            signal(),
+        const result = await f.withSessionQuery(session, async () =>
+            f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
         );
         assert.ok(result);
         assert.equal(session.eventAt(result.endSeq).data.error, undefined);
@@ -353,7 +364,7 @@ test("failed scheduled checkpoints preserve evidence and request and suppress un
 });
 
 test("obsolete version-4 checkpoint receipts cannot create or revive a request during replay", async (t) => {
-    const f = await candidate(t, { request: false, scheduling: { enabled: false } });
+    const f = await candidate(t, { request: false, compaction: { auto: false } });
     f.toolRound(
         "context_compact",
         JSON.stringify({
@@ -377,17 +388,19 @@ test("obsolete version-4 checkpoint receipts cannot create or revive a request d
         assert.equal(f.engine.state(session).summaryRequests.length, 0);
         assert.equal(f.engine.hasSummaryRequest(session), false);
         assert.equal(
-            await f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
+            await f.withSessionQuery(session, async () =>
+                f.engine.compactIfNeeded({ ...f.agent, session }, "pressure", signal()),
+            ),
             null,
         );
     }
     assert.equal(f.calls.length, 0);
 });
 
-test("checkpoint intervals follow the latest applied summary after replay", async (t) => {
-    const f = await candidate(t, { scheduling: { minIntervalSteps: 3 } });
+test("a new useful span is independently eligible after an applied summary and cold replay", async (t) => {
+    const f = await candidate(t, { compaction: { targetTokens: 4096 } });
     assistant(f);
-    assistant(f, "A second committed work step completes the interval.");
+    assistant(f, "A second committed work step preserves the current task.");
     assert.ok(await f.engine.compactIfNeeded(f.agent, "pressure", signal()));
     f.appendUser("A new historical span. ".repeat(800));
     assert.equal(
@@ -396,23 +409,26 @@ test("checkpoint intervals follow the latest applied summary after replay", asyn
     );
     f.appendUser("Retain a new current tail. ".repeat(100));
     const current = await f.engine.schedulingStatus(f.agent);
-    assert.equal(current.reason, "min_interval");
-    assert.equal(current.plan.stepsSinceSummary, 1);
+    assert.equal(current.decision, "execute");
+    assert.equal(current.reason, "window_pressure");
     const cold = Session.create(
         f.session.id,
         JSON.parse(JSON.stringify(f.session.snapshotEvents())),
         f.session.header,
     );
-    assert.equal(
-        (await f.engine.schedulingStatus({ ...f.agent, session: cold })).plan.stepsSinceSummary,
-        1,
+    const coldStatus = await f.withSessionQuery(cold, async () =>
+        f.engine.schedulingStatus({ ...f.agent, session: cold }),
     );
+    assert.equal(coldStatus.reason, current.reason);
+    assert.deepEqual(coldStatus.selection, current.selection);
+    assert.equal(coldStatus.plan.currentUnitCost, current.plan.currentUnitCost);
 });
 
 test("real isolated AgentLoop queues an economic request without making a summary call", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "fold-context-test-"));
     const f = await loopFixture(root, {
-        scheduling: { ...affordable, minIntervalSteps: 100 },
+        compaction: { targetTokens: 12000, cacheReadRatio: 0 },
+        scheduling: affordable,
         responses: [
             { blocks: [{ type: "text", text: "Recorded historical evidence." }] },
             call("context_compact", { reason: "Wait for the next economical checkpoint" }),
@@ -426,9 +442,9 @@ test("real isolated AgentLoop queues an economic request without making a summar
     });
     const handle = await f.create();
     await f.followup(handle, "Review this history. ".repeat(1000));
-    await f.followup(handle, "Keep this current balanced tail. ".repeat(100));
+    await f.followup(handle, "Keep this current balanced tail. ".repeat(500));
     assert.equal(f.summaries.length, 0);
     assert.equal(f.engine.hasSummaryRequest(handle.agent.session), true);
-    assert.equal((await f.engine.schedulingStatus(handle.agent)).reason, "min_interval");
+    assert.equal((await f.engine.schedulingStatus(handle.agent)).reason, "cost_deferred");
     await f.flush(handle);
 });

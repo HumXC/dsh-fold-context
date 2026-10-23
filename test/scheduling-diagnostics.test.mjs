@@ -86,7 +86,7 @@ test("fixed request overhead explains an unreachable pressure target", async (t)
 });
 
 test("protected current input is diagnosed without summarizing away the task", async (t) => {
-    const f = await fixture({ compaction: { auto: true, retainTokens: 1 }, scheduling: {} });
+    const f = await fixture({ compaction: { auto: true }, scheduling: {} });
     t.after(f.close);
     f.llm.resolveModelInfo = async () => ({ context: { contextWindow: 1024 } });
     const tail = f.appendUser("Current task requirements must remain. ".repeat(300));
@@ -115,11 +115,11 @@ test("an atomic old step retained by the tail budget has an explicit no-selectio
 });
 
 test("summary input breakdown and protected lower bound conserve token estimates", async (t) => {
-    const f = await fixture({ compaction: { retainTokens: 32 }, scheduling: {} });
+    const f = await fixture({ compaction: { targetTokens: 2048 }, scheduling: {} });
     t.after(f.close);
     f.session.append("turn/start", { turn: 1 });
     f.toolRound("older_work", "Business evidence. ".repeat(900));
-    f.appendUser("Keep this complete active task. ".repeat(30));
+    f.appendUser("Keep this complete active task. ".repeat(150));
     const before = JSON.stringify(f.session.snapshotEvents());
     const status = await f.engine.schedulingStatus(f.agent, signal());
     const input = status.summaryInput;
@@ -141,34 +141,33 @@ test("summary input breakdown and protected lower bound conserve token estimates
     assert.equal(f.calls.length, 0);
 });
 
-test("payback diagnostics compare future requests and cost assumptions rather than elapsed steps", () => {
-    const policy = resolveSchedulingPolicy({ paybackTurns: 8 });
+test("cost diagnostics explain the forecast and its next window boundary", () => {
+    const policy = resolveSchedulingPolicy({ cacheReadRatio: 0 });
     const value = {
-        trigger: "backlog",
+        trigger: "model_request",
         totalTokens: 12000,
         selectedTokens: 8000,
         prefixTokens: 1000,
-        excludedTokens: 2000,
+        filterInputTokens: 8000,
         stepsSinceSummary: 100,
         markedIds: ["T1"],
+        targetTokens: 17000,
+        safetyTokens: 24000,
     };
     const plan = planScheduledCompaction(value, policy);
     const diagnostic = describeScheduling(
         { reason: plan.reason, plan, limits: null, retryAfterSteps: 0 },
         policy,
     );
-    assert.equal(plan.reason, "not_paid_back");
-    assert.match(diagnostic.summary, /17 future primary requests.*8/);
-    assert.match(diagnostic.nextAction, /waiting alone does not accumulate/);
-    assert.equal(diagnostic.economics.upfrontCost, 10980);
-    assert.equal(diagnostic.economics.expectedSaving, 5440);
+    assert.equal(plan.reason, "cost_deferred");
+    assert.match(diagnostic.summary, /later checkpoint.*lower forecast cost/);
+    assert.match(diagnostic.nextAction, /growth, cache changes.*window pressure/);
+    assert.equal(diagnostic.economics.currentUnitCost, plan.currentUnitCost);
+    assert.equal(diagnostic.economics.bestUnitCost, plan.bestUnitCost);
+    assert.ok(diagnostic.economics.bestUnitCost < diagnostic.economics.currentUnitCost);
+    assert.ok(diagnostic.economics.recommendedAtTokens > value.totalTokens);
+    assert.ok(diagnostic.economics.recommendedAtTokens <= diagnostic.economics.latestStartTokens);
     assert.equal(diagnostic.economics.cacheBasis, "assumed_cached");
-    const noSaving = planScheduledCompaction(value, { ...policy, cacheReadRatio: 0 });
-    assert.match(
-        describeScheduling(
-            { reason: noSaving.reason, plan: noSaving, limits: null, retryAfterSteps: 0 },
-            policy,
-        ).summary,
-        /no finite estimated payback/,
-    );
+    assert.equal(diagnostic.economics.confidence, "cold_start");
+    assert.equal(Object.hasOwn(diagnostic.economics, "paybackGap"), false);
 });

@@ -2,6 +2,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { defineTool, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { z } from "zod";
 import type { ContextCompressionEngine } from "./engine.js";
+import { registerPtcIntents } from "./ptc-intent.js";
 import { catalog, planRelease } from "../domain/planner.js";
 import { optionalItems, optionalParameter } from "./tool-arguments.js";
 import {
@@ -28,12 +29,19 @@ function intentMetadata(args: unknown, value: unknown) {
                   },
     };
 }
-function actor(exec: ToolRunContext) {
+function actor(exec: ToolRunContext, engine?: ContextCompressionEngine) {
     if (exec.agent === undefined) throw new Error("fold-context tools require an owning agent");
     exec.signal.throwIfAborted();
+    if (
+        engine !== undefined &&
+        exec.parent !== undefined &&
+        engine.state(exec.agent.session).currentStep === null
+    )
+        throw new Error("fold-context PTC tools require an open agent step");
     return exec.agent;
 }
 export function registerCompressionTools(ctx: Context, engine: ContextCompressionEngine) {
+    registerPtcIntents(ctx, engine);
     ctx.tools.register(
         defineTool({
             name: RELEASE_TOOL,
@@ -60,7 +68,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 presentationMeta: intentMetadata,
             },
             execute: async (args, exec) => {
-                const agent = actor(exec);
+                const agent = actor(exec, engine);
                 const ids = idsSchema.parse(args.ids);
                 z.string().trim().min(1).max(1000).parse(args.reason);
                 const plan = planRelease(engine.state(agent.session), ids);
@@ -74,7 +82,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                                     ?.status === "available",
                         )
                             ? {
-                                  version: 8,
+                                  version: exec.parent === undefined ? 8 : 9,
                                   kind: "release",
                                   sessionId: agent.session.id,
                                   ids: plan.queued,
@@ -88,7 +96,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: COMPACT_TOOL,
             description:
-                "Queue a checkpoint request for a step boundary. Scheduling may wait for interval, savings and estimated payback; context_status reports the gate. A covering summary omits eligible marks, replaces the full historical prefix and retains the latest balanced tail.",
+                "Queue a checkpoint request for a safe step boundary. Timing depends on target window, relative cache cost and safety; context_status explains waiting. A covering summary absorbs eligible marks and retains a balanced recent tail.",
             parameters: {
                 reason: {
                     type: "string",
@@ -103,7 +111,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                 presentationMeta: intentMetadata,
             },
             execute: async (args, exec) => {
-                const agent = actor(exec);
+                const agent = actor(exec, engine);
                 z.string().trim().min(1).max(1000).parse(args.reason);
                 const pending = engine.hasSummaryRequest(agent.session);
                 return {
@@ -112,7 +120,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                     [RECEIPT_KEY]: pending
                         ? null
                         : {
-                              version: 8,
+                              version: exec.parent === undefined ? 8 : 9,
                               kind: "summary",
                               sessionId: agent.session.id,
                               ids: [],
@@ -125,7 +133,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
         defineTool({
             name: STATUS_TOOL,
             description:
-                "Inspect numbered content, releases and summary coverage. Reports compaction blockers, next actions, protected input, pressure verification and payback estimates. Query exact IDs or an owner ID for attachments.",
+                "Inspect numbered content, releases and summary coverage. Reports waiting reasons, target and safety windows, cost estimates, protected input and pressure verification. Query exact IDs or an owner ID for attachments.",
             parameters: {
                 ids: optionalParameter(
                     { type: "array", items: { type: "integer" } },
@@ -176,6 +184,7 @@ export function registerCompressionTools(ctx: Context, engine: ContextCompressio
                     entries: view.entries.map((entry) => ({ ...entry })),
                     omitted: view.omitted,
                     summaryRequests: view.summaryRequests.map((request) => ({ ...request })),
+                    summaryPreparation: engine.sessionSummaryStatus(agent.session),
                     lastSummary: view.lastSummary === null ? null : { ...view.lastSummary },
                 };
             },

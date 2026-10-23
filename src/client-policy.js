@@ -3,49 +3,53 @@ Object.assign(zh, {
     policySettingsTitle: "上下文压缩设置",
     policyTitle: "运行策略",
     policyDescription:
-        "每组可继承 Agent 预设或使用下面的自定义值。未自定义时保留预设原有配置；以下数值是插件默认值或已保存的自定义值。",
-    policyApplies: "运行策略用于之后启动的会话；摘要模型从下一次摘要开始生效。",
+        "每个字段可继承 Agent 预设。留空或选择继承时不写入覆盖值；运行时状态显示最终生效策略。",
+    policyApplies: "修改在下一次安全决策边界生效；进行中的摘要继续使用原配置。",
     policyInherit: "继承 Agent 预设",
     policyCustom: "使用自定义配置",
-    policyReset: "恢复本组默认值",
+    policyReset: "恢复本组继承",
     policyOn: "开启",
     policyOff: "关闭",
-    policyOptional: "留空使用默认行为",
+    policyOptional: "留空继承 Agent 预设",
     policyModelOptional: "留空继承本组设置",
+    policyModelsInherit: "继承预设的模型策略",
+    policyModelsExplicit: "使用此模型策略列表（空列表表示禁用预设的模型策略）",
     policyInvalid: "配置有误，请检查：",
     policyFieldInvalid: "请输入符合范围和格式要求的值。",
     policyModelsTitle: "按会话模型覆盖",
     policyModelsHelp:
-        "按供应商和模型精确匹配，第一条匹配项生效；只填写需要覆盖的值。供应商或模型暂不可用时保留原值。",
+        "按供应商和模型精确匹配，同一路由不能重复；只填写需要覆盖的值。供应商或模型暂不可用时保留原值。",
     policyModelsEmpty: "尚无模型专属策略。",
     policyModelsAdd: "添加模型策略",
     policyModelRow: "会话模型策略 {index}",
-    summarySettingsSavedAll: "已保存。摘要模型用于下一次摘要，运行策略用于之后启动的会话。",
+    summarySettingsSavedAll: "已保存。修改在下一次安全决策边界生效。",
 });
 Object.assign(en, {
     policySettingsTitle: "Context compression settings",
     policyTitle: "Runtime policies",
     policyDescription:
-        "Each group can inherit the Agent preset or use the custom values below. Inherited groups preserve existing preset settings; displayed values are plugin defaults or saved custom values.",
+        "Each omitted field inherits the Agent preset. Runtime status reports the effective policy.",
     policyApplies:
-        "Runtime policies apply to subsequently started sessions. Summary model changes apply to the next summary.",
+        "Changes apply at the next safe decision boundary; active summaries keep their configuration.",
     policyInherit: "Inherit Agent preset",
     policyCustom: "Use custom settings",
-    policyReset: "Reset group defaults",
+    policyReset: "Reset group inheritance",
     policyOn: "On",
     policyOff: "Off",
-    policyOptional: "Leave blank for default behavior",
+    policyOptional: "Leave blank to inherit the Agent preset",
     policyModelOptional: "Leave blank to inherit this group",
+    policyModelsInherit: "Inherit preset model policies",
+    policyModelsExplicit:
+        "Use this model policy list (an empty list disables preset model policies)",
     policyInvalid: "Check these settings:",
     policyFieldInvalid: "Enter a value within the allowed range and format.",
     policyModelsTitle: "Per-session-model overrides",
     policyModelsHelp:
-        "Match provider and model exactly; the first match wins. Fill only values to override. Saved routes remain intact when unavailable.",
+        "Match provider and model exactly, with no duplicate routes. Fill only values to override. Saved routes remain intact when unavailable.",
     policyModelsEmpty: "No per-model policies yet.",
     policyModelsAdd: "Add model policy",
     policyModelRow: "Session model policy {index}",
-    summarySettingsSavedAll:
-        "Saved. Summary models apply to the next summary; runtime policies apply to subsequently started sessions.",
+    summarySettingsSavedAll: "Saved. Changes apply at the next safe decision boundary.",
 });
 const policyTextKey = (group, field, suffix = "label") => `policy_${group}_${field}_${suffix}`;
 for (const group of POLICY_GROUPS) {
@@ -70,29 +74,28 @@ function policyDraftPayload(draft) {
         const converted = { ...values };
         for (const field of fields) {
             const value = converted[field.key];
-            if ((field.optional || inherited) && (value === "" || value === undefined))
+            if (
+                (field.optional || inherited) &&
+                (value === undefined || (typeof value === "string" && value.trim() === ""))
+            )
                 delete converted[field.key];
             else if (typeof value === "string" && ["number", "integer"].includes(field.type))
-                converted[field.key] = value.trim() === "" ? "" : Number(value);
-            else if (field.type === "steps" && typeof value === "string")
-                converted[field.key] = value
-                    .split(/[,，]/)
-                    .map((item) => (item.trim() === "" ? NaN : Number(item.trim())));
+                converted[field.key] = Number(value);
         }
         return converted;
     };
     for (const group of POLICY_GROUPS) {
-        const entry = draft[group.key];
-        const values = convert(group.fields, entry.values, false);
-        if (group.key === "compaction")
-            values.modelPolicies = entry.values.modelPolicies.map((row) =>
+        const entry = draft[group.key] ?? {};
+        const values = convert(group.fields, entry, true);
+        if (group.key === "compaction" && entry.modelPolicies !== undefined)
+            values.modelPolicies = entry.modelPolicies.map((row) =>
                 convert(
-                    group.fields.filter((field) => field.key !== "auto"),
+                    group.fields.filter((field) => field.perModel),
                     row,
                     true,
                 ),
             );
-        result[group.key] = { enabled: entry.enabled, values };
+        result[group.key] = values;
     }
     return normalizePolicyOverrides(result);
 }
@@ -115,7 +118,7 @@ function policyErrorLabel(error, t) {
     return `${prefix}${parts[1] ? ` · ${t(policyTextKey(group.key, parts[1]))}` : ""}`;
 }
 function renderPolicySettings(controller, state, t, id) {
-    if (!state.supportsPolicies || !state.policyOverrides) return null;
+    if (!state.policyOverrides) return null;
     const editable = controller.canEdit();
     const error = controller.policyError();
     const renderField = (
@@ -134,13 +137,20 @@ function renderPolicySettings(controller, state, t, id) {
         const attributes = {
             id: inputId,
             disabled,
-            value: value ?? "",
+            value:
+                field.type === "boolean" && typeof value === "boolean"
+                    ? String(value)
+                    : (value ?? ""),
             "aria-label": `${t(policyTextKey(group.key, "group"))} · ${prefix.includes("-model-") ? `${t("policyModelRow").replace("{index}", String(Number(prefix.split("-model-").at(-1)) + 1))} · ` : ""}${title}`,
             "aria-describedby": `${inputId}-help${invalid ? ` ${inputId}-error` : ""}`,
             "aria-invalid": invalid || undefined,
             onChange: (event) =>
                 onChange(
-                    field.type === "boolean" ? event.target.value === "true" : event.target.value,
+                    event.target.value === ""
+                        ? ""
+                        : field.type === "boolean"
+                          ? event.target.value === "true"
+                          : event.target.value,
                 ),
         };
         const control =
@@ -148,6 +158,7 @@ function renderPolicySettings(controller, state, t, id) {
                 ? h(
                       "select",
                       attributes,
+                      h("option", { value: "" }, t("policyInherit")),
                       ...(field.type === "boolean"
                           ? [
                                 h("option", { key: "on", value: "true" }, t("policyOn")),
@@ -169,7 +180,9 @@ function renderPolicySettings(controller, state, t, id) {
                       max: field.max,
                       step: field.type === "integer" ? 1 : "any",
                       required: !field.optional && !inherited,
-                      placeholder: t(inherited ? "policyModelOptional" : "policyOptional"),
+                      placeholder: t(
+                          prefix.includes("-model-") ? "policyModelOptional" : "policyOptional",
+                      ),
                   });
         return h(
             "div",
@@ -191,12 +204,31 @@ function renderPolicySettings(controller, state, t, id) {
         );
     };
     const renderModels = (group, disabled) => {
-        const rows = state.policyOverrides.compaction.values.modelPolicies;
+        const rows = state.policyOverrides.compaction.modelPolicies ?? [];
         return h(
             "div",
             { className: "fc-policy-models" },
             h("h4", null, t("policyModelsTitle")),
             h("p", { className: "fc-settings-note" }, t("policyModelsHelp")),
+            h(
+                "p",
+                { className: "fc-settings-note" },
+                t(
+                    state.policyOverrides.compaction.modelPolicies === undefined
+                        ? "policyModelsInherit"
+                        : "policyModelsExplicit",
+                ),
+            ),
+            h(
+                "button",
+                {
+                    type: "button",
+                    disabled:
+                        disabled || state.policyOverrides.compaction.modelPolicies === undefined,
+                    onClick: () => controller.inheritPolicyModels(),
+                },
+                t("policyModelsInherit"),
+            ),
             !rows.length ? h("p", { className: "fc-settings-note" }, t("policyModelsEmpty")) : null,
             ...rows.map((row, index) => {
                 const rowId = `${id}-model-${index}`;
@@ -249,7 +281,7 @@ function renderPolicySettings(controller, state, t, id) {
                         routeSelect("provider", state.groups, "summarySettingsProvider"),
                         routeSelect("model", models, "summarySettingsModel"),
                         ...group.fields
-                            .filter((field) => field.key !== "auto")
+                            .filter((field) => field.perModel)
                             .map((field) =>
                                 renderField(
                                     group,
@@ -331,7 +363,7 @@ function renderPolicySettings(controller, state, t, id) {
             const entry = state.policyOverrides[group.key];
             const title = t(policyTextKey(group.key, "group"));
             const groupId = `${id}-policy-${group.key}`;
-            const disabled = !editable || !entry.enabled;
+            const disabled = !editable;
             return h(
                 "details",
                 { key: group.key, className: "fc-policy-group" },
@@ -342,7 +374,7 @@ function renderPolicySettings(controller, state, t, id) {
                     h(
                         "span",
                         { className: "fc-settings-note" },
-                        t(entry.enabled ? "policyCustom" : "policyInherit"),
+                        t(Object.keys(entry).length ? "policyCustom" : "policyInherit"),
                     ),
                 ),
                 h(
@@ -355,36 +387,16 @@ function renderPolicySettings(controller, state, t, id) {
                     ),
                     h(
                         "div",
-                        { className: "fc-settings-field" },
-                        h("label", { htmlFor: `${groupId}-mode` }, title),
-                        h(
-                            "select",
-                            {
-                                id: `${groupId}-mode`,
-                                value: String(entry.enabled),
-                                disabled: !editable,
-                                "aria-label": `${title} · ${t("policyCustom")}`,
-                                onChange: (event) =>
-                                    controller.setPolicyMode(
-                                        group.key,
-                                        event.target.value === "true",
-                                    ),
-                            },
-                            h("option", { value: "false" }, t("policyInherit")),
-                            h("option", { value: "true" }, t("policyCustom")),
-                        ),
-                    ),
-                    h(
-                        "div",
                         { className: "fc-settings-fields" },
                         ...group.fields.map((field) =>
                             renderField(
                                 group,
                                 field,
-                                entry.values[field.key],
+                                entry[field.key],
                                 disabled,
                                 (value) => controller.changePolicy(group.key, field.key, value),
                                 groupId,
+                                true,
                             ),
                         ),
                     ),

@@ -34,18 +34,11 @@ if (mode === "write") {
     let inlineEntry;
     const f = await loopFixture(root, {
         auto: false,
-        compaction: { retainTokens: 0 },
+        compaction: { targetTokens: 64, cacheReadRatio: 1 },
         // Keep this cold-process archival scenario independent of production cost thresholds.
         scheduling: {
-            minIntervalSteps: 0,
-            minSavingsTokens: 1,
-            minSavingsRatio: 0,
-            expectedSummaryRatio: 0.05,
-            cacheReadRatio: 1,
             summaryInputRatio: 0.01,
             summaryOutputRatio: 0.01,
-            releaseMinTokens: 0,
-            releaseBacklogRatio: 0.000001,
         },
         tools: { probe_read: () => original },
         responses: [
