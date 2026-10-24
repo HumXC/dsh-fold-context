@@ -39,6 +39,14 @@ const explanations: Readonly<Record<string, readonly [string, string]>> = {
         "The session has no routed provider/model.",
         "Configure the conversation route before requesting a checkpoint.",
     ],
+    no_matching_summary_model: [
+        "All configured summary models are restricted to other session routes.",
+        "Configure a summary model matching this session's provider and model, or add an independent fallback.",
+    ],
+    session_summary_unavailable: [
+        "The session-only summary cannot use the current Agent and no independent fallback is configured.",
+        "Check session Agent availability and preparation headroom, or configure an independent fallback.",
+    ],
     state_changed: [
         "The session changed during planning.",
         "Inspect again at the next stable step boundary.",

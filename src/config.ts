@@ -1,4 +1,5 @@
 import z from "@deepseek-ai/schemastery";
+import { summaryModelSchema, type SummaryModel } from "./domain/summary-models.js";
 
 /** User policy; native engine execution options are derived separately. */
 export interface FoldCompactionPolicy {
@@ -10,13 +11,18 @@ export interface FoldCompactionConfig extends FoldCompactionPolicy {
     summaryMaxTokens?: number;
     modelPolicies?: (FoldCompactionPolicy & { provider: string; model: string })[];
 }
-export const summaryModelConfigSchema = z.object({
-    provider: z.string().min(1).required(),
-    model: z.string().min(1).required(),
-    reasoningEffort: z.string().min(1),
-    preferWhenSessionMatches: z.boolean().default(true),
-    useSessionAgent: z.boolean().default(false),
-});
+export const summaryModelConfigSchema: Schemastery<any, SummaryModel> = z.transform(
+    z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+        reasoningEffort: z.string().min(1),
+        preferWhenSessionMatches: z.boolean(),
+        useSessionAgent: z.boolean().default(false),
+        onlyWhenSessionMatches: z.boolean().default(false),
+    }),
+    (value) => summaryModelSchema.parse(value),
+    true,
+);
 
 export function resolveFoldCompactionConfig(config: FoldCompactionConfig) {
     return {

@@ -94,6 +94,8 @@ window.__ModuleLoader__.load({
             missing_capacity: "模型未声明上下文窗口",
             metadata_unavailable: "无法读取模型配置",
             no_route: "尚未配置会话模型",
+            no_matching_summary_model: "会话模型不匹配摘要配置",
+            session_summary_unavailable: "无法沿用会话且没有可用的独立摘要模型",
             state_changed: "规划期间会话发生变化",
             active_compaction: "已有摘要事务正在执行",
             no_business_evidence: "历史前缀没有新的业务证据",
@@ -167,6 +169,11 @@ window.__ModuleLoader__.load({
             summarySettingsSessionAgent: "沿用会话生成摘要",
             summarySettingsSessionAgentHelp:
                 "默认关闭。开启后，匹配当前会话的首选模型可沿用会话并调用工具准备摘要；其他情况使用独立摘要请求。",
+            summarySettingsOnly: "仅为同模型会话生成摘要",
+            summarySettingsOnlyHelp:
+                "默认关闭。开启后，仅当供应商和模型均与当前会话一致时参与摘要，并沿用会话 Agent；不匹配时跳过此项。此选项与“匹配会话时优先”和“沿用会话生成摘要”互斥：开启会清除并禁用这两个选项，关闭后不会恢复。",
+            summarySettingsModeConflict:
+                "仅为同模型会话生成摘要不能与匹配会话时优先或沿用会话生成摘要同时开启。",
             summarySettingsAdd: "添加模型",
             summarySettingsUp: "上移",
             summarySettingsDown: "下移",
@@ -278,6 +285,8 @@ window.__ModuleLoader__.load({
             missing_capacity: "Model context window is missing",
             metadata_unavailable: "Model metadata unavailable",
             no_route: "No conversation route",
+            no_matching_summary_model: "No configured summary model matches this session",
+            session_summary_unavailable: "Session summary unavailable; no independent fallback",
             state_changed: "Session changed during planning",
             active_compaction: "A summary is already running",
             no_business_evidence: "No new business evidence in the prefix",
@@ -356,6 +365,11 @@ window.__ModuleLoader__.load({
             summarySettingsSessionAgent: "Use the session Agent for summaries",
             summarySettingsSessionAgentHelp:
                 "Off by default. When this entry is selected first and matches the session provider and model, the Agent can use its conversation and tools to prepare the summary. Other cases use an independent summary request.",
+            summarySettingsOnly: "Generate summaries only for matching-model sessions",
+            summarySettingsOnlyHelp:
+                "Off by default. This entry participates only when both provider and model match the current session, and uses the session Agent; otherwise it is skipped. This option is mutually exclusive with priority and session-Agent options: enabling it clears and disables both; disabling it does not restore them.",
+            summarySettingsModeConflict:
+                "Matching-model-only summaries cannot be combined with priority or session-Agent options.",
             summarySettingsAdd: "Add model",
             summarySettingsUp: "Move up",
             summarySettingsDown: "Move down",
@@ -446,17 +460,27 @@ window.__ModuleLoader__.load({
                     (row.reasoningEffort !== undefined && !text(row.reasoningEffort)) ||
                     (row.preferWhenSessionMatches !== undefined &&
                         typeof row.preferWhenSessionMatches !== "boolean") ||
-                    (row.useSessionAgent !== undefined && typeof row.useSessionAgent !== "boolean")
+                    (row.useSessionAgent !== undefined &&
+                        typeof row.useSessionAgent !== "boolean") ||
+                    (row.onlyWhenSessionMatches !== undefined &&
+                        typeof row.onlyWhenSessionMatches !== "boolean")
                 )
                     throw settingsProblem("summarySettingsInvalid");
+                if (
+                    row.onlyWhenSessionMatches === true &&
+                    (row.preferWhenSessionMatches === true || row.useSessionAgent === true)
+                )
+                    throw settingsProblem("summarySettingsModeConflict");
                 return {
                     provider: row.provider,
                     model: row.model,
                     ...(row.reasoningEffort === undefined
                         ? {}
                         : { reasoningEffort: row.reasoningEffort }),
-                    preferWhenSessionMatches: row.preferWhenSessionMatches ?? true,
+                    preferWhenSessionMatches:
+                        row.preferWhenSessionMatches ?? !row.onlyWhenSessionMatches,
                     useSessionAgent: row.useSessionAgent ?? false,
+                    onlyWhenSessionMatches: row.onlyWhenSessionMatches ?? false,
                 };
             });
         }
@@ -692,6 +716,7 @@ window.__ModuleLoader__.load({
                             model: "",
                             preferWhenSessionMatches: true,
                             useSessionAgent: false,
+                            onlyWhenSessionMatches: false,
                         },
                     ],
                     [...this.state.rowKeys, ++this.keySequence],
@@ -728,13 +753,21 @@ window.__ModuleLoader__.load({
                         "reasoningEffort",
                         "preferWhenSessionMatches",
                         "useSessionAgent",
+                        "onlyWhenSessionMatches",
                     ].includes(field)
                 )
                     return;
                 const row = { ...this.state.rows[index] };
-                if (field === "preferWhenSessionMatches" || field === "useSessionAgent")
+                if (field === "onlyWhenSessionMatches") {
+                    row.onlyWhenSessionMatches = value === true;
+                    if (row.onlyWhenSessionMatches) {
+                        row.preferWhenSessionMatches = false;
+                        row.useSessionAgent = false;
+                    }
+                } else if (field === "preferWhenSessionMatches" || field === "useSessionAgent") {
+                    if (row.onlyWhenSessionMatches) return;
                     row[field] = value === true;
-                else if (field === "reasoningEffort" && value === "") delete row.reasoningEffort;
+                } else if (field === "reasoningEffort" && value === "") delete row.reasoningEffort;
                 else if (typeof value === "string") {
                     if (field === "provider" && value !== row.provider) row.model = "";
                     row[field] = value;
@@ -862,6 +895,11 @@ window.__ModuleLoader__.load({
                 this.editPolicyModels(rows.map((old, i) => (i === index ? row : old)));
             }
             canSave() {
+                try {
+                    summarySettingsRows(this.state.rows);
+                } catch {
+                    return false;
+                }
                 return (
                     this.canEdit() &&
                     this.state.dirty &&
@@ -1172,7 +1210,7 @@ window.__ModuleLoader__.load({
                                         "aria-checked": row.preferWhenSessionMatches,
                                         "aria-label": `${rowTitle} · ${t("summarySettingsPrefer")}`,
                                         "aria-describedby": `${rowId}-priority-help`,
-                                        disabled: !editable,
+                                        disabled: !editable || row.onlyWhenSessionMatches,
                                         onChange: (event) =>
                                             controller.change(
                                                 index,
@@ -1201,7 +1239,7 @@ window.__ModuleLoader__.load({
                                         "aria-checked": row.useSessionAgent,
                                         "aria-label": `${rowTitle} · ${t("summarySettingsSessionAgent")}`,
                                         "aria-describedby": `${rowId}-session-agent-help`,
-                                        disabled: !editable,
+                                        disabled: !editable || row.onlyWhenSessionMatches,
                                         onChange: (event) =>
                                             controller.change(
                                                 index,
@@ -1218,6 +1256,38 @@ window.__ModuleLoader__.load({
                                         className: "fc-settings-help",
                                     },
                                     t("summarySettingsSessionAgentHelp"),
+                                ),
+                                h(
+                                    "label",
+                                    {
+                                        className: "fc-settings-priority",
+                                        htmlFor: `${rowId}-only-matching`,
+                                    },
+                                    h("input", {
+                                        type: "checkbox",
+                                        role: "switch",
+                                        id: `${rowId}-only-matching`,
+                                        checked: row.onlyWhenSessionMatches,
+                                        "aria-checked": row.onlyWhenSessionMatches,
+                                        "aria-label": `${rowTitle} · ${t("summarySettingsOnly")}`,
+                                        "aria-describedby": `${rowId}-only-matching-help`,
+                                        disabled: !editable,
+                                        onChange: (event) =>
+                                            controller.change(
+                                                index,
+                                                "onlyWhenSessionMatches",
+                                                event.target.checked,
+                                            ),
+                                    }),
+                                    h("span", null, t("summarySettingsOnly")),
+                                ),
+                                h(
+                                    "p",
+                                    {
+                                        id: `${rowId}-only-matching-help`,
+                                        className: "fc-settings-help",
+                                    },
+                                    t("summarySettingsOnlyHelp"),
                                 ),
                                 h(
                                     "div",

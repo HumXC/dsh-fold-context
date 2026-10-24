@@ -230,7 +230,12 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
     sessionSummaryTarget(agent: Agent) {
         const current = conversationRoute(agent);
         const target = summaryCandidates(this.policySnapshot.models, current)[0];
-        if (!target?.useSessionAgent || !sameSummaryRoute(target, current)) return null;
+        if (
+            !target ||
+            (!target.useSessionAgent && !target.onlyWhenSessionMatches) ||
+            !sameSummaryRoute(target, current)
+        )
+            return null;
         return { ...target, maxTokens: this.foldPolicy.summaryMaxTokens };
     }
     async manualSessionSummaryRange(session: Session, signal?: AbortSignal) {
@@ -1065,7 +1070,22 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         });
         const input = firstSystemSeq !== undefined && head !== null ? [head, ...region] : region;
         const candidates = summaryCandidates(this.policySnapshot.models, conversationRoute(agent));
-        const target = candidates[0]!;
+        if (candidates.length === 0) return wait("no_matching_summary_model");
+        const nativeAdmission =
+            selection === null
+                ? null
+                : await this.sessionSummaries.estimate(
+                      agent,
+                      { start: selection.start, end: selection.end },
+                      signal ?? new AbortController().signal,
+                  );
+        signal?.throwIfAborted();
+        if (session.seq !== revision) return wait("state_changed");
+        const target =
+            nativeAdmission !== null
+                ? candidates[0]!
+                : candidates.find((item) => !item.onlyWhenSessionMatches);
+        if (!target) return wait("session_summary_unavailable");
         const images = await this.summaryImages(
             input.filter((message) => !isSummaryControlNotice(message)),
             target,
@@ -1098,16 +1118,7 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                       framingTokens: 256,
                       totalTokens: projectedTokens + this.pressureState(session).toolsTokens + 256,
                   };
-        const nativeAdmission =
-            selection === null
-                ? null
-                : await this.sessionSummaries.estimate(
-                      agent,
-                      { start: selection.start, end: selection.end },
-                      signal ?? new AbortController().signal,
-                  );
-        signal?.throwIfAborted();
-        if (session.seq !== revision) return wait("state_changed");
+
         const currentInputTokens = Math.max(measurement.totalTokens, measurement.surfaceTokens);
         if (nativeAdmission !== null) {
             const toolsTokens = this.pressureState(session).toolsTokens;
@@ -1290,6 +1301,14 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const failures: Error[] = [];
         for (const target of candidates) {
             signal?.throwIfAborted();
+            if (target.onlyWhenSessionMatches) {
+                failures.push(
+                    new Error(
+                        `${target.provider}/${target.model}: session-only summary unavailable; independent fallback is disabled`,
+                    ),
+                );
+                continue;
+            }
             try {
                 const images = await this.summaryImages(
                     input.messages.filter((message) => !isSummaryControlNotice(message)),
@@ -1339,7 +1358,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         }
         throw new AggregateError(
             failures,
-            `fold-context: all summary models failed: ${failures.map((error) => error.message).join("; ")}`,
+            candidates.length === 0
+                ? "fold-context: no summary model matches this session; configured session-only models were skipped"
+                : `fold-context: all summary models failed: ${failures.map((error) => error.message).join("; ")}`,
         );
     }
 }

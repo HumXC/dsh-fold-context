@@ -1,13 +1,29 @@
 import { z } from "zod";
 import type { LlmCallConfig } from "@deepseek-ai/dsh-llm";
 
-export const summaryModelSchema = z.object({
-    provider: z.string().min(1),
-    model: z.string().min(1),
-    reasoningEffort: z.string().min(1).optional(),
-    preferWhenSessionMatches: z.boolean().default(true),
-    useSessionAgent: z.boolean().default(false),
-});
+export const summaryModelSchema = z
+    .object({
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        reasoningEffort: z.string().min(1).optional(),
+        preferWhenSessionMatches: z.boolean().optional(),
+        useSessionAgent: z.boolean().default(false),
+        onlyWhenSessionMatches: z.boolean().default(false),
+    })
+    .transform((item) => ({
+        ...item,
+        preferWhenSessionMatches: item.preferWhenSessionMatches ?? !item.onlyWhenSessionMatches,
+    }))
+    .refine(
+        (item) =>
+            !item.onlyWhenSessionMatches ||
+            (!item.preferWhenSessionMatches && !item.useSessionAgent),
+        {
+            message:
+                "onlyWhenSessionMatches is mutually exclusive with preferWhenSessionMatches and useSessionAgent",
+            path: ["onlyWhenSessionMatches"],
+        },
+    );
 export type SummaryModel = z.infer<typeof summaryModelSchema>;
 export type SummaryRoute = Pick<LlmCallConfig, "provider" | "model">;
 export const sameSummaryRoute = (
@@ -32,11 +48,16 @@ export function summaryCandidates(
                 model: current.model,
                 preferWhenSessionMatches: true,
                 useSessionAgent: false,
+                onlyWhenSessionMatches: false,
             },
         ];
+    const eligible = models.filter(
+        (item) => !item.onlyWhenSessionMatches || sameSummaryRoute(item, current),
+    );
     const priority = (item: SummaryModel) =>
-        item.preferWhenSessionMatches && sameSummaryRoute(item, current);
-    return [...models.filter(priority), ...models.filter((item) => !priority(item))].map(
+        (item.onlyWhenSessionMatches || item.preferWhenSessionMatches) &&
+        sameSummaryRoute(item, current);
+    return [...eligible.filter(priority), ...eligible.filter((item) => !priority(item))].map(
         (item) => ({ ...item }),
     );
 }

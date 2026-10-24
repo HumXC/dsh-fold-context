@@ -99,7 +99,7 @@ pressure -> release -> remeasure -> summary if still needed
 
 摘要覆盖较旧的连续历史前缀，保留开头的 system 与近期安全尾部。切点须保持工具调用与结果完整；原生 assistant 回放的规划成本参考同一 provider/model 的 output usage。最新主请求 input usage 校准总压力，历史请求的完整 input usage 不累加到选区成本。
 
-摘要路由由 fold 自有 `summaryModels` 有序列表决定。`preferWhenSessionMatches` 默认 `true`，供应商与模型都匹配会话的开启项稳定提前，其余项保持顺序。`useSessionAgent` 默认 `false`，界面标签为 **沿用会话生成摘要**；仅排序后的首个候选显式开启且精确匹配会话供应商、模型时，才允许尝试主 Agent 准备路径。空列表构造跟随会话供应商和模型的独立候选，不启用主 Agent 准备。
+摘要路由由 fold 自有 `summaryModels` 有序列表决定。`preferWhenSessionMatches` 默认 `true`，供应商与模型都匹配会话的开启项稳定提前，其余项保持顺序。`useSessionAgent` 默认 `false`，界面标签为 **沿用会话生成摘要**。`onlyWhenSessionMatches` 默认 `false`，界面标签为 **仅为同模型会话生成摘要**，与前两个选项互斥；它先过滤不匹配的路由，匹配项与优先项一起稳定提前，并强制走会话准备路径。手写第三项为 `true` 且省略优先项时，优先项解析为 `false`，显式冲突则拒绝。仅排序后的首个候选开启会话选项且精确匹配供应商、模型时，才尝试主 Agent 准备。空列表构造跟随会话供应商和模型的独立候选；非空列表过滤后为空时报告 `no_matching_summary_model`，不会补入隐式候选。
 
 显式思考强度用于该摘要项，未指定时使用供应商默认值。profile 根 `uiOnly` 条目提供 `foldContextSettings` 服务，保存 `.volatile()` 列表，preset 内的引擎在摘要规划时读取；没有根服务时使用引擎本地配置。页面通过 settings Remote 的修订号保护写入。引擎保持 `BasicCompactionEngine` 继承，两条生成路径均由官方事务提交 checkpoint。
 
@@ -109,7 +109,7 @@ pressure -> release -> remeasure -> summary if still needed
 
 投影剔除来源标记的控制信息，过滤选区内可安全排除的释放目标，默认省略 reasoning，附件保留归档引用；`summary.reasoning: preserve` 保留历史文字。`summary.images: auto` 只向明确支持图片的路由传原图。这两项输入过滤策略仅适用于独立请求。
 
-候选按顺序执行，模型或传输失败、供应商确认窗口不足、无效/空/截断输出只推进到下一项。用户取消、未分类的内部错误及事务错误直接终止；候选之间不提交失败输出。候选窗口已知时，按估计输入收紧输出预算；估算不足以拒绝输入，超限判断以供应商响应为准。全部失败时保留各候选错误并由官方流程关闭事务。
+独立路径跳过所有 `onlyWhenSessionMatches` 项；其余候选按顺序执行，模型或传输失败、供应商确认窗口不足、无效/空/截断输出只推进到下一项。用户取消、未分类的内部错误及事务错误直接终止；候选之间不提交失败输出。候选窗口已知时，按估计输入收紧输出预算；估算不足以拒绝输入，超限判断以供应商响应为准。全部失败时保留各候选错误并由官方流程关闭事务。
 
 独立请求预算包括过滤后的历史、保留的 system、工具定义和 framing。固定输入、受保护尾部或摘要输出仍可能超过很小的模型窗口；预算规划只能预测，真实主请求 usage 验证结果。
 
@@ -129,7 +129,7 @@ pressure -> release -> remeasure -> summary if still needed
 
 手动 `/compact` 的准备阶段与最终提交也分开：空闲维护阶段用于检查和建立准备计划，退出后才能让主 Agent 运行；不能在持有 maintenance 或 compaction 锁时等待同一 Agent 生成摘要。最终在安全边界提交原范围，并保留辅助回合产生的尾部。
 
-开关关闭或不匹配时直接使用独立请求；主请求窗口不满足、实际 overflow、有限提醒与步骤限制内未提交、主会话模型失败时回退到独立路径。已有请求重试和 overflow 处理器优先决定重试，未接管的失败才进入准备协调器的回退。取消、选区失效和事务错误不冒充成功提交。
+普通项的会话开关关闭或不匹配时使用独立请求。主请求窗口不满足、实际 overflow、有限提醒与步骤限制内未提交、主会话模型失败时回退到允许独立执行的候选，跳过所有仅同模型会话项。只读估算使用实际可用候选的投影；若无法沿用会话且没有独立候选，报告 `session_summary_unavailable` 并等待。手动压缩与安全恢复同样不能绕过仅会话限制。已有请求重试和 overflow 处理器优先决定重试，未接管的失败才进入准备协调器的回退。取消、选区失效和事务错误不冒充成功提交。
 
 主会话路径保留 native replay、历史 reasoning 和原生图片，不应用 `summary.reasoning` 或 `summary.images` 的输入过滤。维护请求可临时使用摘要项的 `maxTokens` 与思考强度；完成、失败或取消后在合法请求边界恢复原始限制，以及这些值是否由适配器默认值管理的状态。`request/header` 只能写在打开的 turn 内；若关闭已完成，则保留持久恢复意图，在重开后的首个 pre-step 恢复。功能卸载后的残留恢复由 Agent scope 的一次性 pre-step 清理承担。所有权随精确 header seq 管理，配置不变的工具目录与系列更新可延续所有权，显式同值设置会撤销恢复权。checkpoint stamp 区分主会话原生准备与独立投影的实际策略。
 

@@ -12,6 +12,7 @@ const route = (provider, model, extra = {}) => ({
     model,
     preferWhenSessionMatches: true,
     useSessionAgent: false,
+    onlyWhenSessionMatches: false,
     ...extra,
 });
 // Exact ModelCatalog wire shape from dsh-api-session-controller/types.d.ts.
@@ -289,6 +290,125 @@ test("catalog uses provider group ids and nested reasoning.efforts with no hardc
     );
 });
 
+test("matching-model-only toggles clear and disable competing modes without restoring them", async () => {
+    const f = fixture([route("openai", "gpt", { useSessionAgent: true, reasoningEffort: "low" })]);
+    await f.controller.start();
+    const onlyLabel = "Summary model 1 · Generate summaries only for matching-model sessions";
+    const competing = [
+        "Summary model 1 · Prioritize when matching the session",
+        "Summary model 1 · Use the session Agent for summaries",
+    ];
+    switchControl(f.client.render(f.controller), onlyLabel).props.onChange({
+        target: { checked: true },
+    });
+    const enabled = route("openai", "gpt", {
+        reasoningEffort: "low",
+        preferWhenSessionMatches: false,
+        onlyWhenSessionMatches: true,
+    });
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), [enabled]);
+    for (const label of competing) {
+        const control = switchControl(f.client.render(f.controller), label);
+        assert.equal(control.props.disabled, true);
+        assert.equal(control.props.checked, false);
+        control.props.onChange({ target: { checked: true } });
+    }
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), [enabled]);
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[0].ops[0].value, [enabled]);
+    await f.controller.loadSettings(true);
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), [enabled]);
+    switchControl(f.client.render(f.controller), onlyLabel).props.onChange({
+        target: { checked: false },
+    });
+    for (const label of competing) {
+        const control = switchControl(f.client.render(f.controller), label);
+        assert.equal(control.props.disabled, false);
+        assert.equal(control.props.checked, false);
+    }
+    assert.equal(await f.controller.save(), true);
+    assert.deepEqual(f.calls[1].ops[0].value, [{ ...enabled, onlyWhenSessionMatches: false }]);
+});
+
+test("matching-model-only controls expose localized labels, help and checked state", async () => {
+    const f = fixture([
+        route("openai", "gpt", {
+            preferWhenSessionMatches: false,
+            onlyWhenSessionMatches: true,
+        }),
+    ]);
+    await f.controller.start();
+    for (const locale of ["en", "zh"]) {
+        f.client.setLanguage(locale);
+        const tree = f.client.render(f.controller);
+        const label =
+            locale === "zh"
+                ? "仅为同模型会话生成摘要"
+                : "Generate summaries only for matching-model sessions";
+        const control = switchControl(
+            tree,
+            `${locale === "zh" ? "摘要模型" : "Summary model"} 1 · ${label}`,
+        );
+        assert.equal(control.props.checked, true);
+        assert.equal(control.props["aria-checked"], true);
+        assert.equal(control.props.disabled, false);
+        assert.ok(
+            nodes(tree).some(
+                (node) => node.type === "label" && node.props.htmlFor === control.props.id,
+            ),
+        );
+        const help = nodes(tree).find(
+            (node) => node.props.id === control.props["aria-describedby"],
+        );
+        assert.match(
+            visibleText(help),
+            locale === "zh" ? /供应商和模型均/ : /both provider and model/,
+        );
+        assert.match(visibleText(help), locale === "zh" ? /会话 Agent/ : /session Agent/);
+        assert.match(visibleText(help), locale === "zh" ? /跳过/ : /skipped/);
+        assert.match(visibleText(help), locale === "zh" ? /互斥/ : /mutually exclusive/);
+        assert.match(visibleText(help), locale === "zh" ? /不会恢复/ : /does not restore/);
+    }
+});
+
+test("matching-model-only rejects nonbooleans and conflicting modes on read and save", async () => {
+    const invalidRows = [
+        ...["true", "false", 1, 0, null, {}, []].map((value) =>
+            route("openai", "gpt", { onlyWhenSessionMatches: value }),
+        ),
+        route("openai", "gpt", { onlyWhenSessionMatches: true }),
+        route("openai", "gpt", {
+            onlyWhenSessionMatches: true,
+            preferWhenSessionMatches: false,
+            useSessionAgent: true,
+        }),
+    ];
+    for (const row of invalidRows) {
+        const invalid = fixture([row]);
+        await invalid.controller.start();
+        assert.equal(invalid.controller.getSnapshot().settingsStatus, "error");
+        assert.equal(await invalid.controller.save(), false);
+        assert.equal(invalid.calls.length, 0);
+        const draft = fixture([route("openai", "gpt")]);
+        await draft.controller.start();
+        draft.controller.edit([row]);
+        assert.equal(draft.controller.canSave(), false);
+        assert.equal(await draft.controller.save(), false);
+        assert.equal(draft.calls.length, 0);
+    }
+});
+
+test("session-only shorthand defaults other modes to off without mutating saved settings", async () => {
+    const row = { provider: "openai", model: "gpt", onlyWhenSessionMatches: true };
+    const f = fixture([row]);
+    await f.controller.start();
+    assert.deepEqual(copy(f.controller.getSnapshot().rows), [
+        route("openai", "gpt", { onlyWhenSessionMatches: true, preferWhenSessionMatches: false }),
+    ]);
+    assert.equal(f.controller.getSnapshot().dirty, false);
+    assert.deepEqual(f.getEntry().value.summaryModels, [row]);
+});
+
 test("omitted session-Agent flags default to off without changing saved settings", async () => {
     const legacy = {
         provider: "openai",
@@ -305,6 +425,11 @@ test("omitted session-Agent flags default to off without changing saved settings
     assert.equal(f.controller.canSave(), false);
     assert.deepEqual(f.getEntry().value.summaryModels, [legacy]);
     assert.equal(Object.hasOwn(f.getEntry().value.summaryModels[0], "useSessionAgent"), false);
+    assert.equal(
+        Object.hasOwn(f.getEntry().value.summaryModels[0], "onlyWhenSessionMatches"),
+        false,
+    );
+    assert.equal(f.controller.getSnapshot().rows[0].onlyWhenSessionMatches, false);
     const control = switchControl(
         f.client.render(f.controller),
         "Summary model 1 · Use the session Agent for summaries",
@@ -394,6 +519,7 @@ test("add, dependent choices, toggle, reorder and delete stage one revision-fenc
     f.controller.add();
     assert.equal(f.controller.getSnapshot().rows[1].preferWhenSessionMatches, true);
     assert.equal(f.controller.getSnapshot().rows[1].useSessionAgent, false);
+    assert.equal(f.controller.getSnapshot().rows[1].onlyWhenSessionMatches, false);
     assert.equal(
         switchControl(
             f.client.render(f.controller),
@@ -494,9 +620,9 @@ test("page controls have distinct accessible names, matching labels and stable b
     for (const input of nodes(english).filter((node) => ["input", "select"].includes(node.type)))
         assert.ok(labels.some((label) => label.props.htmlFor === input.props.id));
     const switches = nodes(english).filter((node) => node.props.role === "switch");
-    assert.equal(switches.length, 4);
-    assert.equal(new Set(switches.map((control) => control.props.id)).size, 4);
-    assert.equal(new Set(switches.map((control) => control.props["aria-label"])).size, 4);
+    assert.equal(switches.length, 6);
+    assert.equal(new Set(switches.map((control) => control.props.id)).size, 6);
+    assert.equal(new Set(switches.map((control) => control.props["aria-label"])).size, 6);
     const firstPriority = switchControl(
         english,
         "Summary model 1 · Prioritize when matching the session",
