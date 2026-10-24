@@ -6,7 +6,7 @@
 
 适合持续阅读文件、调用工具、反复调查和跨多轮推进的任务。模型负责判断证据是否仍有用；插件负责排队、缓存感知调度、压力检查和提交。
 
-> 当前版本为 `0.3.1`，支持 DSH `0.2.0-rc.2`。提供纯数字 ID、独立控制消息、释放调度与摘要；普通控制意图使用 v8 回执，PTC 使用 v9 原生意图记录。真实模型摘要质量、供应商缓存与节费效果需要实际评估。记忆适配接口已经提供，自动提炼与 Mnemon 集成尚未实现。
+> 当前版本为 `0.3.2`，支持 DSH `0.2.0-rc.2`。提供纯数字 ID、独立控制消息、释放调度与摘要；普通控制意图使用 v8 回执，PTC 使用 v9 原生意图记录。真实模型摘要质量、供应商缓存与节费效果需要实际评估。记忆适配接口已经提供，自动提炼与 Mnemon 集成尚未实现。
 
 ## 能做什么
 
@@ -341,11 +341,11 @@ GitHub Actions 使用 Node.js 24，并读取 `packageManager` 中锁定的 pnpm 
 - 每次成功构建保留 14 天的 Actions artifact，包含 `dsh-fold-context.tgz` 和 `SHA256SUMS`。
 - 推送 `v*` 标签时，先校验标签与 `package.json` 的版本一致，再执行相同检查。通过后自动创建 GitHub Release，上传安装包和校验文件；带 `-` 的版本标记为 prerelease。
 
-发布前先提交版本与代码，再推送对应标签。例如当前包版本为 `0.3.1` 时：
+发布前先提交版本与代码，再推送对应标签。例如当前包版本为 `0.3.2` 时：
 
 ```bash
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
 工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需额外配置发布凭据。发布后的安装包可从 [GitHub Releases](https://github.com/HumXC/dsh-fold-context/releases) 下载；将安装包和 `SHA256SUMS` 放在同一目录后，执行 `sha256sum --check SHA256SUMS` 校验，再通过 DSH 插件管理安装。

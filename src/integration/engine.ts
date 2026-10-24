@@ -373,6 +373,15 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
             );
         await this.releaseBatch(agent, signal, coveredRebuild ? "rebuild" : undefined);
         if (!requested && !this.autoEnabled) return null;
+        // Release may have changed pressure. Skip auxiliary planning only when
+        // fresh pressure and pending intent both rule out ordinary compaction.
+        if (
+            !requested &&
+            budget !== null &&
+            this.measurement(agent.session).totalTokens < budget.threshold &&
+            !this.state(agent.session).entries.some((entry) => entry.status === "queued")
+        )
+            return null;
         let scheduled = await this.inspectSchedule(agent, signal, opportunity);
         signal.throwIfAborted();
         if (
@@ -681,10 +690,9 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         measurement: ReturnType<ContextCompressionEngine["measurement"]>,
         retain: number,
         cut: SessionCut,
+        protectedStart = this.protectedTailStart(session, cut),
     ) {
-        const allowedCuts = new Set(
-            cut.surface.slice(0, this.protectedTailStart(session, cut) + 1),
-        );
+        const allowedCuts = new Set(cut.surface.slice(0, protectedStart + 1));
         const headSeq = measurement.nodes[0]?.seq;
         const headEvent = headSeq === undefined ? undefined : cut.events.get(headSeq);
         const head = headEvent === undefined ? null : session.deriveEventMessage(headEvent);
@@ -1002,15 +1010,20 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
         const head = headEvent === undefined ? null : session.deriveEventMessage(headEvent);
         const firstSystemSeq = head?.role === "system" ? headSeq : undefined;
         const retentionTokens = this.retentionTokens(session, retain, threshold);
-        const selection = this.pressureRange(session, measurement, retentionTokens, cut);
+        const protectedStart = this.protectedTailStart(session, cut);
+        const selection = this.pressureRange(
+            session,
+            measurement,
+            retentionTokens,
+            cut,
+            protectedStart,
+        );
         const headerOverheadTokens = Math.max(
             0,
             measurement.totalTokens - measurement.surfaceTokens,
         );
         const systemHeadTokens = firstSystemSeq === undefined ? 0 : measurement.nodes[0]!.tokens;
-        const protectedSeqs = new Set<number>(
-            cut.surface.slice(this.protectedTailStart(session, cut)),
-        );
+        const protectedSeqs = new Set<number>(cut.surface.slice(protectedStart));
         const protectedTailTokens = measurement.nodes.reduce(
             (total, node) =>
                 total +
@@ -1086,40 +1099,38 @@ export class ContextCompressionEngine extends BasicCompactionEngine {
                 ? candidates[0]!
                 : candidates.find((item) => !item.onlyWhenSessionMatches);
         if (!target) return wait("session_summary_unavailable");
-        const images = await this.summaryImages(
-            input.filter((message) => !isSummaryControlNotice(message)),
-            target,
-            signal,
-        );
-        signal?.throwIfAborted();
-        if (session.seq !== revision) return wait("state_changed");
-        const projected =
-            selection === null
-                ? []
-                : this.summaryProjection(input, agent, revision, images).messages;
-        // Include the preserved system head and request envelope in the auxiliary call estimate.
-        // The fixed allowance covers the official instruction and checkpoint framing.
-        const projectedTokens = projected.reduce(
-            (total, message) => total + this.ctx.tokenMeter.estimateMessage(message),
-            0,
-        );
+        const currentInputTokens = Math.max(measurement.totalTokens, measurement.surfaceTokens);
         const systemTokens =
             selection === null || firstSystemSeq === undefined
                 ? 0
                 : this.ctx.tokenMeter.estimateMessage(head!);
-        let summaryInput: SummaryInputEstimate | null =
-            selection === null
-                ? null
-                : {
-                      execution: "independent",
-                      historyTokens: projectedTokens - systemTokens,
-                      systemTokens,
-                      toolsTokens: this.pressureState(session).toolsTokens,
-                      framingTokens: 256,
-                      totalTokens: projectedTokens + this.pressureState(session).toolsTokens + 256,
-                  };
-
-        const currentInputTokens = Math.max(measurement.totalTokens, measurement.surfaceTokens);
+        let images: "native" | "references" = "native";
+        let summaryInput: SummaryInputEstimate | null = null;
+        if (nativeAdmission === null) {
+            images = await this.summaryImages(
+                input.filter((message) => !isSummaryControlNotice(message)),
+                target,
+                signal,
+            );
+            signal?.throwIfAborted();
+            if (session.seq !== revision) return wait("state_changed");
+            if (selection !== null) {
+                const projected = this.summaryProjection(input, agent, revision, images).messages;
+                const projectedTokens = projected.reduce(
+                    (total, message) => total + this.ctx.tokenMeter.estimateMessage(message),
+                    0,
+                );
+                // Include the preserved head, tools and official instruction framing.
+                summaryInput = {
+                    execution: "independent",
+                    historyTokens: projectedTokens - systemTokens,
+                    systemTokens,
+                    toolsTokens: this.pressureState(session).toolsTokens,
+                    framingTokens: 256,
+                    totalTokens: projectedTokens + this.pressureState(session).toolsTokens + 256,
+                };
+            }
+        }
         if (nativeAdmission !== null) {
             const toolsTokens = this.pressureState(session).toolsTokens;
             const framingTokens = Math.max(0, nativeAdmission.inputTokens - currentInputTokens);

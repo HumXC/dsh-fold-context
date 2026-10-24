@@ -827,20 +827,14 @@ export class SessionSummaryCoordinator {
         const originalDefaults = restoring
             ? restoring.originalAdapterDefaults
             : requestHeader?.adapterDefaults;
-        let frozen: ReturnType<typeof freezeSummaryRange>;
-        try {
-            frozen = freezeSummaryRange(
+        const freeze = (snapshot: typeof cut) =>
+            freezeSummaryRange(
                 agent.session,
                 this.engine.state(agent.session).numbering,
                 range,
-                cut,
+                snapshot,
             );
-        } catch (error) {
-            // A probe declines a stale range; prepare retains its existing error behavior.
-            if (register) throw error;
-            return null;
-        }
-        const plan: SessionSummaryPlan = {
+        const makePlan = (frozen: ReturnType<typeof freezeSummaryRange>): SessionSummaryPlan => ({
             checkpointId: randomUUID(),
             range: frozen,
             provider: target.provider,
@@ -854,8 +848,11 @@ export class SessionSummaryCoordinator {
             originalAdapterDefaults: originalDefaults ? { ...originalDefaults } : null,
             manual,
             sourceCommandId: sourceCommandId ?? null,
-        };
-        if (register) {
+        });
+        // Probes freeze once after asynchronous preparation. Registered plans keep
+        // their original selection and must revalidate it after preparation.
+        let plan = register ? makePlan(freeze(cut)) : null;
+        if (plan) {
             // Track before asynchronous model preparation so disposal can cancel it.
             this.track(agent, plan);
             const controller = new AbortController();
@@ -865,14 +862,16 @@ export class SessionSummaryCoordinator {
         let ready = false;
         try {
             let contextWindow: number | undefined;
+            let maxTokens = target.maxTokens;
+            let reasoningEffort = target.reasoningEffort ?? null;
             try {
                 const resolved = await this.ctx.llm.prepareCall(
-                    this.withLimits(header, plan.maxTokens, plan.reasoningEffort),
+                    this.withLimits(header, maxTokens, reasoningEffort),
                     signal,
                 );
                 contextWindow = resolved.context?.contextWindow;
-                plan.maxTokens = resolved.config.maxTokens ?? plan.maxTokens;
-                plan.reasoningEffort = resolved.config.reasoningEffort ?? null;
+                maxTokens = resolved.config.maxTokens ?? maxTokens;
+                reasoningEffort = resolved.config.reasoningEffort ?? null;
             } catch {
                 signal.throwIfAborted();
                 return null;
@@ -891,17 +890,26 @@ export class SessionSummaryCoordinator {
                 JSON.stringify(agent.session.requestHeader()) !== headerIdentity
             )
                 return null;
+            if (plan === null) {
+                try {
+                    plan = makePlan(freeze(validationCut));
+                } catch {
+                    return null;
+                }
+            }
+            plan.maxTokens = maxTokens;
+            plan.reasoningEffort = reasoningEffort;
             const measured = this.ctx.tokenMeter.measure(agent.session);
             const inputTokens =
                 Math.max(measured.totalTokens, measured.surfaceTokens) +
                 estimateMessage(sessionSummaryInstruction(plan));
+            if (!contextWindow || inputTokens + plan.maxTokens >= contextWindow) return null;
             if (
-                !contextWindow ||
-                inputTokens + plan.maxTokens >= contextWindow ||
+                register &&
                 !validateSummaryRange(
                     agent.session,
                     this.engine.state(agent.session).numbering,
-                    frozen,
+                    plan.range,
                     validationCut,
                 ).valid
             )
@@ -910,7 +918,7 @@ export class SessionSummaryCoordinator {
             ready = true;
             return { plan, inputTokens };
         } finally {
-            if (register && !ready) {
+            if (register && !ready && plan) {
                 this.controllers.delete(plan.checkpointId);
                 if (this.plans.get(agent) === plan) this.plans.delete(agent);
             }
