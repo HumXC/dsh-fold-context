@@ -131,7 +131,7 @@ pressure -> release -> remeasure -> summary if still needed
 
 普通项的会话开关关闭或不匹配时使用独立请求。主请求窗口不满足、实际 overflow、有限提醒与步骤限制内未提交、主会话模型失败时回退到允许独立执行的候选，跳过所有仅同模型会话项。只读估算使用实际可用候选的投影；若无法沿用会话且没有独立候选，报告 `session_summary_unavailable` 并等待。手动压缩与安全恢复同样不能绕过仅会话限制。已有请求重试和 overflow 处理器优先决定重试，未接管的失败才进入准备协调器的回退。取消、选区失效和事务错误不冒充成功提交。
 
-主会话路径保留 native replay、历史 reasoning 和原生图片，不应用 `summary.reasoning` 或 `summary.images` 的输入过滤。维护请求可临时使用摘要项的 `maxTokens` 与思考强度；完成、失败或取消后在合法请求边界恢复原始限制，以及这些值是否由适配器默认值管理的状态。`request/header` 只能写在打开的 turn 内；若关闭已完成，则保留持久恢复意图，在重开后的首个 pre-step 恢复。功能卸载后的残留恢复由 Agent scope 的一次性 pre-step 清理承担。所有权随精确 header seq 管理，配置不变的工具目录与系列更新可延续所有权，显式同值设置会撤销恢复权。checkpoint stamp 区分主会话原生准备与独立投影的实际策略。
+主会话路径保留 native replay、历史 reasoning 和原生图片，不应用 `summary.reasoning` 或 `summary.images` 的输入过滤。维护请求可临时使用摘要项的 `maxTokens` 与思考强度；完成、失败或取消后在合法请求边界恢复原始限制，以及这些值是否由适配器默认值管理的状态。`request/header` 只能写在打开的 turn 内；若关闭已完成，则保留持久恢复意图，在重开后的提示词组装入口恢复，早于模型选择中间件捕获请求配置。功能卸载后的残留恢复由 Agent scope 的组装入口清理承担。失败回退若在同一步内重试，则用绑定 Agent、turn、step、checkpoint 与恢复头序号的临时凭据纠正旧快照；新组装、步骤结束、外部请求头或 Web 的显式 `model/selection` 会使其失效。所有权随精确 header seq 管理，配置不变的工具目录与系列更新可延续所有权，显式同值设置会撤销恢复权。checkpoint stamp 区分主会话原生准备与独立投影的实际策略。
 
 准备计划只有在精确匹配范围与摘要正文的官方 checkpoint 替换后，才写入 `contextSessionSummary.committedCheckpoints`；后续准备失败、取消或覆盖 `active` 不撤销先前凭据。事务结束且没有未完成准备时，`contextSessionSummaryControls` 投影提供当前 surface 中的控制 notice 和完整纯管理调用组。后续 `agent/request` 先持久追加 `compaction/prune` 与空 `developer/message` 替换记录，移除匹配 checkpoint 的准备指令、提醒和纯提交调用组；不在已经冻结的 LLM request 上过滤消息。`context_compact` 则以账本中对应请求已被官方摘要标记 `applied` 为清理条件。只有排队回执、取消或失败均不足以授权成功清理。
 

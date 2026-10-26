@@ -112,6 +112,17 @@ export class SessionSummaryCoordinator {
     private readonly committing = new Map<string, Promise<CompactionResult | null>>();
     private readonly closedAgents = new WeakSet<Agent>();
     private readonly trackedAgents = new WeakSet<Agent>();
+    private readonly selectedDuringSummary = new WeakSet<Agent>();
+    private readonly restoredHeaders = new WeakMap<Agent, number>();
+    private readonly retryRestorations = new WeakMap<
+        Agent,
+        {
+            plan: SessionSummaryPlan;
+            turn: number;
+            step: number;
+            headerSeq: number;
+        }
+    >();
     private readonly projections: Context["sessionProjections"];
     private readonly sessionStore: Context["sessions"];
     private readonly sessionQuery: Context["sessionQuery"];
@@ -129,6 +140,11 @@ export class SessionSummaryCoordinator {
         this.projections.register(sessionSummaryProjection);
         this.projections.register(sessionSummaryControlsProjection);
         registerSessionSummaryCleanup(ctx, engine);
+        ctx.on("agent/created", ({ agent }) => {
+            const active = this.state(agent.session).active;
+            if (active) this.track(agent, active.plan);
+            return undefined;
+        });
         ctx.on(
             "agent/pre-step",
             async ({ agent, messages, signal }, next) => {
@@ -293,7 +309,7 @@ export class SessionSummaryCoordinator {
         );
         ctx.on(
             "agent/request-error",
-            async ({ agent, signal }, next) => {
+            async ({ agent, signal, turn, step }, next) => {
                 const inherited = await next();
                 if (inherited !== undefined || !this.alive(agent)) return inherited;
                 const active = this.state(agent.session).active;
@@ -304,7 +320,17 @@ export class SessionSummaryCoordinator {
                     this.cancelled(active.plan)
                 )
                     return undefined;
+                const firstRestoreSeq = agent.session.seq;
                 const result = await this.finish(agent, active.plan, null, signal, "retry");
+                const headerSeq = this.restoredHeaders.get(agent);
+                if (
+                    result !== null &&
+                    headerSeq !== undefined &&
+                    headerSeq >= firstRestoreSeq &&
+                    headerSeq === this.state(agent.session).lastHeaderSeq &&
+                    !this.selectedDuringSummary.has(agent)
+                )
+                    this.retryRestorations.set(agent, { plan: active.plan, turn, step, headerSeq });
                 return result === null ? undefined : { kind: "retry" as const };
             },
             true,
@@ -462,6 +488,8 @@ export class SessionSummaryCoordinator {
         ctx.effect(() => () => this.dispose());
     }
     private track(agent: Agent, plan: SessionSummaryPlan): void {
+        if (this.plans.get(agent)?.checkpointId !== plan.checkpointId)
+            this.selectedDuringSummary.delete(agent);
         this.plans.set(agent, plan);
         if (this.trackedAgents.has(agent) || this.agentClosing(agent)) return;
         const scope = agent.ctx;
@@ -472,6 +500,15 @@ export class SessionSummaryCoordinator {
             (session, event) => {
                 if (session !== agent.session) return;
                 this.rememberEvent(session, event);
+                // Web records pending choices before applying them at assembly.
+                // A user-picked low is indistinguishable from a stale helper low
+                // in the final config, so it must revoke the retry correction.
+                if ((event.type as string) === "model/selection") {
+                    this.selectedDuringSummary.add(agent);
+                    this.retryRestorations.delete(agent);
+                }
+                if (event.type === "step/end" || event.type === "turn/end")
+                    this.retryRestorations.delete(agent);
                 const active = this.detachedStates.get(session)?.active;
                 if (
                     this.disposed &&
@@ -487,6 +524,33 @@ export class SessionSummaryCoordinator {
             { prepend: true },
         );
         this.trackedAgents.add(agent);
+        // A failed helper can resume inside the same step without another assembly.
+        // Run outside model-selection middleware and correct only our exact restore.
+        this.ctx.effect(() =>
+            scope.on(
+                "agent/request",
+                async ({ agent: current, turn, step }, next) => {
+                    const config = await next();
+                    const retry = this.retryRestorations.get(agent);
+                    if (!retry || current !== agent || !this.alive(agent)) return config;
+                    if (
+                        retry.turn !== turn ||
+                        retry.step !== step ||
+                        retry.headerSeq !== this.state(agent.session).lastHeaderSeq ||
+                        this.state(agent.session).active?.plan.checkpointId !==
+                            retry.plan.checkpointId
+                    ) {
+                        this.retryRestorations.delete(agent);
+                        return config;
+                    }
+                    return sameSummaryRoute(config, retry.plan) &&
+                        (config.reasoningEffort ?? null) === retry.plan.reasoningEffort
+                        ? this.originalLimits(config, retry.plan)
+                        : config;
+                },
+                { prepend: true },
+            ),
+        );
         // Scope cleanup runs before registry detach, but explicit handle disposal
         // may already have ended its turn. Read the latest plan and defer closed
         // header restoration rather than capturing this first checkpoint.
@@ -502,16 +566,20 @@ export class SessionSummaryCoordinator {
             this.closeAgent(agent);
             await this.sessionStore.flush(agent.session);
         });
-        // An idle turn may already have ended before feature unload. Keep its
-        // durable restoration intent until the next legal ordinary pre-step.
+        // Restore before model-selection middleware snapshots the next request.
+        // pre-step runs after assembly and cannot undo a captured helper effort.
+        // Keep this scope-owned hook alive through feature unload until restoration.
         let stopRestoring: (() => void) | undefined;
         stopRestoring = scope.on(
-            "agent/pre-step",
-            async ({ agent: current }, next) => {
-                if (current === agent && this.disposed) {
-                    await this.refreshDetachedState(agent.session);
-                    const active = this.state(agent.session).active;
-                    if (active?.restorePending) this.restoreHeader(agent, active.plan);
+            "system-prompt/assemble",
+            async (_assembly, context, next) => {
+                context.signal?.throwIfAborted();
+                this.retryRestorations.delete(agent);
+                if (this.disposed) await this.refreshDetachedState(agent.session);
+                const active = this.state(agent.session).active;
+                if (active?.restorePending && (this.disposed || active.phase !== "requested"))
+                    this.restoreHeader(agent, active.plan);
+                if (this.disposed) {
                     const remaining = this.state(agent.session).active;
                     if (
                         !remaining?.restorePending ||
@@ -724,6 +792,7 @@ export class SessionSummaryCoordinator {
                 reason: "change",
             });
             this.rememberEvent(agent.session, event);
+            this.restoredHeaders.set(agent, event.seq);
         }
     }
     private cancelled(plan: SessionSummaryPlan): boolean {

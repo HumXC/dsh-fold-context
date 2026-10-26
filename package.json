@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-context",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Predictable context compression and recoverable evidence for DSH",
   "packageManager": "pnpm@11.15.0",
   "type": "module",
